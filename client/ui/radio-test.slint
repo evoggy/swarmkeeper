@@ -1,0 +1,339 @@
+import { VerticalBox, HorizontalBox, ComboBox, Button, Palette } from "std-widgets.slint";
+
+export struct ChannelResult {
+    ack-rate: float,
+    rssi: float,
+}
+
+export component RadioTestContent inherits Rectangle {
+    in property <[string]> unit-names;
+    in-out property <int> selected-unit: 0;
+    in property <bool> running;
+    in property <bool> swarm-connected;
+    in property <float> progress;
+    in property <string> status-text: "Ready";
+    in property <[ChannelResult]> results;
+
+    callback run-test(/* unit index */ int);
+
+    VerticalBox {
+        padding: 16px;
+        spacing: 12px;
+
+        // Controls row
+        HorizontalBox {
+            spacing: 12px;
+            alignment: start;
+
+            Text {
+                text: "Unit:";
+                font-size: 14px;
+                vertical-alignment: center;
+            }
+
+            ComboBox {
+                width: 200px;
+                model: unit-names;
+                current-index <=> selected-unit;
+            }
+
+            Button {
+                text: running ? "Running..." : "Run Test";
+                enabled: !running && !swarm-connected && unit-names.length > 0;
+                clicked => { run-test(selected-unit); }
+            }
+
+            if swarm-connected: Text {
+                text: "Disconnect the swarm first";
+                font-size: 12px;
+                color: Palette.foreground.transparentize(0.4);
+                vertical-alignment: center;
+            }
+        }
+
+        // Progress bar (visible during test)
+        if running: HorizontalBox {
+            spacing: 8px;
+
+            Text {
+                text: status-text;
+                font-size: 12px;
+                color: Palette.foreground.transparentize(0.3);
+                vertical-alignment: center;
+            }
+
+            Rectangle {
+                height: 8px;
+                border-radius: 4px;
+                background: Palette.border;
+
+                Rectangle {
+                    x: 0px;
+                    width: parent.width * progress;
+                    height: parent.height;
+                    border-radius: 4px;
+                    background: dodgerblue;
+                }
+            }
+
+            Text {
+                text: "\{round(progress * 100)}%";
+                font-size: 12px;
+                color: Palette.foreground.transparentize(0.3);
+                vertical-alignment: center;
+                width: 40px;
+            }
+        }
+
+        // Status when not running
+        if !running && results.length > 0: Text {
+            text: status-text;
+            font-size: 12px;
+            color: Palette.foreground.transparentize(0.3);
+        }
+
+        // ACK Rate chart
+        VerticalBox {
+            spacing: 4px;
+            vertical-stretch: 1;
+
+            Text {
+                text: "ACK Rate";
+                font-size: 13px;
+                font-weight: 600;
+            }
+
+            HorizontalBox {
+                spacing: 0px;
+
+                // Y axis labels
+                VerticalLayout {
+                    width: 40px;
+                    alignment: space-between;
+
+                    Text {
+                        text: "100%";
+                        font-size: 10px;
+                        color: Palette.foreground.transparentize(0.4);
+                        horizontal-alignment: right;
+                    }
+                    Text {
+                        text: "50%";
+                        font-size: 10px;
+                        color: Palette.foreground.transparentize(0.4);
+                        horizontal-alignment: right;
+                    }
+                    Text {
+                        text: "0%";
+                        font-size: 10px;
+                        color: Palette.foreground.transparentize(0.4);
+                        horizontal-alignment: right;
+                    }
+                }
+
+                // Bar chart area
+                Rectangle {
+                    border-width: 1px;
+                    border-color: Palette.border;
+                    clip: true;
+
+                    // 50% gridline
+                    Rectangle {
+                        y: parent.height * 0.5;
+                        width: 100%;
+                        height: 1px;
+                        background: Palette.border;
+                    }
+
+                    HorizontalLayout {
+                        padding-left: 2px;
+                        padding-right: 2px;
+                        spacing: 0px;
+
+                        for result[index] in results: Rectangle {
+                            // Each bar
+                            Rectangle {
+                                width: 100%;
+                                height: parent.height * result.ack-rate;
+                                y: parent.height - self.height;
+                                background: dodgerblue;
+                            }
+                        }
+                    }
+                }
+            }
+
+            // X axis labels
+            HorizontalBox {
+                spacing: 0px;
+
+                // Spacer for Y axis label width
+                Rectangle { width: 40px; }
+
+                Rectangle {
+                    HorizontalLayout {
+                        alignment: space-between;
+                        padding-left: 2px;
+                        padding-right: 2px;
+
+                        Text { text: "0"; font-size: 9px; color: Palette.foreground.transparentize(0.4); }
+                        Text { text: "20"; font-size: 9px; color: Palette.foreground.transparentize(0.4); }
+                        Text { text: "40"; font-size: 9px; color: Palette.foreground.transparentize(0.4); }
+                        Text { text: "60"; font-size: 9px; color: Palette.foreground.transparentize(0.4); }
+                        Text { text: "80"; font-size: 9px; color: Palette.foreground.transparentize(0.4); }
+                    }
+                }
+            }
+
+            Text {
+                text: "Channel";
+                font-size: 11px;
+                color: Palette.foreground.transparentize(0.4);
+                horizontal-alignment: center;
+            }
+        }
+
+        // RSSI chart
+        VerticalBox {
+            spacing: 4px;
+            vertical-stretch: 1;
+
+            Text {
+                text: "RSSI (dBm)";
+                font-size: 13px;
+                font-weight: 600;
+            }
+
+            HorizontalBox {
+                spacing: 0px;
+
+                // Y axis labels (taller = stronger signal)
+                VerticalLayout {
+                    width: 40px;
+                    alignment: space-between;
+
+                    Text {
+                        text: "0";
+                        font-size: 10px;
+                        color: Palette.foreground.transparentize(0.4);
+                        horizontal-alignment: right;
+                    }
+                    Text {
+                        text: "-45";
+                        font-size: 10px;
+                        color: Palette.foreground.transparentize(0.4);
+                        horizontal-alignment: right;
+                    }
+                    Text {
+                        text: "-90";
+                        font-size: 10px;
+                        color: Palette.foreground.transparentize(0.4);
+                        horizontal-alignment: right;
+                    }
+                }
+
+                // Bar chart area
+                Rectangle {
+                    border-width: 1px;
+                    border-color: Palette.border;
+                    clip: true;
+
+                    // -45 dBm gridline
+                    Rectangle {
+                        y: parent.height * 0.5;
+                        width: 100%;
+                        height: 1px;
+                        background: Palette.border;
+                    }
+
+                    HorizontalLayout {
+                        padding-left: 2px;
+                        padding-right: 2px;
+                        spacing: 0px;
+
+                        for result[index] in results: Rectangle {
+                            // RSSI bar: inverted so taller = stronger signal
+                            // 0 dBm (strongest) = full bar, -90 dBm (weakest) = no bar
+                            property <float> rssi-height: result.rssi < 0.0 ? clamp(1.0 - (-result.rssi / 90.0), 0.0, 1.0) : 0.0;
+
+                            Rectangle {
+                                width: 100%;
+                                height: parent.height * rssi-height;
+                                y: parent.height - self.height;
+                                background: #e8832a;
+                            }
+                        }
+                    }
+                }
+            }
+
+            // X axis labels
+            HorizontalBox {
+                spacing: 0px;
+
+                Rectangle { width: 40px; }
+
+                Rectangle {
+                    HorizontalLayout {
+                        alignment: space-between;
+                        padding-left: 2px;
+                        padding-right: 2px;
+
+                        Text { text: "0"; font-size: 9px; color: Palette.foreground.transparentize(0.4); }
+                        Text { text: "20"; font-size: 9px; color: Palette.foreground.transparentize(0.4); }
+                        Text { text: "40"; font-size: 9px; color: Palette.foreground.transparentize(0.4); }
+                        Text { text: "60"; font-size: 9px; color: Palette.foreground.transparentize(0.4); }
+                        Text { text: "80"; font-size: 9px; color: Palette.foreground.transparentize(0.4); }
+                    }
+                }
+            }
+
+            Text {
+                text: "Channel";
+                font-size: 11px;
+                color: Palette.foreground.transparentize(0.4);
+                horizontal-alignment: center;
+            }
+        }
+
+        // Legend
+        HorizontalBox {
+            spacing: 16px;
+            alignment: center;
+
+            HorizontalBox {
+                spacing: 4px;
+
+                Rectangle {
+                    width: 12px;
+                    height: 12px;
+                    border-radius: 2px;
+                    background: dodgerblue;
+                    y: (parent.height - self.height) / 2;
+                }
+                Text {
+                    text: "ACK Rate";
+                    font-size: 11px;
+                    vertical-alignment: center;
+                }
+            }
+
+            HorizontalBox {
+                spacing: 4px;
+
+                Rectangle {
+                    width: 12px;
+                    height: 12px;
+                    border-radius: 2px;
+                    background: #e8832a;
+                    y: (parent.height - self.height) / 2;
+                }
+                Text {
+                    text: "RSSI";
+                    font-size: 11px;
+                    vertical-alignment: center;
+                }
+            }
+        }
+    }
+}

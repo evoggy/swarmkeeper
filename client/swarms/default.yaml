@@ -1,0 +1,6 @@
+name: My default swarm
+description: A swarm containing one Crazyflie
+units:
+  - uri: radio://0/80/2M/E7E7E7E7E7
+    name: CF-01
+    description: My default Crazyflie

@@ -1,0 +1,163 @@
+import { HorizontalBox, VerticalBox, Palette } from "std-widgets.slint";
+
+export enum UnitState { disconnected, connected, charging, charged, flying, crashed, error }
+
+export struct JournalEntryData {
+    timestamp: string,
+    text: string,
+}
+
+export struct UnitData {
+    name: string,
+    uri: string,
+    description: string,
+    state: UnitState,
+    pos-x: float,
+    pos-y: float,
+    pos-z: float,
+    battery-voltage: float,
+    deck-lighthouse: bool,
+    deck-loco: bool,
+    deck-led-top: bool,
+    deck-led-bottom: bool,
+    serial: string,
+    pm-state: string,
+    supervisor-info: int,
+    supervisor-state: string,
+    journal-entry-count: int,
+    platform-type: string,
+    firmware-version: string,
+    link-quality: float,
+    uplink-rate: float,
+    downlink-rate: float,
+    radio-send-rate: float,
+    avg-retries: float,
+    rssi: float,
+    has-rssi: bool,
+    error-message: string,
+    identifying: bool,
+    selftest-passed: bool,
+}
+
+export component UnitCard inherits Rectangle {
+    in property <UnitData> unit;
+
+    property <string> state-text: unit.state == UnitState.disconnected ? "Disconnected"
+                                : unit.state == UnitState.connected ? "Connected"
+                                : unit.state == UnitState.charging ? "Charging"
+                                : unit.state == UnitState.charged ? "Charged"
+                                : unit.state == UnitState.flying ? "Flying"
+                                : unit.state == UnitState.error ? unit.error-message
+                                : "Crashed";
+
+    property <color> state-color: unit.state == UnitState.disconnected ? gray
+                                : unit.state == UnitState.connected ? dodgerblue
+                                : unit.state == UnitState.charging ? orange
+                                : unit.state == UnitState.charged ? limegreen
+                                : unit.state == UnitState.flying ? limegreen
+                                : unit.state == UnitState.error ? red
+                                : red;
+
+    border-radius: 8px;
+    border-width: 1px;
+    border-color: Palette.border;
+    height: 80px;
+
+    HorizontalBox {
+        padding: 12px;
+        spacing: 12px;
+
+        // State indicator dot
+        Rectangle {
+            width: 12px;
+            height: 12px;
+            border-radius: 6px;
+            background: state-color;
+            y: (parent.height - self.height) / 2;
+        }
+
+        // Name, URI, state
+        VerticalBox {
+            spacing: 2px;
+            horizontal-stretch: 1;
+
+            Text {
+                text: unit.name;
+                font-size: 14px;
+                font-weight: 600;
+            }
+
+            Text {
+                text: unit.uri;
+                font-size: 11px;
+                color: Palette.foreground.transparentize(0.4);
+            }
+
+            Text {
+                text: state-text;
+                font-size: 11px;
+                color: state-color;
+            }
+        }
+
+        // Position
+        VerticalBox {
+            spacing: 2px;
+            horizontal-stretch: 0;
+
+            Text {
+                text: "x: \{round(unit.pos-x * 100) / 100}";
+                font-size: 11px;
+                color: Palette.foreground.transparentize(0.4);
+            }
+            Text {
+                text: "y: \{round(unit.pos-y * 100) / 100}";
+                font-size: 11px;
+                color: Palette.foreground.transparentize(0.4);
+            }
+            Text {
+                text: "z: \{round(unit.pos-z * 100) / 100}";
+                font-size: 11px;
+                color: Palette.foreground.transparentize(0.4);
+            }
+        }
+
+        // Battery meter
+        VerticalBox {
+            spacing: 2px;
+            horizontal-stretch: 0;
+            alignment: center;
+
+            // Battery level mapped from voltage: 3.0V = 0%, 4.2V = 100%
+            property <float> battery-level: clamp((unit.battery-voltage - 3.0) / 1.2, 0.0, 1.0);
+            property <color> battery-color: battery-level < 0.2 ? red
+                                          : battery-level < 0.5 ? orange
+                                          : limegreen;
+
+            Rectangle {
+                width: 40px;
+                height: 18px;
+                border-radius: 3px;
+                border-width: 1px;
+                border-color: Palette.foreground.transparentize(0.5);
+
+                // Fill
+                Rectangle {
+                    x: 2px;
+                    y: 2px;
+                    width: max(0px, (parent.width - 4px) * battery-level);
+                    height: parent.height - 4px;
+                    border-radius: 2px;
+                    background: battery-color;
+                }
+            }
+
+            Text {
+                text: "\{round(unit.battery-voltage * 100) / 100}V";
+                font-size: 10px;
+                color: Palette.foreground.transparentize(0.4);
+                horizontal-alignment: center;
+            }
+        }
+    }
+}

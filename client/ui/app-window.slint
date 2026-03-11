@@ -1,0 +1,929 @@
+import { VerticalBox, HorizontalBox, TabWidget, Palette, Button, LineEdit, ScrollView } from "std-widgets.slint";
+import { UnitsContent } from "units.slint";
+import { VisualizationContent, VizLabel } from "visualization.slint";
+import { UnitData, UnitState, JournalEntryData } from "unit-card.slint";
+import { RadioTestContent, ChannelResult } from "radio-test.slint";
+
+export struct HealthTestResult {
+    name: string,
+    status: string,
+    m1-pass: bool,
+    m2-pass: bool,
+    m3-pass: bool,
+    m4-pass: bool,
+}
+
+component MenuBar inherits Rectangle {
+    callback exit-clicked();
+    callback open-swarm-clicked();
+
+    height: 30px;
+
+    HorizontalBox {
+        padding: 0px;
+        spacing: 0px;
+        alignment: start;
+
+        Rectangle {
+            width: 60px;
+            height: parent.height;
+
+            Text {
+                text: "File";
+                font-size: 13px;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+
+            TouchArea {
+                clicked => { file-popup.show(); }
+                mouse-cursor: pointer;
+            }
+        }
+    }
+
+    file-popup := PopupWindow {
+        x: 0px;
+        y: root.height;
+        width: 140px;
+
+        Rectangle {
+            width: 140px;
+            height: 64px;
+            background: Palette.background;
+            border-width: 1px;
+            border-color: Palette.border;
+
+            VerticalLayout {
+                Rectangle {
+                    height: 32px;
+                    background: open-touch.has-hover ? Palette.accent-background : transparent;
+
+                    Text {
+                        text: "Open swarm...";
+                        font-size: 13px;
+                        color: Palette.foreground;
+                        vertical-alignment: center;
+                        x: 16px;
+                    }
+
+                    open-touch := TouchArea {
+                        clicked => {
+                            file-popup.close();
+                            open-swarm-clicked();
+                        }
+                        mouse-cursor: pointer;
+                    }
+                }
+
+                Rectangle {
+                    height: 32px;
+                    background: menu-touch.has-hover ? Palette.accent-background : transparent;
+
+                    Text {
+                        text: "Exit";
+                        font-size: 13px;
+                        color: Palette.foreground;
+                        vertical-alignment: center;
+                        x: 16px;
+                    }
+
+                    menu-touch := TouchArea {
+                        clicked => {
+                            file-popup.close();
+                            exit-clicked();
+                        }
+                        mouse-cursor: pointer;
+                    }
+                }
+            }
+        }
+    }
+}
+
+component SwarmInfoBar inherits Rectangle {
+    in property <string> swarm-name;
+    in property <[UnitData]> units;
+    in property <bool> connected;
+    in property <int> connected-count;
+    in property <int> selftest-passed-count;
+    in property <int> battery-count;
+    in property <int> charging-count;
+    in property <int> charged-count;
+    callback connect-clicked();
+    callback disconnect-clicked();
+    callback reconnect-clicked();
+    callback download-toc-clicked();
+    callback upload-geometry-clicked();
+    callback upload-trajectory-swarm-clicked();
+    callback fly-trajectory-swarm-clicked();
+    callback land-swarm-clicked();
+    callback emergency-stop-clicked();
+    callback reboot-swarm-clicked();
+    callback power-off-swarm-clicked();
+    callback sysoff-swarm-clicked();
+    callback syson-swarm-clicked();
+    callback tuning-clicked();
+    callback health-test-clicked();
+
+    property <float> progress: units.length > 0 ? connected-count / units.length : 0;
+    property <bool> connecting: connected && progress < 1.0;
+    property <float> selftest-progress: connected-count > 0 ? selftest-passed-count / connected-count : 0;
+    property <float> power-total: battery-count + charging-count + charged-count;
+
+    height: 48px;
+    border-width: 1px;
+    border-color: Palette.border;
+
+    HorizontalBox {
+        padding-left: 16px;
+        padding-right: 16px;
+        spacing: 16px;
+
+        Text {
+            text: swarm-name;
+            font-size: 14px;
+            font-weight: 600;
+            vertical-alignment: center;
+        }
+
+        VerticalLayout {
+            alignment: center;
+            spacing: 4px;
+
+            Text {
+                text: connected-count > 0
+                    ? "\{connected-count}/\{units.length} connected"
+                    : "\{units.length} units";
+                font-size: 13px;
+                color: Palette.foreground.transparentize(0.4);
+            }
+
+            Rectangle {
+                height: 4px;
+                border-radius: 2px;
+                background: Palette.border;
+
+                Rectangle {
+                    x: 0px;
+                    width: parent.width * progress;
+                    height: parent.height;
+                    border-radius: 2px;
+                    background: progress >= 1.0 ? limegreen : dodgerblue;
+                }
+            }
+        }
+
+        if connected-count > 0: VerticalLayout {
+            alignment: center;
+            spacing: 4px;
+
+            Text {
+                text: "\{selftest-passed-count}/\{connected-count} selftest";
+                font-size: 13px;
+                color: Palette.foreground.transparentize(0.4);
+            }
+
+            Rectangle {
+                height: 4px;
+                border-radius: 2px;
+                background: Palette.border;
+
+                Rectangle {
+                    x: 0px;
+                    width: parent.width * selftest-progress;
+                    height: parent.height;
+                    border-radius: 2px;
+                    background: selftest-progress >= 1.0 ? limegreen : red;
+                }
+            }
+        }
+
+        if connected-count > 0 && power-total > 0: VerticalLayout {
+            alignment: center;
+            spacing: 4px;
+
+            Text {
+                text: battery-count > 0 && (charging-count > 0 || charged-count > 0)
+                    ? "\{battery-count} battery, \{charging-count} charging, \{charged-count} charged"
+                    : charging-count > 0 || charged-count > 0
+                    ? "\{charging-count} charging, \{charged-count} charged"
+                    : "\{battery-count} battery";
+                font-size: 13px;
+                color: Palette.foreground.transparentize(0.4);
+            }
+
+            Rectangle {
+                height: 4px;
+                border-radius: 2px;
+                background: Palette.border;
+
+                // Battery portion (dodgerblue)
+                Rectangle {
+                    x: 0px;
+                    width: parent.width * (battery-count / power-total);
+                    height: parent.height;
+                    border-radius: 2px;
+                    background: dodgerblue;
+                }
+
+                // Charging portion (orange)
+                Rectangle {
+                    x: parent.width * (battery-count / power-total);
+                    width: parent.width * (charging-count / power-total);
+                    height: parent.height;
+                    background: orange;
+                }
+
+                // Charged portion (limegreen)
+                Rectangle {
+                    x: parent.width * ((battery-count + charging-count) / power-total);
+                    width: parent.width * (charged-count / power-total);
+                    height: parent.height;
+                    border-radius: 2px;
+                    background: limegreen;
+                }
+            }
+        }
+
+        Rectangle { horizontal-stretch: 1; }
+
+        if connected && connected-count < units.length: Button {
+            text: "Reconnect";
+            clicked => {
+                reconnect-clicked();
+            }
+        }
+
+        if !connected: Button {
+            text: "Download TOC";
+            clicked => {
+                download-toc-clicked();
+            }
+        }
+
+        if !connected: Button {
+            text: "Upload Geometry";
+            clicked => {
+                upload-geometry-clicked();
+            }
+        }
+
+        if !connected: Button {
+            text: "Health Test";
+            clicked => {
+                health-test-clicked();
+            }
+        }
+
+        if connected: Button {
+            text: "Upload Trajectory";
+            clicked => {
+                upload-trajectory-swarm-clicked();
+            }
+        }
+
+        if connected: Button {
+            text: "Fly Trajectory";
+            clicked => {
+                fly-trajectory-swarm-clicked();
+            }
+        }
+
+        if connected: Button {
+            text: "Land All";
+            clicked => {
+                land-swarm-clicked();
+            }
+        }
+
+        Button {
+            text: "Tuning";
+            clicked => { tuning-clicked(); }
+        }
+
+        Button {
+            text: "Reboot";
+            clicked => { reboot-swarm-clicked(); }
+        }
+
+        Button {
+            text: "Power Off";
+            clicked => { power-off-swarm-clicked(); }
+        }
+
+        Button {
+            text: "Sleep";
+            clicked => { sysoff-swarm-clicked(); }
+        }
+
+        Button {
+            text: "Wake Up";
+            clicked => { syson-swarm-clicked(); }
+        }
+
+        if connected: Rectangle {
+            width: estop-layout.preferred-width + 16px;
+            height: 33px;
+            background: #cc0000;
+            border-radius: 4px;
+
+            estop-layout := HorizontalLayout {
+                alignment: center;
+                padding-left: 8px;
+                padding-right: 8px;
+
+                Text {
+                    text: "Emergency Stop";
+                    color: white;
+                    font-weight: 700;
+                    font-size: 14px;
+                    vertical-alignment: center;
+                    horizontal-alignment: center;
+                }
+            }
+
+            TouchArea {
+                mouse-cursor: pointer;
+                clicked => { emergency-stop-clicked(); }
+            }
+        }
+
+        Button {
+            text: connected ? "Disconnect" : "Connect Swarm";
+            clicked => {
+                if (connected) {
+                    disconnect-clicked();
+                } else {
+                    connect-clicked();
+                }
+            }
+        }
+    }
+}
+
+// Main application window
+export component AppWindow inherits Window {
+    title: "Swarmkeeper";
+    preferred-width: 1600px;
+    preferred-height: 900px;
+
+    in-out property <string> swarm-name;
+    in-out property <[UnitData]> units;
+    in-out property <[[StandardListViewItem]]> unit-table-rows;
+    in-out property <[UnitData]> sorted-units;
+    in-out property <bool> swarm-connected;
+    in-out property <int> connected-count;
+    in-out property <int> selftest-passed-count;
+    in-out property <int> battery-count;
+    in-out property <int> charging-count;
+    in-out property <int> charged-count;
+    in-out property <int> sort-column: -1;
+    in-out property <bool> sort-ascending: true;
+    in-out property <image> viz-texture;
+    in-out property <[JournalEntryData]> journal-entries;
+    out property <float> viz-width: viz-content.viewport-width;
+    out property <float> viz-height: viz-content.viewport-height;
+    out property <float> cam-yaw: viz-content.cam-yaw;
+    out property <float> cam-pitch: viz-content.cam-pitch;
+    out property <float> cam-distance: viz-content.cam-distance;
+    out property <float> cam-pan-x: viz-content.cam-pan-x;
+    out property <float> cam-pan-y: viz-content.cam-pan-y;
+
+    // Visualization label toggle states (read by Rust to know what to compute)
+    out property <bool> show-cf-labels: viz-content.show-cf-labels;
+    out property <bool> show-lh-labels: viz-content.show-lh-labels;
+    out property <bool> show-loco-labels: viz-content.show-loco-labels;
+    out property <bool> show-axis-labels: viz-content.show-axis-labels;
+    out property <bool> show-grid-labels: viz-content.show-grid-labels;
+
+    // Visualization label data (set by Rust)
+    in-out property <[VizLabel]> cf-labels;
+    in-out property <[VizLabel]> lh-labels;
+    in-out property <[VizLabel]> loco-labels;
+    in-out property <[VizLabel]> axis-labels;
+    in-out property <[VizLabel]> grid-labels;
+
+    // Positioning source selector
+    in-out property <[string]> positioning-source-names;
+    in-out property <int> positioning-source-index;
+    callback positioning-source-changed(int);
+
+    // Progress dialog (shared by TOC download and geometry upload)
+    in-out property <bool> progress-dialog-visible;
+    in-out property <float> progress-dialog-progress;
+    in-out property <string> progress-dialog-status;
+    in-out property <string> progress-dialog-title;
+
+    callback exit-requested();
+    callback open-swarm-requested();
+    callback connect-swarm();
+    callback disconnect-swarm();
+    callback reconnect-swarm();
+    callback download-toc();
+    callback upload-geometry();
+    callback upload-trajectory-swarm();
+    callback fly-trajectory-swarm();
+    callback land-swarm();
+    callback emergency-stop();
+    callback reboot-swarm();
+    callback power-off-swarm();
+    callback sysoff-swarm();
+    callback syson-swarm();
+    callback sort-units(/* column */ int, /* ascending */ bool);
+    callback open-journal(/* row index */ int);
+    callback add-journal-entry(/* row index */ int, /* text */ string);
+    callback upload-trajectory(/* row index */ int);
+    callback fly-trajectory(/* row index */ int);
+    callback clear-trajectory(/* row index */ int);
+    callback hlc-takeoff(/* row index */ int, /* height */ string, /* yaw */ string, /* time */ string);
+    callback hlc-goto(/* row index */ int, /* x */ string, /* y */ string, /* z */ string, /* yaw */ string, /* relative */ bool);
+    callback hlc-land(/* row index */ int);
+    callback identify-unit(/* row index */ int);
+    callback connect-unit(/* row index */ int);
+    callback disconnect-unit(/* row index */ int);
+    callback delete-journal-entry(/* row index */ int, /* entry index */ int);
+    callback unit-row-selected(/* row index */ int);
+    callback open-manual-control(/* row index */ int);
+    callback start-manual-control(/* row index */ int, /* joystick index */ int);
+    callback stop-manual-control(/* row index */ int);
+    callback arm-unit(/* row index */ int, /* arm */ bool);
+    callback recover-unit(/* row index */ int);
+    callback reboot-unit(/* row index */ int);
+    callback power-off-unit(/* row index */ int);
+    callback sysoff-unit(/* row index */ int);
+    callback syson-unit(/* row index */ int);
+
+    // Tuning parameters
+    in-out property <string> tuning-thrust-base;
+    in-out property <string> tuning-vx-ki;
+    in-out property <string> tuning-vy-ki;
+    in-out property <string> tuning-prop-test-threshold;
+    in-out property <string> tuning-prop-test-pwm-ratio;
+    callback set-tuning-params(string, string, string, string, string);
+
+    // Confirmation dialog
+    private property <bool> confirm-power-off-visible: false;
+    private property <bool> tuning-dialog-visible: false;
+
+    // Radio test
+    in-out property <[string]> radio-test-unit-names;
+    in-out property <int> radio-test-selected-unit;
+    in-out property <bool> radio-test-running;
+    in-out property <float> radio-test-progress;
+    in-out property <string> radio-test-status: "Ready";
+    in-out property <[ChannelResult]> radio-test-results;
+    callback run-radio-test(/* unit index */ int);
+
+    // Health test
+    in-out property <bool> health-test-dialog-visible: false;
+    in-out property <bool> health-test-running: false;
+    in-out property <float> health-test-progress;
+    in-out property <string> health-test-status;
+    in-out property <[HealthTestResult]> health-test-results;
+    callback run-health-test();
+
+    // Joystick manual control
+    in-out property <[string]> joystick-names;
+    in-out property <float> stick-lx;
+    in-out property <float> stick-ly;
+    in-out property <float> stick-rx;
+    in-out property <float> stick-ry;
+    in-out property <bool> manual-control-armed;
+
+    VerticalBox {
+        padding: 0px;
+        spacing: 0px;
+
+        MenuBar {
+            exit-clicked => { exit-requested(); }
+            open-swarm-clicked => { open-swarm-requested(); }
+        }
+
+        SwarmInfoBar {
+            swarm-name: root.swarm-name;
+            units: root.units;
+            connected: root.swarm-connected;
+            connected-count: root.connected-count;
+            selftest-passed-count: root.selftest-passed-count;
+            battery-count: root.battery-count;
+            charging-count: root.charging-count;
+            charged-count: root.charged-count;
+            connect-clicked => { connect-swarm(); }
+            disconnect-clicked => { disconnect-swarm(); }
+            reconnect-clicked => { reconnect-swarm(); }
+            download-toc-clicked => { download-toc(); }
+            upload-geometry-clicked => { upload-geometry(); }
+            upload-trajectory-swarm-clicked => { upload-trajectory-swarm(); }
+            fly-trajectory-swarm-clicked => { fly-trajectory-swarm(); }
+            land-swarm-clicked => { land-swarm(); }
+            emergency-stop-clicked => { emergency-stop(); }
+            reboot-swarm-clicked => { reboot-swarm(); }
+            power-off-swarm-clicked => { confirm-power-off-visible = true; }
+            sysoff-swarm-clicked => { sysoff-swarm(); }
+            syson-swarm-clicked => { syson-swarm(); }
+            tuning-clicked => { tuning-dialog-visible = true; }
+            health-test-clicked => {
+                health-test-dialog-visible = true;
+                run-health-test();
+            }
+        }
+
+        TabWidget {
+            Tab {
+                title: "Units";
+                UnitsContent {
+                    units: root.units;
+                    sorted-units: root.sorted-units;
+                    table-rows: root.unit-table-rows;
+                    sort-column: root.sort-column;
+                    sort-ascending: root.sort-ascending;
+                    journal-entries: root.journal-entries;
+                    sort-requested(col, ascending) => { sort-units(col, ascending); }
+                    open-journal-requested(row) => { open-journal(row); }
+                    add-journal-entry-requested(row, text) => { add-journal-entry(row, text); }
+                    upload-trajectory-requested(row) => { upload-trajectory(row); }
+                    fly-trajectory-requested(row) => { fly-trajectory(row); }
+                    clear-trajectory-requested(row) => { clear-trajectory(row); }
+                    takeoff-requested(row, height, yaw, time) => { hlc-takeoff(row, height, yaw, time); }
+                    goto-requested(row, x, y, z, yaw, relative) => { hlc-goto(row, x, y, z, yaw, relative); }
+                    land-requested(row) => { hlc-land(row); }
+                    identify-requested(row) => { identify-unit(row); }
+                    connect-unit-requested(row) => { connect-unit(row); }
+                    disconnect-unit-requested(row) => { disconnect-unit(row); }
+                    delete-journal-entry-requested(row, entry-idx) => { delete-journal-entry(row, entry-idx); }
+                    row-selected(row) => { unit-row-selected(row); }
+                    joystick-names: root.joystick-names;
+                    stick-lx: root.stick-lx;
+                    stick-ly: root.stick-ly;
+                    stick-rx: root.stick-rx;
+                    stick-ry: root.stick-ry;
+                    manual-control-armed: root.manual-control-armed;
+                    open-manual-control-requested(row) => { open-manual-control(row); }
+                    joystick-selected(row, idx) => { start-manual-control(row, idx); }
+                    manual-control-stopped(row) => { stop-manual-control(row); }
+                    arm-requested(row, arm) => { arm-unit(row, arm); }
+                    recover-requested(row) => { recover-unit(row); }
+                    reboot-requested(row) => { reboot-unit(row); }
+                    power-off-requested(row) => { power-off-unit(row); }
+                    sysoff-requested(row) => { sysoff-unit(row); }
+                    syson-requested(row) => { syson-unit(row); }
+                }
+            }
+            Tab {
+                title: "Radio Test";
+                RadioTestContent {
+                    unit-names: root.radio-test-unit-names;
+                    selected-unit <=> root.radio-test-selected-unit;
+                    running: root.radio-test-running;
+                    swarm-connected: root.swarm-connected;
+                    progress: root.radio-test-progress;
+                    status-text: root.radio-test-status;
+                    results: root.radio-test-results;
+                    run-test(idx) => { run-radio-test(idx); }
+                }
+            }
+            Tab {
+                title: "Visualization";
+                viz-content := VisualizationContent {
+                    texture <=> root.viz-texture;
+                    cf-labels: root.cf-labels;
+                    lh-labels: root.lh-labels;
+                    loco-labels: root.loco-labels;
+                    axis-labels: root.axis-labels;
+                    grid-labels: root.grid-labels;
+                    positioning-source-names: root.positioning-source-names;
+                    positioning-source-index <=> root.positioning-source-index;
+                    positioning-source-changed(idx) => { root.positioning-source-changed(idx); }
+                }
+            }
+        }
+    }
+
+    // Power off confirmation dialog
+    if confirm-power-off-visible: Rectangle {
+        width: 100%;
+        height: 100%;
+        background: black.transparentize(0.5);
+
+        TouchArea {
+            clicked => { confirm-power-off-visible = false; }
+        }
+
+        Rectangle {
+            width: 340px;
+            height: 140px;
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            background: Palette.background;
+            border-radius: 8px;
+            border-width: 1px;
+            border-color: Palette.border;
+
+            TouchArea {
+                // Block clicks from closing the dialog
+            }
+
+            VerticalLayout {
+                padding: 24px;
+                spacing: 16px;
+
+                Text {
+                    text: "Power off all units in the swarm?";
+                    font-size: 15px;
+                    font-weight: 600;
+                }
+
+                HorizontalLayout {
+                    alignment: end;
+                    spacing: 8px;
+
+                    Button {
+                        text: "Cancel";
+                        clicked => { confirm-power-off-visible = false; }
+                    }
+
+                    Button {
+                        text: "Power Off";
+                        clicked => {
+                            power-off-swarm();
+                            confirm-power-off-visible = false;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Tuning parameters dialog
+    if tuning-dialog-visible: Rectangle {
+        width: 100%;
+        height: 100%;
+        background: black.transparentize(0.5);
+
+        TouchArea {
+            clicked => { tuning-dialog-visible = false; }
+        }
+
+        Rectangle {
+            width: 420px;
+            height: 380px;
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            background: Palette.background;
+            border-radius: 8px;
+            border-width: 1px;
+            border-color: Palette.border;
+
+            TouchArea {}
+
+            VerticalLayout {
+                padding: 24px;
+                spacing: 12px;
+
+                Text {
+                    text: "Tuning Parameters";
+                    font-size: 16px;
+                    font-weight: 600;
+                }
+
+                HorizontalLayout {
+                    spacing: 8px;
+                    Text { text: "posCtlPid.thrustBase"; vertical-alignment: center; width: 200px; }
+                    tuning-thrust-base-input := LineEdit { text: root.tuning-thrust-base; horizontal-stretch: 1; }
+                }
+
+                HorizontalLayout {
+                    spacing: 8px;
+                    Text { text: "velCtlPid.vxKi"; vertical-alignment: center; width: 200px; }
+                    tuning-vx-ki-input := LineEdit { text: root.tuning-vx-ki; horizontal-stretch: 1; }
+                }
+
+                HorizontalLayout {
+                    spacing: 8px;
+                    Text { text: "velCtlPid.vyKi"; vertical-alignment: center; width: 200px; }
+                    tuning-vy-ki-input := LineEdit { text: root.tuning-vy-ki; horizontal-stretch: 1; }
+                }
+
+                HorizontalLayout {
+                    spacing: 8px;
+                    Text { text: "health.propTestThreshold"; vertical-alignment: center; width: 200px; }
+                    tuning-prop-test-threshold-input := LineEdit { text: root.tuning-prop-test-threshold; horizontal-stretch: 1; }
+                }
+
+                HorizontalLayout {
+                    spacing: 8px;
+                    Text { text: "health.propTestPWMRatio"; vertical-alignment: center; width: 200px; }
+                    tuning-prop-test-pwm-ratio-input := LineEdit { text: root.tuning-prop-test-pwm-ratio; horizontal-stretch: 1; }
+                }
+
+                Rectangle { vertical-stretch: 1; }
+
+                HorizontalLayout {
+                    alignment: end;
+                    spacing: 8px;
+
+                    Button {
+                        text: "Cancel";
+                        clicked => { tuning-dialog-visible = false; }
+                    }
+
+                    Button {
+                        text: "Set";
+                        clicked => {
+                            set-tuning-params(
+                                tuning-thrust-base-input.text,
+                                tuning-vx-ki-input.text,
+                                tuning-vy-ki-input.text,
+                                tuning-prop-test-threshold-input.text,
+                                tuning-prop-test-pwm-ratio-input.text,
+                            );
+                            tuning-dialog-visible = false;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Progress dialog overlay
+    if progress-dialog-visible: Rectangle {
+        width: 100%;
+        height: 100%;
+        background: black.transparentize(0.5);
+
+        // Block interaction with content behind
+        TouchArea {}
+
+        Rectangle {
+            width: 400px;
+            height: 140px;
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            background: Palette.background;
+            border-radius: 8px;
+            border-width: 1px;
+            border-color: Palette.border;
+
+            VerticalLayout {
+                padding: 24px;
+                spacing: 16px;
+
+                Text {
+                    text: root.progress-dialog-title;
+                    font-size: 16px;
+                    font-weight: 600;
+                }
+
+                Rectangle {
+                    height: 8px;
+                    border-radius: 4px;
+                    background: Palette.border;
+
+                    Rectangle {
+                        x: 0px;
+                        width: parent.width * root.progress-dialog-progress;
+                        height: parent.height;
+                        border-radius: 4px;
+                        background: dodgerblue;
+                    }
+                }
+
+                Text {
+                    text: root.progress-dialog-status;
+                    font-size: 12px;
+                    color: Palette.foreground.transparentize(0.3);
+                }
+            }
+        }
+    }
+
+    // Health test dialog
+    if health-test-dialog-visible: Rectangle {
+        width: 100%;
+        height: 100%;
+        background: black.transparentize(0.5);
+
+        TouchArea {}
+
+        Rectangle {
+            width: 520px;
+            height: 480px;
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            background: Palette.background;
+            border-radius: 8px;
+            border-width: 1px;
+            border-color: Palette.border;
+
+            TouchArea {}
+
+            VerticalLayout {
+                padding: 24px;
+                spacing: 12px;
+
+                Text {
+                    text: "Health Test — Prop Test";
+                    font-size: 16px;
+                    font-weight: 600;
+                }
+
+                Rectangle {
+                    height: 8px;
+                    border-radius: 4px;
+                    background: Palette.border;
+
+                    Rectangle {
+                        x: 0px;
+                        width: parent.width * root.health-test-progress;
+                        height: parent.height;
+                        border-radius: 4px;
+                        background: dodgerblue;
+                    }
+                }
+
+                Text {
+                    text: root.health-test-status;
+                    font-size: 12px;
+                    color: Palette.foreground.transparentize(0.3);
+                }
+
+                ScrollView {
+                    vertical-stretch: 1;
+
+                    VerticalLayout {
+                        spacing: 4px;
+
+                        for result in root.health-test-results: Rectangle {
+                            height: 32px;
+                            border-radius: 4px;
+                            background: Palette.alternate-background;
+
+                            HorizontalLayout {
+                                padding-left: 12px;
+                                padding-right: 12px;
+                                spacing: 8px;
+                                alignment: start;
+
+                                Text {
+                                    text: result.name;
+                                    font-size: 13px;
+                                    vertical-alignment: center;
+                                    width: 80px;
+                                }
+
+                                Text {
+                                    text: result.status;
+                                    font-size: 12px;
+                                    vertical-alignment: center;
+                                    width: 90px;
+                                    color: result.status == "Pass" ? limegreen
+                                        : result.status == "Fail" || result.status == "Error" ? red
+                                        : result.status == "Timeout" ? orange
+                                        : Palette.foreground.transparentize(0.3);
+                                }
+
+                                for item in [
+                                    { label: "M1", pass: result.m1-pass },
+                                    { label: "M2", pass: result.m2-pass },
+                                    { label: "M3", pass: result.m3-pass },
+                                    { label: "M4", pass: result.m4-pass },
+                                ]: Rectangle {
+                                    width: 40px;
+                                    height: 22px;
+                                    border-radius: 4px;
+                                    background: result.status == "Pass" || result.status == "Fail" || result.status == "Timeout"
+                                        ? (item.pass ? limegreen.transparentize(0.6) : red.transparentize(0.6))
+                                        : Palette.border;
+
+                                    Text {
+                                        text: item.label;
+                                        font-size: 11px;
+                                        font-weight: 600;
+                                        horizontal-alignment: center;
+                                        vertical-alignment: center;
+                                        color: result.status == "Pass" || result.status == "Fail" || result.status == "Timeout"
+                                            ? (item.pass ? limegreen : red)
+                                            : Palette.foreground.transparentize(0.5);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                HorizontalLayout {
+                    alignment: end;
+                    spacing: 8px;
+
+                    Button {
+                        text: "Close";
+                        clicked => {
+                            health-test-dialog-visible = false;
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

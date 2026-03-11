@@ -1,0 +1,22 @@
+# Rust
+target/
+Cargo.lock
+
+# Crazyflie firmware build artifacts
+firmware/**/build/
+firmware/**/.config
+firmware/**/.config.old
+firmware/**/cf2.bin
+firmware/**/cf2.elf
+firmware/**/cf2.map
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db

@@ -1,0 +1,1277 @@
+import { Button, Palette, ScrollView, VerticalBox, HorizontalBox, LineEdit, CheckBox, ComboBox } from "std-widgets.slint";
+import { UnitData, UnitState, JournalEntryData } from "unit-card.slint";
+
+component HeaderCell inherits Rectangle {
+    in property <string> label;
+    in property <int> column-index;
+    in property <int> active-col;
+    in property <bool> active-ascending;
+    in-out property <length> col-width;
+    in property <length> min-col-width: 40px;
+    callback clicked();
+
+    border-width: 1px;
+    border-color: Palette.border;
+
+    HorizontalLayout {
+        padding-left: 6px;
+        padding-right: 8px;
+
+        Text {
+            text: active-col == column-index ? (active-ascending ? label + " ▲" : label + " ▼") : label;
+            font-size: 12px;
+            font-weight: 600;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+    }
+
+    // Main click area for sorting (excludes resize handle)
+    TouchArea {
+        x: 0px;
+        y: 0px;
+        width: root.width - 5px;
+        height: root.height;
+        clicked => { root.clicked(); }
+        mouse-cursor: pointer;
+    }
+
+    // Resize handle on right edge
+    Rectangle {
+        x: root.width - 5px;
+        y: 0px;
+        width: 5px;
+        height: root.height;
+        background: resize-ta.has-hover || resize-ta.pressed ? Palette.accent-background : transparent;
+
+        resize-ta := TouchArea {
+            mouse-cursor: col-resize;
+            moved => {
+                root.col-width = max(root.min-col-width, root.col-width + (self.mouse-x - self.pressed-x));
+            }
+        }
+    }
+}
+
+component BatteryCell inherits Rectangle {
+    in property <float> voltage;
+
+    property <float> level: clamp((voltage - 3.0) / 1.2, 0.0, 1.0);
+    property <color> bar-color: level < 0.2 ? red
+                               : level < 0.5 ? orange
+                               : limegreen;
+
+    VerticalLayout {
+        padding-top: 2px;
+        padding-bottom: 2px;
+        padding-left: 6px;
+        padding-right: 6px;
+        spacing: 1px;
+        alignment: center;
+
+        Rectangle {
+            height: 10px;
+            border-radius: 2px;
+            border-width: 1px;
+            border-color: Palette.foreground.transparentize(0.5);
+
+            Rectangle {
+                x: 2px;
+                y: 2px;
+                width: max(0px, (parent.width - 4px) * level);
+                height: parent.height - 4px;
+                border-radius: 1px;
+                background: bar-color;
+            }
+        }
+
+        Text {
+            text: voltage > 0 ? "\{round(voltage * 100) / 100}V" : "";
+            font-size: 9px;
+            horizontal-alignment: center;
+            overflow: elide;
+        }
+    }
+}
+
+component LinkQualityCell inherits Rectangle {
+    in property <float> quality;
+
+    property <color> bar-color: quality < 0.5 ? red
+                               : quality < 0.8 ? orange
+                               : limegreen;
+
+    VerticalLayout {
+        padding-top: 2px;
+        padding-bottom: 2px;
+        padding-left: 6px;
+        padding-right: 6px;
+        spacing: 1px;
+        alignment: center;
+
+        Rectangle {
+            height: 10px;
+            border-radius: 2px;
+            border-width: 1px;
+            border-color: Palette.foreground.transparentize(0.5);
+
+            Rectangle {
+                x: 2px;
+                y: 2px;
+                width: max(0px, (parent.width - 4px) * quality);
+                height: parent.height - 4px;
+                border-radius: 1px;
+                background: bar-color;
+            }
+        }
+
+        Text {
+            text: quality > 0 ? "\{round(quality * 100)}%" : "";
+            font-size: 9px;
+            horizontal-alignment: center;
+            overflow: elide;
+        }
+    }
+}
+
+component Cell inherits Rectangle {
+    in property <string> value;
+
+    HorizontalLayout {
+        padding-left: 6px;
+        padding-right: 2px;
+
+        Text {
+            text: value;
+            font-size: 12px;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+    }
+}
+
+component DetailRow inherits HorizontalLayout {
+    in property <string> label;
+    in property <string> value;
+
+    spacing: 8px;
+    padding-left: 16px;
+    padding-right: 16px;
+
+    Text {
+        text: label;
+        font-size: 12px;
+        font-weight: 600;
+        color: Palette.foreground.transparentize(0.3);
+        width: 90px;
+    }
+
+    Text {
+        text: value;
+        font-size: 12px;
+        horizontal-stretch: 1;
+        overflow: elide;
+    }
+}
+
+component StickIndicator inherits VerticalLayout {
+    in property <string> label-x;
+    in property <string> label-y;
+    in property <float> value-x;  // -1 to 1
+    in property <float> value-y;  // -1 to 1
+
+    spacing: 2px;
+    alignment: center;
+
+    Rectangle {
+        width: 100px;
+        height: 100px;
+        border-width: 1px;
+        border-color: Palette.border;
+        border-radius: 4px;
+        background: Palette.background.darker(0.03);
+
+        // Horizontal crosshair
+        Rectangle {
+            x: 0px;
+            y: (parent.height - 1px) / 2;
+            width: parent.width;
+            height: 1px;
+            background: Palette.border.transparentize(0.3);
+        }
+
+        // Vertical crosshair
+        Rectangle {
+            x: (parent.width - 1px) / 2;
+            y: 0px;
+            width: 1px;
+            height: parent.height;
+            background: Palette.border.transparentize(0.3);
+        }
+
+        // Dot indicator
+        Rectangle {
+            width: 12px;
+            height: 12px;
+            border-radius: 6px;
+            background: dodgerblue;
+            x: (parent.width - self.width) / 2 + value-x * (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2 - value-y * (parent.height - self.height) / 2;
+        }
+    }
+
+    HorizontalLayout {
+        alignment: center;
+        spacing: 4px;
+        Text {
+            text: "← " + label-x + " →";
+            font-size: 9px;
+            color: Palette.foreground.transparentize(0.4);
+            horizontal-alignment: center;
+        }
+    }
+
+    HorizontalLayout {
+        alignment: center;
+        Text {
+            text: "↕ " + label-y;
+            font-size: 9px;
+            color: Palette.foreground.transparentize(0.4);
+            horizontal-alignment: center;
+        }
+    }
+}
+
+component BatteryBar inherits Rectangle {
+    in property <float> voltage;
+
+    property <float> level: clamp((voltage - 3.0) / 1.2, 0.0, 1.0);
+    property <color> bar-color: level < 0.2 ? red
+                               : level < 0.5 ? orange
+                               : limegreen;
+
+    HorizontalLayout {
+        padding-left: 16px;
+        padding-right: 16px;
+        spacing: 8px;
+
+        Text {
+            text: "Battery";
+            font-size: 12px;
+            font-weight: 600;
+            color: Palette.foreground.transparentize(0.3);
+            width: 90px;
+            vertical-alignment: center;
+        }
+
+        Rectangle {
+            horizontal-stretch: 1;
+            height: 16px;
+            border-radius: 3px;
+            border-width: 1px;
+            border-color: Palette.foreground.transparentize(0.5);
+
+            Rectangle {
+                x: 2px;
+                y: 2px;
+                width: max(0px, (parent.width - 4px) * level);
+                height: parent.height - 4px;
+                border-radius: 2px;
+                background: bar-color;
+            }
+        }
+
+        Text {
+            text: voltage > 0 ? "\{round(voltage * 100) / 100}V" : "N/A";
+            font-size: 12px;
+            width: 50px;
+            vertical-alignment: center;
+        }
+    }
+}
+
+component LinkQualityBar inherits Rectangle {
+    in property <float> quality;
+
+    property <color> bar-color: quality < 0.5 ? red
+                               : quality < 0.8 ? orange
+                               : limegreen;
+
+    HorizontalLayout {
+        padding-left: 16px;
+        padding-right: 16px;
+        spacing: 8px;
+
+        Text {
+            text: "Link Quality";
+            font-size: 12px;
+            font-weight: 600;
+            color: Palette.foreground.transparentize(0.3);
+            width: 90px;
+            vertical-alignment: center;
+        }
+
+        Rectangle {
+            horizontal-stretch: 1;
+            height: 16px;
+            border-radius: 3px;
+            border-width: 1px;
+            border-color: Palette.foreground.transparentize(0.5);
+
+            Rectangle {
+                x: 2px;
+                y: 2px;
+                width: max(0px, (parent.width - 4px) * quality);
+                height: parent.height - 4px;
+                border-radius: 2px;
+                background: bar-color;
+            }
+        }
+
+        Text {
+            text: quality > 0 ? "\{round(quality * 100)}%" : "N/A";
+            font-size: 12px;
+            width: 50px;
+            vertical-alignment: center;
+        }
+    }
+}
+
+component UnitSidebar inherits Rectangle {
+    in property <UnitData> unit;
+    in property <bool> has-selection;
+    in property <[JournalEntryData]> journal-entries;
+    callback close-clicked();
+    callback journal-clicked();
+    callback add-journal-entry(string);
+    callback upload-trajectory-clicked();
+    callback fly-trajectory-clicked();
+    callback clear-trajectory-clicked();
+    callback takeoff-clicked(/* height */ string, /* yaw */ string, /* time */ string);
+    callback goto-clicked(/* x */ string, /* y */ string, /* z */ string, /* yaw */ string, /* relative */ bool);
+    callback land-clicked();
+    callback identify-clicked();
+    callback manual-control-clicked();
+    callback connect-clicked();
+    callback disconnect-clicked();
+    callback recover-clicked();
+    callback reboot-clicked();
+    callback power-off-clicked();
+    callback sysoff-clicked();
+    callback syson-clicked();
+
+    property <string> state-text: unit.state == UnitState.disconnected ? "Disconnected"
+                                : unit.state == UnitState.connected ? "Connected"
+                                : unit.state == UnitState.charging ? "Charging"
+                                : unit.state == UnitState.charged ? "Charged"
+                                : unit.state == UnitState.flying ? "Flying"
+                                : unit.state == UnitState.error ? unit.error-message
+                                : "Crashed";
+
+    property <color> state-color: unit.state == UnitState.disconnected ? gray
+                                : unit.state == UnitState.connected ? dodgerblue
+                                : unit.state == UnitState.charging ? orange
+                                : unit.state == UnitState.charged ? limegreen
+                                : unit.state == UnitState.flying ? limegreen
+                                : unit.state == UnitState.error ? red
+                                : red;
+
+    property <bool> is-crashed: unit.state == UnitState.crashed;
+
+    border-width: 1px;
+    border-color: Palette.border;
+    background: Palette.background;
+
+    VerticalLayout {
+        spacing: 0px;
+
+        // Header
+        Rectangle {
+            height: 40px;
+
+            HorizontalLayout {
+                padding-left: 16px;
+                padding-right: 8px;
+
+                Text {
+                    text: has-selection ? unit.name : "No selection";
+                    font-size: 15px;
+                    font-weight: 700;
+                    vertical-alignment: center;
+                    horizontal-stretch: 1;
+                }
+
+                Button {
+                    text: "✕";
+                    height: 28px;
+                    width: 28px;
+                    clicked => { close-clicked(); }
+                }
+            }
+        }
+
+        // Divider
+        Rectangle {
+            height: 1px;
+            background: Palette.border;
+        }
+
+        if has-selection: ScrollView {
+            vertical-stretch: 1;
+
+            VerticalLayout {
+                padding-top: 12px;
+                spacing: 8px;
+
+                // State indicator
+                HorizontalLayout {
+                    padding-left: 16px;
+                    padding-right: 16px;
+                    spacing: 8px;
+
+                    Rectangle {
+                        width: 10px;
+                        height: 10px;
+                        border-radius: 5px;
+                        background: state-color;
+                        y: (parent.height - self.height) / 2;
+                    }
+
+                    Text {
+                        text: state-text;
+                        font-size: 13px;
+                        color: state-color;
+                        vertical-alignment: center;
+                        horizontal-stretch: 1;
+                    }
+
+                    if unit.state == UnitState.disconnected || unit.state == UnitState.error: Button {
+                        text: "Connect";
+                        clicked => { connect-clicked(); }
+                    }
+
+                    if unit.state != UnitState.disconnected && unit.state != UnitState.error: Button {
+                        text: "Disconnect";
+                        clicked => { disconnect-clicked(); }
+                    }
+                }
+
+                DetailRow { label: "URI"; value: unit.uri; }
+                DetailRow { label: "Serial"; value: unit.serial != "" ? unit.serial : "—"; }
+                DetailRow { label: "Platform"; value: unit.platform-type != "" ? unit.platform-type : "—"; }
+                DetailRow { label: "Firmware"; value: unit.firmware-version != "" ? unit.firmware-version : "—"; }
+                DetailRow { label: "Description"; value: unit.description != "" ? unit.description : "—"; }
+                DetailRow { label: "Position X"; value: "\{round(unit.pos-x * 100) / 100}"; }
+                DetailRow { label: "Position Y"; value: "\{round(unit.pos-y * 100) / 100}"; }
+                DetailRow { label: "Position Z"; value: "\{round(unit.pos-z * 100) / 100}"; }
+
+                BatteryBar { voltage: unit.battery-voltage; }
+                LinkQualityBar { quality: unit.link-quality; }
+
+                // Link Statistics section
+                Rectangle {
+                    height: 1px;
+                    background: Palette.border.transparentize(0.5);
+                }
+
+                HorizontalLayout {
+                    padding-left: 16px;
+                    padding-right: 16px;
+
+                    Text {
+                        text: "Link Statistics";
+                        font-size: 12px;
+                        font-weight: 600;
+                        color: Palette.foreground.transparentize(0.3);
+                    }
+                }
+
+                DetailRow { label: "Uplink"; value: "\{round(unit.uplink-rate * 30 / 100) / 10} kB/s (\{round(unit.uplink-rate)} pkt/s)"; }
+                DetailRow { label: "Downlink"; value: "\{round(unit.downlink-rate * 30 / 100) / 10} kB/s (\{round(unit.downlink-rate)} pkt/s)"; }
+                DetailRow { label: "Radio TX"; value: "\{round(unit.radio-send-rate)} pkt/s"; }
+                DetailRow { label: "Avg Retries"; value: "\{round(unit.avg-retries * 10) / 10}"; }
+                if unit.has-rssi: DetailRow { label: "RSSI"; value: "\{round(unit.rssi)} dBm"; }
+
+                DetailRow { label: "Power State"; value: unit.pm-state != "" ? unit.pm-state : "—"; }
+                DetailRow { label: "Supervisor"; value: unit.supervisor-state != "" ? unit.supervisor-state : "—"; }
+
+                if is-crashed: HorizontalLayout {
+                    padding-left: 16px;
+                    padding-right: 16px;
+
+                    Button {
+                        text: "Recover";
+                        clicked => { recover-clicked(); }
+                    }
+                }
+
+                // Decks section
+                Rectangle {
+                    height: 1px;
+                    background: Palette.border.transparentize(0.5);
+                }
+
+                HorizontalLayout {
+                    padding-left: 16px;
+                    padding-right: 16px;
+
+                    Text {
+                        text: "Installed Decks";
+                        font-size: 12px;
+                        font-weight: 600;
+                        color: Palette.foreground.transparentize(0.3);
+                    }
+                }
+
+                DetailRow { label: "Lighthouse"; value: unit.deck-lighthouse ? "Yes" : "No"; }
+                DetailRow { label: "Loco"; value: unit.deck-loco ? "Yes" : "No"; }
+                DetailRow { label: "LED Top"; value: unit.deck-led-top ? "Yes" : "No"; }
+                DetailRow { label: "LED Bottom"; value: unit.deck-led-bottom ? "Yes" : "No"; }
+
+                // Actions
+                Rectangle {
+                    height: 1px;
+                    background: Palette.border.transparentize(0.5);
+                }
+
+                VerticalLayout {
+                    padding-left: 16px;
+                    padding-right: 16px;
+                    padding-bottom: 16px;
+                    spacing: 8px;
+
+                Button {
+                    text: unit.identifying ? "Stop Identifying" : "Identify";
+                    clicked => { identify-clicked(); }
+                }
+
+                Button {
+                    text: "Manual Control";
+                    clicked => { manual-control-clicked(); }
+                }
+
+                Button {
+                    text: unit.journal-entry-count > 0 ? "Journal (\{unit.journal-entry-count})" : "Journal";
+                    clicked => { journal-clicked(); }
+                }
+
+                Button {
+                    text: "Upload Trajectory";
+                    clicked => { upload-trajectory-clicked(); }
+                }
+
+                Button {
+                    text: "Fly Trajectory";
+                    clicked => { fly-trajectory-clicked(); }
+                }
+
+                Button {
+                    text: "Clear Trajectory";
+                    clicked => { clear-trajectory-clicked(); }
+                }
+
+                // Divider before power commands
+                Rectangle {
+                    height: 1px;
+                    background: Palette.border.transparentize(0.5);
+                }
+
+                Button {
+                    text: "Reboot";
+                    clicked => { reboot-clicked(); }
+                }
+
+                Button {
+                    text: "Power Off";
+                    clicked => { power-off-clicked(); }
+                }
+
+                Button {
+                    text: "Sleep";
+                    clicked => { sysoff-clicked(); }
+                }
+
+                Button {
+                    text: "Wake Up";
+                    clicked => { syson-clicked(); }
+                }
+
+                // Divider before HLC commands
+                Rectangle {
+                    height: 1px;
+                    background: Palette.border.transparentize(0.5);
+                }
+
+                // Takeoff fields
+                HorizontalLayout {
+                    spacing: 4px;
+
+                    VerticalLayout {
+                        spacing: 1px;
+                        width: 60px;
+                        Text { text: "H (m)"; font-size: 9px; color: Palette.foreground.transparentize(0.5); }
+                        takeoff-height := LineEdit {
+                            text: "0.5";
+                            font-size: 11px;
+                            height: 24px;
+                        }
+                    }
+
+                    VerticalLayout {
+                        spacing: 1px;
+                        width: 60px;
+                        Text { text: "Yaw (°)"; font-size: 9px; color: Palette.foreground.transparentize(0.5); }
+                        takeoff-yaw := LineEdit {
+                            text: "0";
+                            font-size: 11px;
+                            height: 24px;
+                        }
+                    }
+
+                    VerticalLayout {
+                        spacing: 1px;
+                        width: 60px;
+                        Text { text: "Time (s)"; font-size: 9px; color: Palette.foreground.transparentize(0.5); }
+                        takeoff-time := LineEdit {
+                            text: "2";
+                            font-size: 11px;
+                            height: 24px;
+                        }
+                    }
+                }
+
+                Button {
+                    text: "Takeoff";
+                    clicked => { takeoff-clicked(takeoff-height.text, takeoff-yaw.text, takeoff-time.text); }
+                }
+
+                // Goto fields
+                HorizontalLayout {
+                    spacing: 4px;
+
+                    VerticalLayout {
+                        spacing: 1px;
+                        width: 60px;
+                        Text { text: "X"; font-size: 9px; color: Palette.foreground.transparentize(0.5); }
+                        goto-x := LineEdit {
+                            text: "0";
+                            font-size: 11px;
+                            height: 24px;
+                        }
+                    }
+
+                    VerticalLayout {
+                        spacing: 1px;
+                        width: 60px;
+                        Text { text: "Y"; font-size: 9px; color: Palette.foreground.transparentize(0.5); }
+                        goto-y := LineEdit {
+                            text: "0";
+                            font-size: 11px;
+                            height: 24px;
+                        }
+                    }
+
+                    VerticalLayout {
+                        spacing: 1px;
+                        width: 60px;
+                        Text { text: "Z"; font-size: 9px; color: Palette.foreground.transparentize(0.5); }
+                        goto-z := LineEdit {
+                            text: "0";
+                            font-size: 11px;
+                            height: 24px;
+                        }
+                    }
+
+                    VerticalLayout {
+                        spacing: 1px;
+                        width: 60px;
+                        Text { text: "Yaw (°)"; font-size: 9px; color: Palette.foreground.transparentize(0.5); }
+                        goto-yaw := LineEdit {
+                            text: "0";
+                            font-size: 11px;
+                            height: 24px;
+                        }
+                    }
+                }
+
+                HorizontalLayout {
+                    spacing: 8px;
+
+                    goto-relative := CheckBox {
+                        text: "Relative";
+                    }
+                }
+
+                Button {
+                    text: "Goto";
+                    clicked => { goto-clicked(goto-x.text, goto-y.text, goto-z.text, goto-yaw.text, goto-relative.checked); }
+                }
+
+                // Land
+                Button {
+                    text: "Land";
+                    clicked => { land-clicked(); }
+                }
+            }
+            }
+        }
+    }
+}
+
+export component UnitsContent inherits Rectangle {
+    in property <[UnitData]> units;
+    in property <[UnitData]> sorted-units;
+    in property <[[StandardListViewItem]]> table-rows;
+    in property <int> sort-column: -1;
+    in property <bool> sort-ascending: true;
+    in property <[JournalEntryData]> journal-entries;
+
+    callback sort-requested(/* column */ int, /* ascending */ bool);
+    callback open-journal-requested(/* row index */ int);
+    callback add-journal-entry-requested(/* row index */ int, /* text */ string);
+    callback upload-trajectory-requested(/* row index */ int);
+    callback fly-trajectory-requested(/* row index */ int);
+    callback clear-trajectory-requested(/* row index */ int);
+    callback takeoff-requested(/* row index */ int, /* height */ string, /* yaw */ string, /* time */ string);
+    callback goto-requested(/* row index */ int, /* x */ string, /* y */ string, /* z */ string, /* yaw */ string, /* relative */ bool);
+    callback land-requested(/* row index */ int);
+    callback identify-requested(/* row index */ int);
+    callback connect-unit-requested(/* row index */ int);
+    callback disconnect-unit-requested(/* row index */ int);
+    callback delete-journal-entry-requested(/* row index */ int, /* entry index */ int);
+    callback row-selected(/* row index */ int);
+    callback open-manual-control-requested(/* row index */ int);
+    callback joystick-selected(/* row index */ int, /* joystick index */ int);
+    callback manual-control-stopped(/* row index */ int);
+    callback arm-requested(/* row index */ int, /* arm */ bool);
+    callback recover-requested(/* row index */ int);
+    callback reboot-requested(/* row index */ int);
+    callback power-off-requested(/* row index */ int);
+    callback sysoff-requested(/* row index */ int);
+    callback syson-requested(/* row index */ int);
+
+    in property <[string]> joystick-names;
+    in property <float> stick-lx;
+    in property <float> stick-ly;
+    in property <float> stick-rx;
+    in property <float> stick-ry;
+    in property <bool> manual-control-armed;
+
+    private property <int> selected-row: -1;
+    private property <bool> sidebar-open: false;
+    private property <bool> journal-open: false;
+    private property <bool> manual-control-open: false;
+    private property <bool> confirm-power-off-open: false;
+    private property <length> sidebar-width: 360px;
+
+    // Column widths (shared between header and data rows for alignment)
+    private property <length> col-indicator-w: 40px;
+    private property <length> col-status-w: 90px;
+    private property <length> col-name-w: 100px;
+    private property <length> col-uri-w: 160px;
+    private property <length> col-x-w: 60px;
+    private property <length> col-y-w: 60px;
+    private property <length> col-z-w: 60px;
+    private property <length> col-battery-w: 110px;
+    private property <length> col-link-w: 90px;
+    private property <length> col-power-w: 80px;
+    private property <length> col-supervisor-w: 90px;
+    private property <length> col-lh-w: 50px;
+    private property <length> col-loco-w: 50px;
+    private property <length> col-ledup-w: 55px;
+    private property <length> col-leddn-w: 55px;
+
+    function toggle-sort(c: int) {
+        if (sort-column == c) {
+            sort-requested(c, !sort-ascending);
+        } else {
+            sort-requested(c, true);
+        }
+    }
+
+    HorizontalLayout {
+        spacing: 0px;
+
+        // Table
+        VerticalLayout {
+            horizontal-stretch: 1;
+
+            // Header row
+            Rectangle {
+                height: 32px;
+                background: Palette.background;
+
+                HorizontalLayout {
+                    spacing: 0px;
+
+                    HeaderCell { width: col-indicator-w; col-width <=> col-indicator-w; min-col-width: 30px; label: "●"; column-index: 0; active-col: sort-column; active-ascending: sort-ascending; clicked => { toggle-sort(0); } }
+                    HeaderCell { horizontal-stretch: 1; min-width: col-status-w; col-width <=> col-status-w; min-col-width: 60px; label: "Status"; column-index: 1; active-col: sort-column; active-ascending: sort-ascending; clicked => { toggle-sort(1); } }
+                    HeaderCell { horizontal-stretch: 1; min-width: col-name-w; col-width <=> col-name-w; min-col-width: 60px; label: "Name"; column-index: 2; active-col: sort-column; active-ascending: sort-ascending; clicked => { toggle-sort(2); } }
+                    HeaderCell { horizontal-stretch: 1; min-width: col-uri-w; col-width <=> col-uri-w; min-col-width: 80px; label: "URI"; column-index: 3; active-col: sort-column; active-ascending: sort-ascending; clicked => { toggle-sort(3); } }
+                    HeaderCell { width: col-x-w; col-width <=> col-x-w; min-col-width: 40px; label: "X"; column-index: 4; active-col: sort-column; active-ascending: sort-ascending; clicked => { toggle-sort(4); } }
+                    HeaderCell { width: col-y-w; col-width <=> col-y-w; min-col-width: 40px; label: "Y"; column-index: 5; active-col: sort-column; active-ascending: sort-ascending; clicked => { toggle-sort(5); } }
+                    HeaderCell { width: col-z-w; col-width <=> col-z-w; min-col-width: 40px; label: "Z"; column-index: 6; active-col: sort-column; active-ascending: sort-ascending; clicked => { toggle-sort(6); } }
+                    HeaderCell { width: col-battery-w; col-width <=> col-battery-w; min-col-width: 70px; label: "Battery"; column-index: 7; active-col: sort-column; active-ascending: sort-ascending; clicked => { toggle-sort(7); } }
+                    HeaderCell { width: col-link-w; col-width <=> col-link-w; min-col-width: 60px; label: "Link"; column-index: 8; active-col: sort-column; active-ascending: sort-ascending; clicked => { toggle-sort(8); } }
+                    HeaderCell { width: col-power-w; col-width <=> col-power-w; min-col-width: 50px; label: "Power"; column-index: 9; active-col: sort-column; active-ascending: sort-ascending; clicked => { toggle-sort(9); } }
+                    HeaderCell { width: col-supervisor-w; col-width <=> col-supervisor-w; min-col-width: 50px; label: "Supervisor"; column-index: 10; active-col: sort-column; active-ascending: sort-ascending; clicked => { toggle-sort(10); } }
+                    HeaderCell { width: col-lh-w; col-width <=> col-lh-w; min-col-width: 35px; label: "LH"; column-index: 11; active-col: sort-column; active-ascending: sort-ascending; clicked => { toggle-sort(11); } }
+                    HeaderCell { width: col-loco-w; col-width <=> col-loco-w; min-col-width: 35px; label: "Loco"; column-index: 12; active-col: sort-column; active-ascending: sort-ascending; clicked => { toggle-sort(12); } }
+                    HeaderCell { width: col-ledup-w; col-width <=> col-ledup-w; min-col-width: 40px; label: "LED ⬆"; column-index: 13; active-col: sort-column; active-ascending: sort-ascending; clicked => { toggle-sort(13); } }
+                    HeaderCell { width: col-leddn-w; col-width <=> col-leddn-w; min-col-width: 40px; label: "LED ⬇"; column-index: 14; active-col: sort-column; active-ascending: sort-ascending; clicked => { toggle-sort(14); } }
+                }
+            }
+
+            // Data rows
+            Flickable {
+                vertical-stretch: 1;
+                viewport-height: table-rows.length * 34px;
+
+                for row[i] in table-rows: Rectangle {
+                    width: parent.width;
+                    y: i * 34px;
+                    height: 34px;
+                    background: selected-row == i ? Palette.foreground.transparentize(0.85)
+                              : sorted-units[i].state != UnitState.disconnected && !sorted-units[i].selftest-passed ? #ff000025
+                              : mod(i, 2) == 0 ? transparent
+                              : Palette.background.darker(0.03);
+                    border-width: 1px;
+                    border-color: Palette.border.transparentize(0.6);
+
+                    TouchArea {
+                        clicked => {
+                            if (selected-row == i && sidebar-open) {
+                                sidebar-open = false;
+                                selected-row = -1;
+                            } else {
+                                selected-row = i;
+                                sidebar-open = true;
+                                row-selected(i);
+                            }
+                        }
+                        mouse-cursor: pointer;
+                    }
+
+                    HorizontalLayout {
+                        spacing: 0px;
+
+                        Cell { width: col-indicator-w; value: row[0].text; }
+                        Cell { horizontal-stretch: 1; min-width: col-status-w; value: row[1].text; }
+                        Cell { horizontal-stretch: 1; min-width: col-name-w; value: row[2].text; }
+                        Cell { horizontal-stretch: 1; min-width: col-uri-w; value: row[3].text; }
+                        Cell { width: col-x-w; value: row[4].text; }
+                        Cell { width: col-y-w; value: row[5].text; }
+                        Cell { width: col-z-w; value: row[6].text; }
+                        BatteryCell { width: col-battery-w; voltage: sorted-units[i].battery-voltage; }
+                        LinkQualityCell { width: col-link-w; quality: sorted-units[i].link-quality; }
+                        Cell { width: col-power-w; value: row[9].text; }
+                        Cell { width: col-supervisor-w; value: row[10].text; }
+                        Cell { width: col-lh-w; value: row[11].text; }
+                        Cell { width: col-loco-w; value: row[12].text; }
+                        Cell { width: col-ledup-w; value: row[13].text; }
+                        Cell { width: col-leddn-w; value: row[14].text; }
+                    }
+                }
+            }
+        }
+
+        // Sidebar resize handle
+        if sidebar-open: Rectangle {
+            width: 4px;
+            background: sidebar-drag.has-hover || sidebar-drag.pressed ? Palette.accent-background : transparent;
+
+            sidebar-drag := TouchArea {
+                mouse-cursor: ew-resize;
+                moved => {
+                    sidebar-width = max(300px, min(600px, sidebar-width - self.mouse-x));
+                }
+            }
+        }
+
+        // Sidebar
+        if sidebar-open: UnitSidebar {
+            width: sidebar-width;
+            unit: selected-row >= 0 && selected-row < sorted-units.length ? sorted-units[selected-row] : {
+                name: "",
+                uri: "",
+                description: "",
+                state: UnitState.disconnected,
+                pos-x: 0,
+                pos-y: 0,
+                pos-z: 0,
+                battery-voltage: 0,
+                deck-lighthouse: false,
+                deck-loco: false,
+                deck-led-top: false,
+                deck-led-bottom: false,
+                serial: "",
+                pm-state: "",
+                supervisor-info: 0,
+                link-quality: 0,
+            };
+            has-selection: selected-row >= 0 && selected-row < sorted-units.length;
+            journal-entries: root.journal-entries;
+            journal-clicked => {
+                open-journal-requested(selected-row);
+                journal-open = true;
+            }
+            add-journal-entry(text) => {
+                add-journal-entry-requested(selected-row, text);
+            }
+            upload-trajectory-clicked => { upload-trajectory-requested(selected-row); }
+            fly-trajectory-clicked => { fly-trajectory-requested(selected-row); }
+            clear-trajectory-clicked => { clear-trajectory-requested(selected-row); }
+            takeoff-clicked(height, yaw, time) => { takeoff-requested(selected-row, height, yaw, time); }
+            goto-clicked(x, y, z, yaw, relative) => { goto-requested(selected-row, x, y, z, yaw, relative); }
+            land-clicked => { land-requested(selected-row); }
+            identify-clicked => { identify-requested(selected-row); }
+            manual-control-clicked => {
+                open-manual-control-requested(selected-row);
+                manual-control-open = true;
+            }
+            connect-clicked => { connect-unit-requested(selected-row); }
+            disconnect-clicked => { disconnect-unit-requested(selected-row); }
+            recover-clicked => { recover-requested(selected-row); }
+            reboot-clicked => { reboot-requested(selected-row); }
+            power-off-clicked => { confirm-power-off-open = true; }
+            sysoff-clicked => { sysoff-requested(selected-row); }
+            syson-clicked => { syson-requested(selected-row); }
+            close-clicked => {
+                sidebar-open = false;
+                selected-row = -1;
+            }
+        }
+    }
+
+    // Manual control popup overlay
+    if manual-control-open: Rectangle {
+        background: #00000080;
+
+        TouchArea {
+            clicked => {
+                manual-control-stopped(selected-row);
+                manual-control-open = false;
+            }
+        }
+
+        Rectangle {
+            width: min(400px, root.width - 40px);
+            background: Palette.background;
+            border-radius: 8px;
+            border-width: 1px;
+            border-color: Palette.border;
+
+            TouchArea {
+                // Block clicks from closing the popup
+            }
+
+            VerticalLayout {
+                spacing: 0px;
+
+                // Header
+                Rectangle {
+                    height: 44px;
+
+                    HorizontalLayout {
+                        padding-left: 16px;
+                        padding-right: 8px;
+
+                        Text {
+                            text: selected-row >= 0 && selected-row < sorted-units.length
+                                ? "Manual Control — " + sorted-units[selected-row].name
+                                : "Manual Control";
+                            font-size: 15px;
+                            font-weight: 700;
+                            vertical-alignment: center;
+                            horizontal-stretch: 1;
+                        }
+
+                        Button {
+                            text: "✕";
+                            height: 28px;
+                            width: 28px;
+                            clicked => {
+                                manual-control-stopped(selected-row);
+                                manual-control-open = false;
+                            }
+                        }
+                    }
+                }
+
+                Rectangle {
+                    height: 1px;
+                    background: Palette.border;
+                }
+
+                VerticalLayout {
+                    padding: 12px;
+                    spacing: 8px;
+
+                    HorizontalLayout {
+                        spacing: 8px;
+
+                        Text {
+                            text: "Joystick:";
+                            font-size: 12px;
+                            vertical-alignment: center;
+                        }
+
+                        ComboBox {
+                            horizontal-stretch: 1;
+                            model: root.joystick-names;
+                            selected(value) => {
+                                joystick-selected(selected-row, self.current-index);
+                            }
+                        }
+                    }
+
+                    if joystick-names.length == 0: Text {
+                        text: "No joysticks detected.";
+                        font-size: 12px;
+                        color: Palette.foreground.transparentize(0.5);
+                        horizontal-alignment: center;
+                    }
+
+                    HorizontalLayout {
+                        spacing: 8px;
+                        alignment: start;
+
+                        Button {
+                            text: root.manual-control-armed ? "Disarm" : "Arm";
+                            clicked => {
+                                arm-requested(selected-row, !root.manual-control-armed);
+                            }
+                        }
+
+                        Rectangle {
+                            width: 10px;
+                            height: 10px;
+                            border-radius: 5px;
+                            background: root.manual-control-armed ? limegreen : red;
+                            y: (parent.height - self.height) / 2;
+                        }
+
+                        Text {
+                            text: root.manual-control-armed ? "Armed" : "Disarmed";
+                            font-size: 12px;
+                            color: root.manual-control-armed ? limegreen : Palette.foreground.transparentize(0.4);
+                            vertical-alignment: center;
+                        }
+                    }
+
+                    HorizontalLayout {
+                        alignment: center;
+                        spacing: 24px;
+
+                        StickIndicator {
+                            label-x: "Yaw";
+                            label-y: "Thrust";
+                            value-x: root.stick-lx;
+                            value-y: root.stick-ly;
+                        }
+
+                        StickIndicator {
+                            label-x: "Roll";
+                            label-y: "Pitch";
+                            value-x: root.stick-rx;
+                            value-y: root.stick-ry;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Power off confirmation dialog
+    if confirm-power-off-open: Rectangle {
+        background: #00000080;
+
+        TouchArea {
+            clicked => { confirm-power-off-open = false; }
+        }
+
+        Rectangle {
+            width: 340px;
+            background: Palette.background;
+            border-radius: 8px;
+            border-width: 1px;
+            border-color: Palette.border;
+
+            TouchArea {
+                // Block clicks from closing the dialog
+            }
+
+            VerticalLayout {
+                padding: 24px;
+                spacing: 16px;
+
+                Text {
+                    text: selected-row >= 0 && selected-row < sorted-units.length
+                        ? "Power off " + sorted-units[selected-row].name + "?"
+                        : "Power off this unit?";
+                    font-size: 15px;
+                    font-weight: 600;
+                }
+
+                HorizontalLayout {
+                    alignment: end;
+                    spacing: 8px;
+
+                    Button {
+                        text: "Cancel";
+                        clicked => { confirm-power-off-open = false; }
+                    }
+
+                    Button {
+                        text: "Power Off";
+                        clicked => {
+                            power-off-requested(selected-row);
+                            confirm-power-off-open = false;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Journal popup overlay
+    if journal-open: Rectangle {
+        background: #00000080;
+
+        TouchArea {
+            clicked => { journal-open = false; }
+        }
+
+        Rectangle {
+            width: min(500px, root.width - 40px);
+            max-height: root.height - 40px;
+            background: Palette.background;
+            border-radius: 8px;
+            border-width: 1px;
+            border-color: Palette.border;
+
+            TouchArea {
+                // Block clicks from closing the popup
+            }
+
+            VerticalLayout {
+                spacing: 0px;
+
+                // Header
+                Rectangle {
+                    height: 44px;
+
+                    HorizontalLayout {
+                        padding-left: 16px;
+                        padding-right: 8px;
+
+                        Text {
+                            text: selected-row >= 0 && selected-row < sorted-units.length
+                                ? "Journal — " + sorted-units[selected-row].name
+                                : "Journal";
+                            font-size: 15px;
+                            font-weight: 700;
+                            vertical-alignment: center;
+                            horizontal-stretch: 1;
+                        }
+
+                        Button {
+                            text: "✕";
+                            height: 28px;
+                            width: 28px;
+                            clicked => { journal-open = false; }
+                        }
+                    }
+                }
+
+                Rectangle {
+                    height: 1px;
+                    background: Palette.border;
+                }
+
+                // Entries list
+                ScrollView {
+                    VerticalLayout {
+                        alignment: start;
+                        padding: 12px;
+                        spacing: 8px;
+
+                        if journal-entries.length == 0: Text {
+                            text: "No journal entries yet.";
+                            font-size: 12px;
+                            color: Palette.foreground.transparentize(0.5);
+                            horizontal-alignment: center;
+                        }
+
+                        for entry[idx] in journal-entries: Rectangle {
+                            border-width: 1px;
+                            border-color: Palette.border.transparentize(0.5);
+                            border-radius: 4px;
+
+                            HorizontalLayout {
+                                padding: 8px;
+                                spacing: 8px;
+
+                                VerticalLayout {
+                                    horizontal-stretch: 1;
+                                    spacing: 4px;
+
+                                    Text {
+                                        text: entry.timestamp;
+                                        font-size: 10px;
+                                        color: Palette.foreground.transparentize(0.4);
+                                    }
+
+                                    Text {
+                                        text: entry.text;
+                                        font-size: 12px;
+                                        wrap: word-wrap;
+                                    }
+                                }
+
+                                Button {
+                                    text: "✕";
+                                    width: 24px;
+                                    height: 24px;
+                                    clicked => { delete-journal-entry-requested(selected-row, idx); }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                Rectangle {
+                    height: 1px;
+                    background: Palette.border;
+                }
+
+                // Add entry
+                HorizontalLayout {
+                    padding: 12px;
+                    spacing: 8px;
+
+                    journal-input := LineEdit {
+                        horizontal-stretch: 1;
+                        placeholder-text: "Add a note...";
+                        accepted => {
+                            if (self.text != "") {
+                                add-journal-entry-requested(selected-row, self.text);
+                                self.text = "";
+                            }
+                        }
+                    }
+
+                    Button {
+                        text: "Add";
+                        clicked => {
+                            if (journal-input.text != "") {
+                                add-journal-entry-requested(selected-row, journal-input.text);
+                                journal-input.text = "";
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

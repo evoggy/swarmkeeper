@@ -1,0 +1,246 @@
+import { CheckBox, ComboBox, Palette } from "std-widgets.slint";
+
+export struct VizLabel {
+    text: string,
+    screen-x: float,
+    screen-y: float,
+}
+
+export component VisualizationContent inherits Rectangle {
+    in-out property <image> texture;
+    out property <float> viewport-width: self.width / 1px;
+    out property <float> viewport-height: self.height / 1px;
+
+    // Camera state
+    in-out property <float> cam-yaw: 0.8;
+    in-out property <float> cam-pitch: 0.6;
+    in-out property <float> cam-distance: 6.0;
+    in-out property <float> cam-pan-x: 0;
+    in-out property <float> cam-pan-y: 0;
+
+    // Label toggle states
+    in-out property <bool> show-cf-labels: false;
+    in-out property <bool> show-lh-labels: false;
+    in-out property <bool> show-loco-labels: false;
+    in-out property <bool> show-axis-labels: false;
+    in-out property <bool> show-grid-labels: false;
+
+    // Positioning source selector
+    in-out property <[string]> positioning-source-names;
+    in-out property <int> positioning-source-index;
+    callback positioning-source-changed(int);
+
+    // Label data (set from Rust)
+    in-out property <[VizLabel]> cf-labels;
+    in-out property <[VizLabel]> lh-labels;
+    in-out property <[VizLabel]> loco-labels;
+    in-out property <[VizLabel]> axis-labels;
+    in-out property <[VizLabel]> grid-labels;
+
+    Image {
+        source: root.texture;
+        width: 100%;
+        height: 100%;
+        image-fit: fill;
+    }
+
+    // Label overlays
+    if show-cf-labels: Rectangle {
+        width: 100%;
+        height: 100%;
+        for label in root.cf-labels: Text {
+            x: label.screen-x * 1px;
+            y: label.screen-y * 1px;
+            text: label.text;
+            font-size: 11px;
+            color: #4d94ff;
+        }
+    }
+
+    if show-lh-labels: Rectangle {
+        width: 100%;
+        height: 100%;
+        for label in root.lh-labels: Text {
+            x: label.screen-x * 1px;
+            y: label.screen-y * 1px;
+            text: label.text;
+            font-size: 10px;
+            color: #f04545;
+        }
+    }
+
+    if show-loco-labels: Rectangle {
+        width: 100%;
+        height: 100%;
+        for label in root.loco-labels: Text {
+            x: label.screen-x * 1px;
+            y: label.screen-y * 1px;
+            text: label.text;
+            font-size: 10px;
+            color: #ffd900;
+        }
+    }
+
+    if show-axis-labels: Rectangle {
+        width: 100%;
+        height: 100%;
+        for label in root.axis-labels: Text {
+            x: label.screen-x * 1px;
+            y: label.screen-y * 1px;
+            text: label.text;
+            font-size: 12px;
+            font-weight: 700;
+            color: label.text == "X" ? #f04545
+                 : label.text == "Y" ? #4ad980
+                 : #61a6fb;
+        }
+    }
+
+    if show-grid-labels: Rectangle {
+        width: 100%;
+        height: 100%;
+        for label in root.grid-labels: Text {
+            x: label.screen-x * 1px;
+            y: label.screen-y * 1px;
+            text: label.text;
+            font-size: 9px;
+            color: Palette.foreground.transparentize(0.5);
+        }
+    }
+
+    TouchArea {
+        property <float> prev-x;
+        property <float> prev-y;
+        property <bool> dragging;
+        property <bool> right-button;
+        property <bool> right-click-moved;
+
+        scroll-event(e) => {
+            if (e.delta-y > 0) {
+                root.cam-distance = max(1.0, root.cam-distance - 0.5);
+            } else if (e.delta-y < 0) {
+                root.cam-distance = min(20.0, root.cam-distance + 0.5);
+            }
+            accept
+        }
+
+        pointer-event(e) => {
+            if (e.kind == PointerEventKind.down) {
+                self.prev-x = self.mouse-x / 1px;
+                self.prev-y = self.mouse-y / 1px;
+                self.dragging = true;
+                self.right-button = e.button == PointerEventButton.right || e.button == PointerEventButton.middle;
+                if (e.button == PointerEventButton.right) {
+                    self.right-click-moved = false;
+                }
+            } else if (e.kind == PointerEventKind.up) {
+                if (e.button == PointerEventButton.right && !self.right-click-moved) {
+                    context-menu.show();
+                }
+                self.dragging = false;
+            }
+        }
+
+        moved => {
+            if (self.dragging) {
+                if (self.pressed) {
+                    if (self.right-button) {
+                        self.right-click-moved = true;
+                        root.cam-pan-x += (self.mouse-x / 1px - self.prev-x) * 0.01;
+                        root.cam-pan-y -= (self.mouse-y / 1px - self.prev-y) * 0.01;
+                    } else {
+                        root.cam-yaw -= (self.mouse-x / 1px - self.prev-x) * 0.01;
+                        root.cam-pitch = clamp(root.cam-pitch + (self.mouse-y / 1px - self.prev-y) * 0.01, 0.1, 1.5);
+                    }
+                }
+                self.prev-x = self.mouse-x / 1px;
+                self.prev-y = self.mouse-y / 1px;
+            }
+        }
+    }
+
+    context-menu := PopupWindow {
+        x: 10px;
+        y: 10px;
+        width: 220px;
+
+        Rectangle {
+            width: 220px;
+            background: Palette.background;
+            border-width: 1px;
+            border-color: Palette.border;
+            border-radius: 4px;
+
+            VerticalLayout {
+                padding: 8px;
+                spacing: 4px;
+
+                Text {
+                    text: "Show Labels";
+                    font-size: 12px;
+                    font-weight: 600;
+                    color: Palette.foreground.transparentize(0.3);
+                }
+
+                CheckBox {
+                    text: "Crazyflie names";
+                    checked <=> root.show-cf-labels;
+                }
+
+                CheckBox {
+                    text: "Lighthouse base station IDs";
+                    checked <=> root.show-lh-labels;
+                }
+
+                CheckBox {
+                    text: "Loco node IDs";
+                    checked <=> root.show-loco-labels;
+                }
+
+                Rectangle {
+                    height: 1px;
+                    background: Palette.border.transparentize(0.5);
+                }
+
+                CheckBox {
+                    text: "Axis labels (X, Y, Z)";
+                    checked <=> root.show-axis-labels;
+                }
+
+                CheckBox {
+                    text: "Grid measurements (m)";
+                    checked <=> root.show-grid-labels;
+                }
+            }
+        }
+    }
+
+    // Positioning source dropdown (must be after TouchArea to receive events)
+    Rectangle {
+        x: 8px;
+        y: 8px;
+        width: 220px;
+        height: 32px;
+
+        HorizontalLayout {
+            spacing: 6px;
+            alignment: start;
+
+            Text {
+                text: "Source:";
+                font-size: 12px;
+                color: Palette.foreground.transparentize(0.3);
+                vertical-alignment: center;
+            }
+
+            ComboBox {
+                width: 160px;
+                model: root.positioning-source-names;
+                current-index <=> root.positioning-source-index;
+                selected(value) => {
+                    root.positioning-source-changed(self.current-index);
+                }
+            }
+        }
+    }
+}
