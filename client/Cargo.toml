@@ -1,0 +1,27 @@
+[package]
+name = "swarmkeeper"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "Crazyflie swarm management application"
+repository = "https://github.com/evoggy/swarmkeeper"
+
+[dependencies]
+slint = "1.14.1"
+crazyflie-lib = "0.7.0"
+crazyflie-link = "0.4.2"
+crazyradio = { version = "0.6.0", features = ["shared_radio", "async"] }
+tokio = { version = "1.48.0", features = ["full"] }
+futures = "0.3.31"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+serde_yaml = "0.9"
+dirs-next = "2.0"
+glow = "0.16"
+chrono = "0.4"
+rfd = "0.15"
+confy = "0.6"
+gilrs = "0.11"
+
+[build-dependencies]
+slint-build = "1.14.1"
