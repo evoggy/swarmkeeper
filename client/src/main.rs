@@ -1558,6 +1558,146 @@ async fn main() {
         });
     }
 
+    // Sync blink: broadcast synchronized blink command to all units via P2P radio broadcast
+    {
+        let link_context = link_context.clone();
+        let ui_weak = ui.as_weak();
+        ui.on_sync_blink(move || {
+            let Some(ui_ref) = ui_weak.upgrade() else { return };
+            let units = ui_ref.get_units();
+            let uris: Vec<String> = (0..units.row_count())
+                .filter_map(|i| units.row_data(i).map(|u| u.uri.to_string()))
+                .collect();
+
+            let link_context = link_context.clone();
+
+            tokio::spawn(async move {
+                // Collect unique (radio_nth, channel) pairs from all unit URIs
+                let mut radio_channels: Vec<(usize, u8)> = uris
+                    .iter()
+                    .filter_map(|uri| parse_radio_uri(uri).map(|(r, ch, _)| (r, ch)))
+                    .collect();
+                radio_channels.sort();
+                radio_channels.dedup();
+
+                if radio_channels.is_empty() {
+                    eprintln!("No radio URIs found for sync blink");
+                    return;
+                }
+
+                const BROADCAST_ADDR: [u8; 5] = [0xff, 0xe7, 0xe7, 0xe7, 0xe7];
+                const P2P_PORT: u8 = 0;
+
+                // Send multiple broadcasts with decreasing delay so all units
+                // converge on the same execution time
+                let delays_ms: &[u16] = &[100, 80, 60, 40, 20];
+
+                eprintln!("Broadcasting sync blink on {} channel(s)...", radio_channels.len());
+                for &delay_ms in delays_ms {
+                    // P2P packet format: [0xF3, 0x80 | port, ...payload...]
+                    let packet = vec![
+                        0xF3,
+                        0x80 | P2P_PORT,
+                        0x01, // CMD_SYNC_EXECUTE
+                        0x00, // function index 0 (white blink)
+                        (delay_ms & 0xFF) as u8,
+                        (delay_ms >> 8) as u8,
+                    ];
+
+                    for &(radio_nth, ch) in &radio_channels {
+                        let channel = match crazyradio::Channel::from_number(ch) {
+                            Ok(c) => c,
+                            Err(_) => continue,
+                        };
+                        match link_context.get_radio(radio_nth).await {
+                            Ok(mut radio) => {
+                                if let Err(e) = radio.send_packet_no_ack_async(channel, BROADCAST_ADDR, packet.clone()).await {
+                                    eprintln!("Broadcast on channel {} failed: {:?}", ch, e);
+                                }
+                            }
+                            Err(e) => eprintln!("Failed to get radio {}: {:?}", radio_nth, e),
+                        }
+                    }
+
+                    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                }
+                eprintln!("Sync blink broadcast done");
+            });
+        });
+    }
+
+    // Delayed sync blink: broadcast with 5 second delay, repeated broadcasts with decreasing time
+    {
+        let link_context = link_context.clone();
+        let ui_weak = ui.as_weak();
+        ui.on_delayed_sync_blink(move || {
+            let Some(ui_ref) = ui_weak.upgrade() else { return };
+            let units = ui_ref.get_units();
+            let uris: Vec<String> = (0..units.row_count())
+                .filter_map(|i| units.row_data(i).map(|u| u.uri.to_string()))
+                .collect();
+
+            let link_context = link_context.clone();
+
+            tokio::spawn(async move {
+                let mut radio_channels: Vec<(usize, u8)> = uris
+                    .iter()
+                    .filter_map(|uri| parse_radio_uri(uri).map(|(r, ch, _)| (r, ch)))
+                    .collect();
+                radio_channels.sort();
+                radio_channels.dedup();
+
+                if radio_channels.is_empty() {
+                    eprintln!("No radio URIs found for delayed sync blink");
+                    return;
+                }
+
+                const BROADCAST_ADDR: [u8; 5] = [0xff, 0xe7, 0xe7, 0xe7, 0xe7];
+                const P2P_PORT: u8 = 0;
+                const TOTAL_DELAY_MS: u16 = 5000;
+                const BROADCAST_INTERVAL_MS: u64 = 100;
+
+                eprintln!("Broadcasting delayed sync blink (5s) on {} channel(s)...", radio_channels.len());
+
+                let start = std::time::Instant::now();
+                loop {
+                    let elapsed_ms = start.elapsed().as_millis() as u16;
+                    let remaining_ms = TOTAL_DELAY_MS.saturating_sub(elapsed_ms);
+                    if remaining_ms == 0 {
+                        break;
+                    }
+
+                    let packet = vec![
+                        0xF3,
+                        0x80 | P2P_PORT,
+                        0x01, // CMD_SYNC_EXECUTE
+                        0x00, // function index 0 (white blink)
+                        (remaining_ms & 0xFF) as u8,
+                        (remaining_ms >> 8) as u8,
+                    ];
+
+                    for &(radio_nth, ch) in &radio_channels {
+                        let channel = match crazyradio::Channel::from_number(ch) {
+                            Ok(c) => c,
+                            Err(_) => continue,
+                        };
+                        match link_context.get_radio(radio_nth).await {
+                            Ok(mut radio) => {
+                                if let Err(e) = radio.send_packet_no_ack_async(channel, BROADCAST_ADDR, packet.clone()).await {
+                                    eprintln!("Broadcast on channel {} failed: {:?}", ch, e);
+                                }
+                            }
+                            Err(e) => eprintln!("Failed to get radio {}: {:?}", radio_nth, e),
+                        }
+                    }
+
+                    tokio::time::sleep(std::time::Duration::from_millis(BROADCAST_INTERVAL_MS)).await;
+                }
+                eprintln!("Delayed sync blink broadcast done");
+            });
+        });
+    }
+
     // Emergency stop: disarm all connected units
     {
         let swarm_state = swarm_state.clone();

@@ -125,6 +125,8 @@ component SwarmInfoBar inherits Rectangle {
     callback syson-swarm-clicked();
     callback tuning-clicked();
     callback health-test-clicked();
+    callback sync-blink-clicked();
+    callback delayed-sync-blink-clicked();
 
     property <float> progress: units.length > 0 ? connected-count / units.length : 0;
     property <bool> connecting: connected && progress < 1.0;
@@ -291,6 +293,20 @@ component SwarmInfoBar inherits Rectangle {
         }
 
         if connected: Button {
+            text: "Sync Blink";
+            clicked => {
+                sync-blink-clicked();
+            }
+        }
+
+        if connected: Button {
+            text: "Delayed Sync Blink";
+            clicked => {
+                delayed-sync-blink-clicked();
+            }
+        }
+
+        if connected: Button {
             text: "Land All";
             clicked => {
                 land-swarm-clicked();
@@ -425,6 +441,8 @@ export component AppWindow inherits Window {
     callback upload-trajectory-swarm();
     callback fly-trajectory-swarm();
     callback land-swarm();
+    callback sync-blink();
+    callback delayed-sync-blink();
     callback emergency-stop();
     callback reboot-swarm();
     callback power-off-swarm();
@@ -517,6 +535,8 @@ export component AppWindow inherits Window {
             upload-trajectory-swarm-clicked => { upload-trajectory-swarm(); }
             fly-trajectory-swarm-clicked => { fly-trajectory-swarm(); }
             land-swarm-clicked => { land-swarm(); }
+            sync-blink-clicked => { sync-blink(); }
+            delayed-sync-blink-clicked => { delayed-sync-blink(); }
             emergency-stop-clicked => { emergency-stop(); }
             reboot-swarm-clicked => { reboot-swarm(); }
             power-off-swarm-clicked => { confirm-power-off-visible = true; }
