@@ -3,6 +3,7 @@ import { UnitsContent } from "units.slint";
 import { VisualizationContent, VizLabel } from "visualization.slint";
 import { UnitData, UnitState, JournalEntryData } from "unit-card.slint";
 import { RadioTestContent, ChannelResult } from "radio-test.slint";
+import { LhCoverageContent, LhBaseStationData } from "lh-coverage.slint";
 
 export struct HealthTestResult {
     name: string,
@@ -509,6 +510,49 @@ export component AppWindow inherits Window {
     in-out property <float> stick-ry;
     in-out property <bool> manual-control-armed;
 
+    // LH Coverage
+    in-out property <image> lh-coverage-texture;
+    out property <float> lh-coverage-width: lh-cov-content.viewport-width;
+    out property <float> lh-coverage-height: lh-cov-content.viewport-height;
+    out property <float> lh-cov-cam-yaw: lh-cov-content.cam-yaw;
+    out property <float> lh-cov-cam-pitch: lh-cov-content.cam-pitch;
+    out property <float> lh-cov-cam-distance: lh-cov-content.cam-distance;
+    in-out property <float> lh-cov-cam-pan-x <=> lh-cov-content.cam-pan-x;
+    in-out property <float> lh-cov-cam-pan-y <=> lh-cov-content.cam-pan-y;
+    in-out property <string> lh-cov-room-x <=> lh-cov-content.room-x;
+    in-out property <string> lh-cov-room-y <=> lh-cov-content.room-y;
+    in-out property <string> lh-cov-room-z <=> lh-cov-content.room-z;
+    in-out property <string> lh-cov-resolution <=> lh-cov-content.resolution;
+    in-out property <[LhBaseStationData]> lh-cov-base-stations;
+    in-out property <bool> lh-cov-show-coverage-0 <=> lh-cov-content.show-coverage-0;
+    in-out property <bool> lh-cov-show-coverage-1 <=> lh-cov-content.show-coverage-1;
+    in-out property <bool> lh-cov-show-coverage-2 <=> lh-cov-content.show-coverage-2;
+    in-out property <bool> lh-cov-show-coverage-3 <=> lh-cov-content.show-coverage-3;
+    in-out property <bool> lh-cov-show-coverage-4 <=> lh-cov-content.show-coverage-4;
+    in-out property <bool> lh-cov-receiver-fov-enabled <=> lh-cov-content.receiver-fov-enabled;
+    in-out property <bool> lh-cov-tilt-compensation-enabled <=> lh-cov-content.tilt-compensation-enabled;
+    in-out property <string> lh-cov-max-tilt-angle <=> lh-cov-content.max-tilt-angle;
+    in-out property <string> lh-cov-max-bs-distance <=> lh-cov-content.max-bs-distance;
+    in-out property <bool> lh-cov-center-origin <=> lh-cov-content.center-origin;
+    in-out property <int> lh-cov-selected-bs: -1;
+    in-out property <bool> lh-cov-handle-active: false;
+    in-out property <int> lh-cov-active-handle: 0;
+    in-out property <[VizLabel]> lh-cov-grid-labels;
+    in-out property <string> lh-cov-coverage-1-text;
+    in-out property <string> lh-cov-coverage-2-text;
+    callback lh-cov-load-geometry();
+    callback lh-cov-save-scene();
+    callback lh-cov-load-scene();
+    callback lh-cov-add-bs();
+    callback lh-cov-undo();
+    callback lh-cov-remove-bs(int);
+    callback lh-cov-update-bs(int, LhBaseStationData);
+    callback lh-cov-recompute();
+    callback lh-cov-view-mouse-pressed(float, float);
+    callback lh-cov-view-mouse-moved(float, float);
+    callback lh-cov-view-mouse-released();
+    callback lh-cov-view-pan(float, float);
+
     VerticalBox {
         padding: 0px;
         spacing: 0px;
@@ -615,6 +659,31 @@ export component AppWindow inherits Window {
                     positioning-source-names: root.positioning-source-names;
                     positioning-source-index <=> root.positioning-source-index;
                     positioning-source-changed(idx) => { root.positioning-source-changed(idx); }
+                }
+            }
+            Tab {
+                title: "LH Coverage";
+                lh-cov-content := LhCoverageContent {
+                    texture <=> root.lh-coverage-texture;
+                    base-stations <=> root.lh-cov-base-stations;
+                    selected-bs <=> root.lh-cov-selected-bs;
+                    handle-active <=> root.lh-cov-handle-active;
+                    active-handle <=> root.lh-cov-active-handle;
+                    grid-labels: root.lh-cov-grid-labels;
+                    coverage-1-text: root.lh-cov-coverage-1-text;
+                    coverage-2-text: root.lh-cov-coverage-2-text;
+                    load-geometry => { root.lh-cov-load-geometry(); }
+                    save-scene => { root.lh-cov-save-scene(); }
+                    load-scene => { root.lh-cov-load-scene(); }
+                    add-base-station => { root.lh-cov-add-bs(); }
+                    undo => { root.lh-cov-undo(); }
+                    remove-base-station(idx) => { root.lh-cov-remove-bs(idx); }
+                    update-base-station(idx, data) => { root.lh-cov-update-bs(idx, data); }
+                    recompute => { root.lh-cov-recompute(); }
+                    view-mouse-pressed(x, y) => { root.lh-cov-view-mouse-pressed(x, y); }
+                    view-mouse-moved(x, y) => { root.lh-cov-view-mouse-moved(x, y); }
+                    view-mouse-released => { root.lh-cov-view-mouse-released(); }
+                    view-pan(dx, dy) => { root.lh-cov-view-pan(dx, dy); }
                 }
             }
         }

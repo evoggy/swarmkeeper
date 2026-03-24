@@ -1,0 +1,427 @@
+import { VerticalBox, HorizontalBox, Button, LineEdit, ScrollView, Palette, CheckBox } from "std-widgets.slint";
+import { VizLabel } from "visualization.slint";
+
+export struct LhBaseStationData {
+    x: string,
+    y: string,
+    z: string,
+    azimuth: string,
+    elevation: string,
+}
+
+export component LhCoverageContent inherits Rectangle {
+    in-out property <image> texture;
+    out property <float> viewport-width: view-area.width / 1px;
+    out property <float> viewport-height: view-area.height / 1px;
+
+    // Camera state
+    in-out property <float> cam-yaw: 0.8;
+    in-out property <float> cam-pitch: 0.6;
+    in-out property <float> cam-distance: 12.0;
+    in-out property <float> cam-pan-x: 0;
+    in-out property <float> cam-pan-y: 0;
+
+    // Room parameters
+    in-out property <string> room-x: "8.0";
+    in-out property <string> room-y: "8.0";
+    in-out property <string> room-z: "3.0";
+    in-out property <string> resolution: "5.0";
+
+    // Base station list
+    in-out property <[LhBaseStationData]> base-stations;
+
+    // Display options
+    in-out property <bool> show-coverage-0: true;
+    in-out property <bool> show-coverage-1: true;
+    in-out property <bool> show-coverage-2: true;
+    in-out property <bool> show-coverage-3: true;
+    in-out property <bool> show-coverage-4: true;
+    in-out property <bool> receiver-fov-enabled: true;
+    in-out property <bool> tilt-compensation-enabled: true;
+    in-out property <string> max-tilt-angle: "10";
+    in-out property <string> max-bs-distance: "5.0";
+    in-out property <bool> center-origin: false;
+
+    // Coverage stats (set from Rust)
+    in-out property <string> coverage-1-text: "";
+    in-out property <string> coverage-2-text: "";
+
+    // Grid labels (set from Rust)
+    in-out property <[VizLabel]> grid-labels;
+
+    // Selection / gizmo state (set from Rust)
+    in-out property <int> selected-bs: -1;
+    in-out property <bool> handle-active: false;
+    in-out property <int> active-handle: 0;
+
+    // Callbacks
+    callback load-geometry();
+    callback save-scene();
+    callback load-scene();
+    callback add-base-station();
+    callback undo();
+    callback remove-base-station(int);
+    callback update-base-station(int, LhBaseStationData);
+    callback recompute();
+    callback view-mouse-pressed(/* x */ float, /* y */ float);
+    callback view-mouse-moved(/* x */ float, /* y */ float);
+    callback view-mouse-released();
+    callback view-pan(/* dx_px */ float, /* dy_px */ float);
+
+    HorizontalLayout {
+        spacing: 0px;
+
+        // Left panel: configuration
+        Rectangle {
+            width: 320px;
+            border-width: 0px;
+            background: Palette.alternate-background;
+
+            VerticalLayout {
+                padding: 12px;
+                spacing: 10px;
+
+                HorizontalLayout {
+                    spacing: 4px;
+                    Text {
+                        text: "Lighthouse Coverage";
+                        font-size: 16px;
+                        font-weight: 600;
+                        vertical-alignment: center;
+                    }
+                    Rectangle { horizontal-stretch: 1; }
+                    Button {
+                        text: "Save";
+                        clicked => { root.save-scene(); }
+                    }
+                    Button {
+                        text: "Open";
+                        clicked => { root.load-scene(); }
+                    }
+                }
+
+                // Room dimensions
+                Text {
+                    text: "Room (m)";
+                    font-size: 12px;
+                    font-weight: 600;
+                    color: Palette.foreground.transparentize(0.3);
+                }
+
+                HorizontalLayout {
+                    spacing: 4px;
+                    Text { text: "X:"; font-size: 12px; vertical-alignment: center; width: 16px; }
+                    LineEdit { text <=> root.room-x; width: 110px; }
+                    Text { text: "Y:"; font-size: 12px; vertical-alignment: center; width: 16px; }
+                    LineEdit { text <=> root.room-y; width: 110px; }
+                }
+
+                HorizontalLayout {
+                    spacing: 4px;
+                    Text { text: "Z:"; font-size: 12px; vertical-alignment: center; width: 16px; }
+                    LineEdit { text <=> root.room-z; width: 110px; }
+                    Text { text: "Res:"; font-size: 12px; vertical-alignment: center; width: 28px; }
+                    LineEdit { text <=> root.resolution; width: 110px; }
+                }
+
+                Rectangle { height: 1px; background: Palette.border; }
+
+                HorizontalLayout {
+                    Text {
+                        text: "Base Stations";
+                        font-size: 12px;
+                        font-weight: 600;
+                        color: Palette.foreground.transparentize(0.3);
+                        vertical-alignment: center;
+                    }
+                    Rectangle { horizontal-stretch: 1; }
+                    Button {
+                        text: "Load";
+                        clicked => { root.load-geometry(); }
+                    }
+                    Button {
+                        text: "Add";
+                        clicked => { root.add-base-station(); }
+                    }
+                    Button {
+                        text: "Undo";
+                        clicked => { root.undo(); }
+                    }
+                }
+
+                ScrollView {
+                    vertical-stretch: 1;
+
+                    VerticalLayout {
+                        width: 296px;
+                        spacing: 8px;
+
+                        for bs[idx] in root.base-stations: Rectangle {
+                            border-radius: 4px;
+                            background: Palette.background;
+                            border-width: 1px;
+                            border-color: Palette.border;
+
+                            VerticalLayout {
+                                padding: 8px;
+                                spacing: 4px;
+
+                                HorizontalLayout {
+                                    Text {
+                                        text: "BS \{idx + 1}";
+                                        font-size: 12px;
+                                        font-weight: 600;
+                                        vertical-alignment: center;
+                                    }
+                                    Rectangle { horizontal-stretch: 1; }
+                                    Button {
+                                        text: "Remove";
+                                        clicked => { root.remove-base-station(idx); }
+                                    }
+                                }
+
+                                HorizontalLayout {
+                                    spacing: 2px;
+                                    Text { text: "X"; font-size: 11px; vertical-alignment: center; width: 14px; }
+                                    bs-x := LineEdit {
+                                        text: bs.x;
+                                        width: 75px;
+                                        edited(val) => {
+                                            root.update-base-station(idx, {
+                                                x: val,
+                                                y: bs-y.text,
+                                                z: bs-z.text,
+                                                azimuth: bs-az.text,
+                                                elevation: bs-el.text,
+                                            });
+                                        }
+                                    }
+                                    Text { text: "Y"; font-size: 11px; vertical-alignment: center; width: 14px; }
+                                    bs-y := LineEdit {
+                                        text: bs.y;
+                                        width: 75px;
+                                        edited(val) => {
+                                            root.update-base-station(idx, {
+                                                x: bs-x.text,
+                                                y: val,
+                                                z: bs-z.text,
+                                                azimuth: bs-az.text,
+                                                elevation: bs-el.text,
+                                            });
+                                        }
+                                    }
+                                    Text { text: "Z"; font-size: 11px; vertical-alignment: center; width: 14px; }
+                                    bs-z := LineEdit {
+                                        text: bs.z;
+                                        width: 75px;
+                                        edited(val) => {
+                                            root.update-base-station(idx, {
+                                                x: bs-x.text,
+                                                y: bs-y.text,
+                                                z: val,
+                                                azimuth: bs-az.text,
+                                                elevation: bs-el.text,
+                                            });
+                                        }
+                                    }
+                                }
+
+                                HorizontalLayout {
+                                    spacing: 2px;
+                                    Text { text: "Az"; font-size: 11px; vertical-alignment: center; width: 18px; }
+                                    bs-az := LineEdit {
+                                        text: bs.azimuth;
+                                        width: 85px;
+                                        edited(val) => {
+                                            root.update-base-station(idx, {
+                                                x: bs-x.text,
+                                                y: bs-y.text,
+                                                z: bs-z.text,
+                                                azimuth: val,
+                                                elevation: bs-el.text,
+                                            });
+                                        }
+                                    }
+                                    Text { text: "El"; font-size: 11px; vertical-alignment: center; width: 18px; }
+                                    bs-el := LineEdit {
+                                        text: bs.elevation;
+                                        width: 85px;
+                                        edited(val) => {
+                                            root.update-base-station(idx, {
+                                                x: bs-x.text,
+                                                y: bs-y.text,
+                                                z: bs-z.text,
+                                                azimuth: bs-az.text,
+                                                elevation: val,
+                                            });
+                                        }
+                                    }
+                                    Text { text: "°"; font-size: 11px; vertical-alignment: center; }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                Rectangle { height: 1px; background: Palette.border; }
+
+                CheckBox {
+                    text: "0 base stations";
+                    checked <=> root.show-coverage-0;
+                }
+
+                CheckBox {
+                    text: "1 base station";
+                    checked <=> root.show-coverage-1;
+                }
+
+                CheckBox {
+                    text: "2 base stations";
+                    checked <=> root.show-coverage-2;
+                }
+
+                CheckBox {
+                    text: "3 base stations";
+                    checked <=> root.show-coverage-3;
+                }
+
+                CheckBox {
+                    text: "4 base stations";
+                    checked <=> root.show-coverage-4;
+                }
+
+                CheckBox {
+                    text: "Receiver FOV (170°)";
+                    checked <=> root.receiver-fov-enabled;
+                }
+
+                HorizontalLayout {
+                    spacing: 4px;
+                    CheckBox {
+                        text: "Max tilt ±";
+                        checked <=> root.tilt-compensation-enabled;
+                    }
+                    LineEdit {
+                        text <=> root.max-tilt-angle;
+                        width: 80px;
+                    }
+                    Text { text: "°"; font-size: 12px; vertical-alignment: center; }
+                }
+
+                HorizontalLayout {
+                    spacing: 4px;
+                    Text { text: "Max BS distance:"; font-size: 12px; vertical-alignment: center; }
+                    LineEdit {
+                        text <=> root.max-bs-distance;
+                        width: 80px;
+                    }
+                    Text { text: "m"; font-size: 12px; vertical-alignment: center; }
+                }
+
+                CheckBox {
+                    text: "Center room at origin";
+                    checked <=> root.center-origin;
+                }
+
+                Button {
+                    text: "Compute Coverage";
+                    clicked => { root.recompute(); }
+                }
+
+                if root.coverage-1-text != "": VerticalLayout {
+                    spacing: 2px;
+                    Text { text: root.coverage-1-text; font-size: 12px; }
+                    Text { text: root.coverage-2-text; font-size: 12px; }
+                }
+            }
+        }
+
+        // Right panel: 3D view
+        view-area := Rectangle {
+            horizontal-stretch: 1;
+
+            Image {
+                source: root.texture;
+                width: 100%;
+                height: 100%;
+                image-fit: fill;
+            }
+
+            // Grid measurement labels
+            Rectangle {
+                width: 100%;
+                height: 100%;
+                for label in root.grid-labels: Text {
+                    x: label.screen-x * 1px;
+                    y: label.screen-y * 1px;
+                    text: label.text;
+                    font-size: 9px;
+                    color: #4d4d59;
+                }
+            }
+
+            TouchArea {
+                property <float> prev-x;
+                property <float> prev-y;
+                property <bool> dragging;
+                property <bool> panning;
+
+                scroll-event(e) => {
+                    if (e.delta-y > 0) {
+                        root.cam-distance = max(1.0, root.cam-distance - 0.5);
+                    } else if (e.delta-y < 0) {
+                        root.cam-distance = min(30.0, root.cam-distance + 0.5);
+                    }
+                    accept
+                }
+
+                pointer-event(e) => {
+                    if (e.kind == PointerEventKind.down) {
+                        if (e.button == PointerEventButton.left) {
+                            // Let Rust check for handle/BS hit — may set handle-active
+                            root.view-mouse-pressed(self.mouse-x / 1px, self.mouse-y / 1px);
+                            if (!root.handle-active) {
+                                self.prev-x = self.mouse-x / 1px;
+                                self.prev-y = self.mouse-y / 1px;
+                                self.dragging = true;
+                                self.panning = false;
+                            }
+                        } else if (e.button == PointerEventButton.middle) {
+                            self.prev-x = self.mouse-x / 1px;
+                            self.prev-y = self.mouse-y / 1px;
+                            self.panning = true;
+                        } else if (e.button == PointerEventButton.right) {
+                            self.prev-x = self.mouse-x / 1px;
+                            self.prev-y = self.mouse-y / 1px;
+                            self.panning = true;
+                        }
+                    } else if (e.kind == PointerEventKind.up) {
+                        if (root.handle-active) {
+                            root.view-mouse-released();
+                        }
+                        self.dragging = false;
+                        self.panning = false;
+                    }
+                }
+
+                moved => {
+                    if (root.handle-active) {
+                        root.view-mouse-moved(self.mouse-x / 1px, self.mouse-y / 1px);
+                    } else if (self.panning) {
+                        root.view-pan(
+                            self.mouse-x / 1px - self.prev-x,
+                            self.mouse-y / 1px - self.prev-y,
+                        );
+                        self.prev-x = self.mouse-x / 1px;
+                        self.prev-y = self.mouse-y / 1px;
+                    } else if (self.dragging) {
+                        root.cam-yaw -= (self.mouse-x / 1px - self.prev-x) * 0.01;
+                        root.cam-pitch = clamp(root.cam-pitch + (self.mouse-y / 1px - self.prev-y) * 0.01, 0.1, 1.5);
+                        self.prev-x = self.mouse-x / 1px;
+                        self.prev-y = self.mouse-y / 1px;
+                    }
+                }
+            }
+        }
+    }
+}
