@@ -1,0 +1,384 @@
+import { VerticalBox, HorizontalBox, Button, LineEdit, ScrollView, Palette, CheckBox, ComboBox } from "std-widgets.slint";
+import { VizLabel } from "visualization.slint";
+
+export struct Tdoa3AnchorData {
+    x: string,
+    y: string,
+    z: string,
+}
+
+export component Tdoa3CoverageContent inherits Rectangle {
+    in-out property <image> texture;
+    out property <float> viewport-width: view-area.width / 1px;
+    out property <float> viewport-height: view-area.height / 1px;
+
+    // Camera state
+    in-out property <float> cam-yaw: 0.8;
+    in-out property <float> cam-pitch: 0.6;
+    in-out property <float> cam-distance: 12.0;
+    in-out property <float> cam-pan-x: 0;
+    in-out property <float> cam-pan-y: 0;
+
+    // Room parameters
+    in-out property <string> room-x: "10.0";
+    in-out property <string> room-y: "10.0";
+    in-out property <string> room-z: "3.0";
+    in-out property <string> resolution: "2.0";
+
+    // Anchor list
+    in-out property <[Tdoa3AnchorData]> anchors;
+
+    // Metric selector
+    in-out property <[string]> metric-names: ["GDOP", "HDOP", "VDOP", "Anchor Pairs", "Pair Sensitivity"];
+    in-out property <int> metric-index: 0;
+    callback metric-changed(int);
+
+    // Pair sensitivity pair selector (anchor indices)
+    in-out property <string> pair-a: "0";
+    in-out property <string> pair-b: "1";
+    callback pair-changed();
+
+    // Display options
+    in-out property <string> max-range: "15.0";
+    in-out property <string> scale-value: "5.0";
+    in-out property <bool> show-uncovered: true;
+    in-out property <bool> center-origin: false;
+
+    // Stats (set from Rust)
+    in-out property <string> stats-text-1: "";
+    in-out property <string> stats-text-2: "";
+    in-out property <string> stats-text-3: "";
+
+    // Grid labels (set from Rust)
+    in-out property <[VizLabel]> grid-labels;
+
+    // Selection / gizmo state
+    in-out property <int> selected-anchor: -1;
+    in-out property <bool> handle-active: false;
+    in-out property <int> active-handle: 0;
+
+    // Callbacks
+    callback save-scene();
+    callback load-scene();
+    callback add-anchor();
+    callback undo();
+    callback remove-anchor(int);
+    callback update-anchor(int, Tdoa3AnchorData);
+    callback recompute();
+    callback view-mouse-pressed(/* x */ float, /* y */ float);
+    callback view-mouse-moved(/* x */ float, /* y */ float);
+    callback view-mouse-released();
+    callback view-pan(/* dx_px */ float, /* dy_px */ float);
+
+    HorizontalLayout {
+        spacing: 0px;
+
+        // Left panel: configuration
+        Rectangle {
+            width: 320px;
+            border-width: 0px;
+            background: Palette.alternate-background;
+
+            VerticalLayout {
+                padding: 12px;
+                spacing: 10px;
+
+                HorizontalLayout {
+                    spacing: 4px;
+                    Text {
+                        text: "TDoA3 Coverage";
+                        font-size: 16px;
+                        font-weight: 600;
+                        vertical-alignment: center;
+                    }
+                    Rectangle { horizontal-stretch: 1; }
+                    Button {
+                        text: "Save";
+                        clicked => { root.save-scene(); }
+                    }
+                    Button {
+                        text: "Open";
+                        clicked => { root.load-scene(); }
+                    }
+                }
+
+                // Room dimensions
+                Text {
+                    text: "Room (m)";
+                    font-size: 12px;
+                    font-weight: 600;
+                    color: Palette.foreground.transparentize(0.3);
+                }
+
+                HorizontalLayout {
+                    spacing: 4px;
+                    Text { text: "X:"; font-size: 12px; vertical-alignment: center; width: 16px; }
+                    LineEdit { text <=> root.room-x; width: 110px; }
+                    Text { text: "Y:"; font-size: 12px; vertical-alignment: center; width: 16px; }
+                    LineEdit { text <=> root.room-y; width: 110px; }
+                }
+
+                HorizontalLayout {
+                    spacing: 4px;
+                    Text { text: "Z:"; font-size: 12px; vertical-alignment: center; width: 16px; }
+                    LineEdit { text <=> root.room-z; width: 110px; }
+                    Text { text: "Res:"; font-size: 12px; vertical-alignment: center; width: 28px; }
+                    LineEdit { text <=> root.resolution; width: 110px; }
+                }
+
+                Rectangle { height: 1px; background: Palette.border; }
+
+                HorizontalLayout {
+                    Text {
+                        text: "Anchors";
+                        font-size: 12px;
+                        font-weight: 600;
+                        color: Palette.foreground.transparentize(0.3);
+                        vertical-alignment: center;
+                    }
+                    Rectangle { horizontal-stretch: 1; }
+                    Button {
+                        text: "Add";
+                        clicked => { root.add-anchor(); }
+                    }
+                    Button {
+                        text: "Undo";
+                        clicked => { root.undo(); }
+                    }
+                }
+
+                ScrollView {
+                    vertical-stretch: 1;
+
+                    VerticalLayout {
+                        width: 296px;
+                        spacing: 8px;
+
+                        for anchor[idx] in root.anchors: Rectangle {
+                            border-radius: 4px;
+                            background: Palette.background;
+                            border-width: 1px;
+                            border-color: Palette.border;
+
+                            VerticalLayout {
+                                padding: 8px;
+                                spacing: 4px;
+
+                                HorizontalLayout {
+                                    Text {
+                                        text: "Anchor \{idx}";
+                                        font-size: 12px;
+                                        font-weight: 600;
+                                        vertical-alignment: center;
+                                    }
+                                    Rectangle { horizontal-stretch: 1; }
+                                    Button {
+                                        text: "Remove";
+                                        clicked => { root.remove-anchor(idx); }
+                                    }
+                                }
+
+                                HorizontalLayout {
+                                    spacing: 2px;
+                                    Text { text: "X"; font-size: 11px; vertical-alignment: center; width: 14px; }
+                                    a-x := LineEdit {
+                                        text: anchor.x;
+                                        width: 75px;
+                                        edited(val) => {
+                                            root.update-anchor(idx, {
+                                                x: val,
+                                                y: a-y.text,
+                                                z: a-z.text,
+                                            });
+                                        }
+                                    }
+                                    Text { text: "Y"; font-size: 11px; vertical-alignment: center; width: 14px; }
+                                    a-y := LineEdit {
+                                        text: anchor.y;
+                                        width: 75px;
+                                        edited(val) => {
+                                            root.update-anchor(idx, {
+                                                x: a-x.text,
+                                                y: val,
+                                                z: a-z.text,
+                                            });
+                                        }
+                                    }
+                                    Text { text: "Z"; font-size: 11px; vertical-alignment: center; width: 14px; }
+                                    a-z := LineEdit {
+                                        text: anchor.z;
+                                        width: 75px;
+                                        edited(val) => {
+                                            root.update-anchor(idx, {
+                                                x: a-x.text,
+                                                y: a-y.text,
+                                                z: val,
+                                            });
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                Rectangle { height: 1px; background: Palette.border; }
+
+                HorizontalLayout {
+                    spacing: 4px;
+                    Text { text: "Metric:"; font-size: 12px; vertical-alignment: center; }
+                    ComboBox {
+                        width: 140px;
+                        model: root.metric-names;
+                        current-index <=> root.metric-index;
+                        selected(value) => { root.metric-changed(self.current-index); }
+                    }
+                }
+
+                if root.metric-index == 4: HorizontalLayout {
+                    spacing: 4px;
+                    Text { text: "Anchor A:"; font-size: 12px; vertical-alignment: center; }
+                    LineEdit {
+                        text <=> root.pair-a;
+                        width: 50px;
+                        edited(val) => { root.pair-changed(); }
+                    }
+                    Text { text: "Anchor B:"; font-size: 12px; vertical-alignment: center; }
+                    LineEdit {
+                        text <=> root.pair-b;
+                        width: 50px;
+                        edited(val) => { root.pair-changed(); }
+                    }
+                }
+
+                HorizontalLayout {
+                    spacing: 4px;
+                    Text { text: "Max range:"; font-size: 12px; vertical-alignment: center; }
+                    LineEdit {
+                        text <=> root.max-range;
+                        width: 80px;
+                    }
+                    Text { text: "m"; font-size: 12px; vertical-alignment: center; }
+                }
+
+                HorizontalLayout {
+                    spacing: 4px;
+                    Text { text: "Scale:"; font-size: 12px; vertical-alignment: center; }
+                    LineEdit {
+                        text <=> root.scale-value;
+                        width: 80px;
+                    }
+                }
+
+                CheckBox {
+                    text: "Show uncovered";
+                    checked <=> root.show-uncovered;
+                }
+
+                CheckBox {
+                    text: "Center room at origin";
+                    checked <=> root.center-origin;
+                }
+
+                Button {
+                    text: "Compute";
+                    clicked => { root.recompute(); }
+                }
+
+                if root.stats-text-1 != "": VerticalLayout {
+                    spacing: 2px;
+                    Text { text: root.stats-text-1; font-size: 12px; }
+                    Text { text: root.stats-text-2; font-size: 12px; }
+                    Text { text: root.stats-text-3; font-size: 12px; }
+                }
+            }
+        }
+
+        // Right panel: 3D view
+        view-area := Rectangle {
+            horizontal-stretch: 1;
+
+            Image {
+                source: root.texture;
+                width: 100%;
+                height: 100%;
+                image-fit: fill;
+            }
+
+            // Grid measurement labels
+            Rectangle {
+                width: 100%;
+                height: 100%;
+                for label in root.grid-labels: Text {
+                    x: label.screen-x * 1px;
+                    y: label.screen-y * 1px;
+                    text: label.text;
+                    font-size: 9px;
+                    color: #4d4d59;
+                }
+            }
+
+            TouchArea {
+                property <float> prev-x;
+                property <float> prev-y;
+                property <bool> dragging;
+                property <bool> panning;
+
+                scroll-event(e) => {
+                    if (e.delta-y > 0) {
+                        root.cam-distance = max(1.0, root.cam-distance - 0.5);
+                    } else if (e.delta-y < 0) {
+                        root.cam-distance = min(30.0, root.cam-distance + 0.5);
+                    }
+                    accept
+                }
+
+                pointer-event(e) => {
+                    if (e.kind == PointerEventKind.down) {
+                        if (e.button == PointerEventButton.left) {
+                            root.view-mouse-pressed(self.mouse-x / 1px, self.mouse-y / 1px);
+                            if (!root.handle-active) {
+                                self.prev-x = self.mouse-x / 1px;
+                                self.prev-y = self.mouse-y / 1px;
+                                self.dragging = true;
+                                self.panning = false;
+                            }
+                        } else if (e.button == PointerEventButton.middle) {
+                            self.prev-x = self.mouse-x / 1px;
+                            self.prev-y = self.mouse-y / 1px;
+                            self.panning = true;
+                        } else if (e.button == PointerEventButton.right) {
+                            self.prev-x = self.mouse-x / 1px;
+                            self.prev-y = self.mouse-y / 1px;
+                            self.panning = true;
+                        }
+                    } else if (e.kind == PointerEventKind.up) {
+                        if (root.handle-active) {
+                            root.view-mouse-released();
+                        }
+                        self.dragging = false;
+                        self.panning = false;
+                    }
+                }
+
+                moved => {
+                    if (root.handle-active) {
+                        root.view-mouse-moved(self.mouse-x / 1px, self.mouse-y / 1px);
+                    } else if (self.panning) {
+                        root.view-pan(
+                            self.mouse-x / 1px - self.prev-x,
+                            self.mouse-y / 1px - self.prev-y,
+                        );
+                        self.prev-x = self.mouse-x / 1px;
+                        self.prev-y = self.mouse-y / 1px;
+                    } else if (self.dragging) {
+                        root.cam-yaw -= (self.mouse-x / 1px - self.prev-x) * 0.01;
+                        root.cam-pitch = clamp(root.cam-pitch + (self.mouse-y / 1px - self.prev-y) * 0.01, 0.1, 1.5);
+                        self.prev-x = self.mouse-x / 1px;
+                        self.prev-y = self.mouse-y / 1px;
+                    }
+                }
+            }
+        }
+    }
+}

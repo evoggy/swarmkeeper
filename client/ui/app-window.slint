@@ -4,6 +4,7 @@ import { VisualizationContent, VizLabel } from "visualization.slint";
 import { UnitData, UnitState, JournalEntryData } from "unit-card.slint";
 import { RadioTestContent, ChannelResult } from "radio-test.slint";
 import { LhCoverageContent, LhBaseStationData } from "lh-coverage.slint";
+import { Tdoa3CoverageContent, Tdoa3AnchorData } from "tdoa3-coverage.slint";
 
 export struct HealthTestResult {
     name: string,
@@ -553,6 +554,48 @@ export component AppWindow inherits Window {
     callback lh-cov-view-mouse-released();
     callback lh-cov-view-pan(float, float);
 
+    // TDoA3 Coverage
+    in-out property <image> tdoa3-texture;
+    out property <float> tdoa3-width: tdoa3-content.viewport-width;
+    out property <float> tdoa3-height: tdoa3-content.viewport-height;
+    out property <float> tdoa3-cam-yaw: tdoa3-content.cam-yaw;
+    out property <float> tdoa3-cam-pitch: tdoa3-content.cam-pitch;
+    out property <float> tdoa3-cam-distance: tdoa3-content.cam-distance;
+    in-out property <float> tdoa3-cam-pan-x <=> tdoa3-content.cam-pan-x;
+    in-out property <float> tdoa3-cam-pan-y <=> tdoa3-content.cam-pan-y;
+    in-out property <string> tdoa3-room-x <=> tdoa3-content.room-x;
+    in-out property <string> tdoa3-room-y <=> tdoa3-content.room-y;
+    in-out property <string> tdoa3-room-z <=> tdoa3-content.room-z;
+    in-out property <string> tdoa3-resolution <=> tdoa3-content.resolution;
+    in-out property <[Tdoa3AnchorData]> tdoa3-anchors;
+    in-out property <string> tdoa3-max-range <=> tdoa3-content.max-range;
+    in-out property <string> tdoa3-scale-value <=> tdoa3-content.scale-value;
+    in-out property <bool> tdoa3-show-uncovered <=> tdoa3-content.show-uncovered;
+    in-out property <bool> tdoa3-center-origin <=> tdoa3-content.center-origin;
+    in-out property <int> tdoa3-metric-index <=> tdoa3-content.metric-index;
+    in-out property <string> tdoa3-pair-a <=> tdoa3-content.pair-a;
+    in-out property <string> tdoa3-pair-b <=> tdoa3-content.pair-b;
+    callback tdoa3-metric-changed(int);
+    callback tdoa3-pair-changed();
+    in-out property <int> tdoa3-selected-anchor: -1;
+    in-out property <bool> tdoa3-handle-active: false;
+    in-out property <int> tdoa3-active-handle: 0;
+    in-out property <[VizLabel]> tdoa3-grid-labels;
+    in-out property <string> tdoa3-stats-text-1;
+    in-out property <string> tdoa3-stats-text-2;
+    in-out property <string> tdoa3-stats-text-3;
+    callback tdoa3-save-scene();
+    callback tdoa3-load-scene();
+    callback tdoa3-add-anchor();
+    callback tdoa3-undo();
+    callback tdoa3-remove-anchor(int);
+    callback tdoa3-update-anchor(int, Tdoa3AnchorData);
+    callback tdoa3-recompute();
+    callback tdoa3-view-mouse-pressed(float, float);
+    callback tdoa3-view-mouse-moved(float, float);
+    callback tdoa3-view-mouse-released();
+    callback tdoa3-view-pan(float, float);
+
     VerticalBox {
         padding: 0px;
         spacing: 0px;
@@ -684,6 +727,33 @@ export component AppWindow inherits Window {
                     view-mouse-moved(x, y) => { root.lh-cov-view-mouse-moved(x, y); }
                     view-mouse-released => { root.lh-cov-view-mouse-released(); }
                     view-pan(dx, dy) => { root.lh-cov-view-pan(dx, dy); }
+                }
+            }
+            Tab {
+                title: "TDoA3 Coverage";
+                tdoa3-content := Tdoa3CoverageContent {
+                    texture <=> root.tdoa3-texture;
+                    anchors <=> root.tdoa3-anchors;
+                    selected-anchor <=> root.tdoa3-selected-anchor;
+                    handle-active <=> root.tdoa3-handle-active;
+                    active-handle <=> root.tdoa3-active-handle;
+                    grid-labels: root.tdoa3-grid-labels;
+                    stats-text-1: root.tdoa3-stats-text-1;
+                    stats-text-2: root.tdoa3-stats-text-2;
+                    stats-text-3: root.tdoa3-stats-text-3;
+                    metric-changed(idx) => { root.tdoa3-metric-changed(idx); }
+                    pair-changed => { root.tdoa3-pair-changed(); }
+                    save-scene => { root.tdoa3-save-scene(); }
+                    load-scene => { root.tdoa3-load-scene(); }
+                    add-anchor => { root.tdoa3-add-anchor(); }
+                    undo => { root.tdoa3-undo(); }
+                    remove-anchor(idx) => { root.tdoa3-remove-anchor(idx); }
+                    update-anchor(idx, data) => { root.tdoa3-update-anchor(idx, data); }
+                    recompute => { root.tdoa3-recompute(); }
+                    view-mouse-pressed(x, y) => { root.tdoa3-view-mouse-pressed(x, y); }
+                    view-mouse-moved(x, y) => { root.tdoa3-view-mouse-moved(x, y); }
+                    view-mouse-released => { root.tdoa3-view-mouse-released(); }
+                    view-pan(dx, dy) => { root.tdoa3-view-pan(dx, dy); }
                 }
             }
         }

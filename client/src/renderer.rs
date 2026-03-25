@@ -740,6 +740,293 @@ impl Scene3DRenderer {
         std::mem::swap(&mut self.next_texture, &mut self.displayed_texture);
         result
     }
+
+    /// Render a TDoA3 GDOP visualization.
+    ///
+    /// Voxels carry a continuous GDOP value (f32) instead of a discrete count.
+    /// The colour is mapped green (low GDOP / good) → yellow → red (high GDOP / bad).
+    pub fn render_tdoa3(
+        &mut self,
+        width: u32,
+        height: u32,
+        yaw: f32,
+        pitch: f32,
+        distance: f32,
+        pan_x: f32,
+        pan_y: f32,
+        room: [f32; 3],
+        room_offset: [f32; 3],
+        anchors: &[[f32; 3]],
+        voxels: &[(f32, f32, f32, f32)], // x, y, z, value
+        max_scale: f32,
+        show_uncovered: bool,
+        invert_gradient: bool,
+        selected_anchor: i32,
+        active_handle: i32,
+    ) -> slint::Image {
+        let width = width.max(1);
+        let height = height.max(1);
+
+        unsafe {
+            let gl = &self.gl;
+
+            if self.next_texture.width != width || self.next_texture.height != height {
+                let mut new_tex = RenderTexture::new(gl, width, height);
+                std::mem::swap(&mut self.next_texture, &mut new_tex);
+            }
+
+            let _saved_fbo = ScopedFrameBufferBinding::new(gl, Some(self.next_texture.fbo));
+            let mut saved_viewport = [0i32; 4];
+            gl.get_parameter_i32_slice(glow::VIEWPORT, &mut saved_viewport);
+            gl.viewport(0, 0, width as _, height as _);
+
+            gl.clear_color(0.12, 0.12, 0.15, 1.0);
+            gl.clear(glow::COLOR_BUFFER_BIT | glow::DEPTH_BUFFER_BIT);
+            gl.enable(glow::DEPTH_TEST);
+
+            gl.use_program(Some(self.program));
+            gl.uniform_1_f32(Some(&self.u_alpha), 1.0);
+
+            let _saved_vao = ScopedVAOBinding::new(gl, Some(self.vao));
+            let _saved_vbo = ScopedVBOBinding::new(gl, Some(self.vbo));
+
+            let aspect = width as f32 / height as f32;
+            let mvp = build_mvp(yaw, pitch, distance, pan_x, pan_y, aspect);
+            gl.uniform_matrix_4_f32_slice(Some(&self.u_mvp), false, &mvp);
+            gl.uniform_1_f32(Some(&self.u_point_size), 1.0);
+
+            // --- Ground grid ---
+            let ox = room_offset[0];
+            let oy = room_offset[1];
+            let oz = room_offset[2];
+            let mut grid_verts = Vec::new();
+            let gx = room[0].ceil() as i32;
+            let gy = room[1].ceil() as i32;
+            for i in 0..=gx {
+                let v = i as f32 + ox;
+                grid_verts.extend_from_slice(&[v, oy, oz, v, room[1] + oy, oz]);
+            }
+            for i in 0..=gy {
+                let v = i as f32 + oy;
+                grid_verts.extend_from_slice(&[ox, v, oz, room[0] + ox, v, oz]);
+            }
+            gl.uniform_3_f32(Some(&self.u_color), 0.3, 0.3, 0.35);
+            upload_and_draw(gl, self.vbo, &grid_verts, glow::LINES);
+            gl.draw_arrays(glow::LINES, 0, grid_verts.len() as i32 / 3);
+
+            // --- Room box outline ---
+            let (x0, y0, z0) = (ox, oy, oz);
+            let (x1, y1, z1) = (room[0] + ox, room[1] + oy, room[2] + oz);
+            #[rustfmt::skip]
+            let box_verts = [
+                x0, y0, z0,  x1, y0, z0,
+                x1, y0, z0,  x1, y1, z0,
+                x1, y1, z0,  x0, y1, z0,
+                x0, y1, z0,  x0, y0, z0,
+                x0, y0, z1,  x1, y0, z1,
+                x1, y0, z1,  x1, y1, z1,
+                x1, y1, z1,  x0, y1, z1,
+                x0, y1, z1,  x0, y0, z1,
+                x0, y0, z0,  x0, y0, z1,
+                x1, y0, z0,  x1, y0, z1,
+                x1, y1, z0,  x1, y1, z1,
+                x0, y1, z0,  x0, y1, z1,
+            ];
+            gl.uniform_3_f32(Some(&self.u_color), 0.5, 0.5, 0.55);
+            upload_and_draw(gl, self.vbo, &box_verts, glow::LINES);
+            gl.draw_arrays(glow::LINES, 0, box_verts.len() as i32 / 3);
+
+            // --- Anchors ---
+            for pos in anchors {
+                gl.uniform_3_f32(Some(&self.u_color), 1.0, 0.85, 0.0);
+                gl.uniform_1_f32(Some(&self.u_point_size), 8.0);
+                upload_and_draw(gl, self.vbo, pos, glow::POINTS);
+                gl.draw_arrays(glow::POINTS, 0, 1);
+            }
+            gl.uniform_1_f32(Some(&self.u_point_size), 1.0);
+
+            // --- GDOP voxels as gradient-coloured cloud ---
+            // Bucket voxels into N_GDOP_BUCKETS levels for the uniform-colour shader,
+            // plus one bucket for uncovered (GDOP = infinity).
+            const N_GDOP_BUCKETS: usize = 16;
+            let mut buckets: Vec<Vec<f32>> = vec![Vec::new(); N_GDOP_BUCKETS];
+            let mut uncovered: Vec<f32> = Vec::new();
+
+            for &(x, y, z, gdop) in voxels {
+                if !gdop.is_finite() {
+                    uncovered.push(x);
+                    uncovered.push(y);
+                    uncovered.push(z);
+                } else {
+                    let t = (gdop / max_scale).clamp(0.0, 1.0);
+                    let idx = ((t * N_GDOP_BUCKETS as f32) as usize).min(N_GDOP_BUCKETS - 1);
+                    buckets[idx].push(x);
+                    buckets[idx].push(y);
+                    buckets[idx].push(z);
+                }
+            }
+
+            let has_data = buckets.iter().any(|b| !b.is_empty());
+
+            gl.depth_mask(false);
+            gl.enable(glow::BLEND);
+            gl.blend_func(glow::SRC_ALPHA, glow::ONE_MINUS_SRC_ALPHA);
+            gl.uniform_1_f32(Some(&self.u_point_size), 12.0);
+
+            // Draw uncovered voxels (dark red)
+            if show_uncovered && has_data && !uncovered.is_empty() {
+                gl.uniform_3_f32(Some(&self.u_color), 0.5, 0.1, 0.1);
+                gl.uniform_1_f32(Some(&self.u_alpha), 0.06);
+                upload_and_draw(gl, self.vbo, &uncovered, glow::POINTS);
+                gl.draw_arrays(glow::POINTS, 0, uncovered.len() as i32 / 3);
+            }
+
+            // Draw metric buckets: green (good) → yellow → red (bad)
+            for (i, bucket) in buckets.iter().enumerate() {
+                if bucket.is_empty() {
+                    continue;
+                }
+                let mut t = (i as f32 + 0.5) / N_GDOP_BUCKETS as f32;
+                if invert_gradient {
+                    t = 1.0 - t;
+                }
+                let (r, g, b) = gdop_color(t);
+                gl.uniform_3_f32(Some(&self.u_color), r, g, b);
+                gl.uniform_1_f32(Some(&self.u_alpha), 0.08);
+                upload_and_draw(gl, self.vbo, bucket, glow::POINTS);
+                gl.draw_arrays(glow::POINTS, 0, bucket.len() as i32 / 3);
+            }
+
+            gl.uniform_1_f32(Some(&self.u_alpha), 1.0);
+            gl.disable(glow::BLEND);
+            gl.depth_mask(true);
+
+            // --- Translation gizmo for selected anchor ---
+            if selected_anchor >= 0 && (selected_anchor as usize) < anchors.len() {
+                gl.disable(glow::DEPTH_TEST);
+
+                let pos = &anchors[selected_anchor as usize];
+
+                let axes: [([f32; 3], [f32; 3], i32); 3] = [
+                    ([GIZMO_TRANSLATE_LEN, 0.0, 0.0], [0.94, 0.27, 0.27], HANDLE_TRANSLATE_X),
+                    ([0.0, GIZMO_TRANSLATE_LEN, 0.0], [0.29, 0.85, 0.50], HANDLE_TRANSLATE_Y),
+                    ([0.0, 0.0, GIZMO_TRANSLATE_LEN], [0.38, 0.65, 0.98], HANDLE_TRANSLATE_Z),
+                ];
+
+                for (dir, color, handle_id) in &axes {
+                    let active = *handle_id == active_handle;
+                    let bright = if active { 1.0 } else { 0.7 };
+                    gl.uniform_3_f32(
+                        Some(&self.u_color),
+                        (color[0] * bright).min(1.0),
+                        (color[1] * bright).min(1.0),
+                        (color[2] * bright).min(1.0),
+                    );
+
+                    let end = [pos[0] + dir[0], pos[1] + dir[1], pos[2] + dir[2]];
+                    let line = [pos[0], pos[1], pos[2], end[0], end[1], end[2]];
+                    upload_and_draw(gl, self.vbo, &line, glow::LINES);
+                    gl.draw_arrays(glow::LINES, 0, 2);
+
+                    gl.uniform_1_f32(
+                        Some(&self.u_point_size),
+                        if active { 14.0 } else { 10.0 },
+                    );
+                    upload_and_draw(gl, self.vbo, &end, glow::POINTS);
+                    gl.draw_arrays(glow::POINTS, 0, 1);
+                }
+
+                gl.enable(glow::DEPTH_TEST);
+            }
+
+            gl.use_program(None);
+            gl.disable(glow::DEPTH_TEST);
+            gl.viewport(saved_viewport[0], saved_viewport[1], saved_viewport[2], saved_viewport[3]);
+        }
+
+        let result = unsafe {
+            slint::BorrowedOpenGLTextureBuilder::new_gl_2d_rgba_texture(
+                self.next_texture.texture.0,
+                (self.next_texture.width, self.next_texture.height).into(),
+            )
+            .build()
+        };
+
+        std::mem::swap(&mut self.next_texture, &mut self.displayed_texture);
+        result
+    }
+}
+
+/// Map a normalised GDOP ratio `t` ∈ [0, 1] to an RGB colour.
+/// 0 = green (good), 0.5 = yellow, 1 = red (bad).
+fn gdop_color(t: f32) -> (f32, f32, f32) {
+    let t = t.clamp(0.0, 1.0);
+    let r = (2.0 * t).min(1.0);
+    let g = (2.0 * (1.0 - t)).min(1.0);
+    (r, g, 0.1)
+}
+
+/// Hit-test TDoA3 anchors. Returns index of closest anchor within threshold, or -1.
+pub fn hit_test_anchor(
+    screen_x: f32,
+    screen_y: f32,
+    anchors: &[[f32; 3]],
+    mvp: &[f32; 16],
+    width: u32,
+    height: u32,
+    threshold: f32,
+) -> i32 {
+    let mut best_idx = -1i32;
+    let mut best_dist = threshold;
+    for (i, pos) in anchors.iter().enumerate() {
+        if let Some((sx, sy)) = project_to_screen(*pos, mvp, width, height) {
+            let dist = ((screen_x - sx).powi(2) + (screen_y - sy).powi(2)).sqrt();
+            if dist < best_dist {
+                best_dist = dist;
+                best_idx = i as i32;
+            }
+        }
+    }
+    best_idx
+}
+
+/// Hit-test translation-only gizmo handles for a selected anchor. Returns handle ID or HANDLE_NONE.
+pub fn hit_test_anchor_gizmo(
+    screen_x: f32,
+    screen_y: f32,
+    anchor_pos: [f32; 3],
+    mvp: &[f32; 16],
+    width: u32,
+    height: u32,
+) -> i32 {
+    let Some((sx0, sy0)) = project_to_screen(anchor_pos, mvp, width, height) else {
+        return HANDLE_NONE;
+    };
+
+    let mut best_handle = HANDLE_NONE;
+    let mut best_dist = GIZMO_HIT_THRESHOLD;
+
+    let axes: [[f32; 3]; 3] = [
+        [GIZMO_TRANSLATE_LEN, 0.0, 0.0],
+        [0.0, GIZMO_TRANSLATE_LEN, 0.0],
+        [0.0, 0.0, GIZMO_TRANSLATE_LEN],
+    ];
+    for (i, axis) in axes.iter().enumerate() {
+        let end = [
+            anchor_pos[0] + axis[0],
+            anchor_pos[1] + axis[1],
+            anchor_pos[2] + axis[2],
+        ];
+        if let Some((sx1, sy1)) = project_to_screen(end, mvp, width, height) {
+            let dist = point_to_segment_dist_2d(screen_x, screen_y, sx0, sy0, sx1, sy1);
+            if dist < best_dist {
+                best_dist = dist;
+                best_handle = (i + 1) as i32;
+            }
+        }
+    }
+
+    best_handle
 }
 
 impl Drop for Scene3DRenderer {

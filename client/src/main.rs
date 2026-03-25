@@ -7,6 +7,7 @@ use tokio::sync::Mutex;
 
 mod coverage;
 mod renderer;
+mod tdoa3;
 
 slint::include_modules!();
 
@@ -3623,14 +3624,45 @@ async fn main() {
         drag_start_elevation: 0.0,
     }));
 
+    // TDoA3 Coverage shared state
+    struct Tdoa3State {
+        anchors: Vec<tdoa3::Anchor>,
+        voxels: Vec<(f32, f32, f32, f32)>,
+        anchor_positions: Vec<[f32; 3]>,
+        room: [f32; 3],
+        room_offset: [f32; 3],
+        undo_stack: Vec<Vec<tdoa3::Anchor>>,
+        gdop_result: Option<tdoa3::GdopResult>,
+    }
+    let tdoa3_state = std::sync::Arc::new(std::sync::Mutex::new(Tdoa3State {
+        anchors: Vec::new(),
+        voxels: Vec::new(),
+        anchor_positions: Vec::new(),
+        room: [10.0, 10.0, 3.0],
+        room_offset: [0.0; 3],
+        undo_stack: Vec::new(),
+        gdop_result: None,
+    }));
+
+    struct Tdoa3GizmoState {
+        drag_start_screen: [f32; 2],
+        drag_start_pos: [f32; 3],
+    }
+    let tdoa3_gizmo_state = std::sync::Arc::new(std::sync::Mutex::new(Tdoa3GizmoState {
+        drag_start_screen: [0.0, 0.0],
+        drag_start_pos: [0.0; 3],
+    }));
+
     // Set up OpenGL 3D rendering
     {
         let app_weak = ui.as_weak();
         let positioning_data = positioning_data.clone();
         let trajectory_data = trajectory_data.clone();
         let coverage_state = coverage_state.clone();
+        let tdoa3_state = tdoa3_state.clone();
         let mut scene_renderer: Option<renderer::Scene3DRenderer> = None;
         let mut coverage_renderer: Option<renderer::Scene3DRenderer> = None;
+        let mut tdoa3_renderer: Option<renderer::Scene3DRenderer> = None;
 
         ui.window()
             .set_rendering_notifier(move |state, graphics_api| {
@@ -3648,8 +3680,15 @@ async fn main() {
                             },
                             _ => return,
                         };
+                        let context3 = match graphics_api {
+                            slint::GraphicsAPI::NativeOpenGL { get_proc_address } => unsafe {
+                                glow::Context::from_loader_function_cstr(|s| get_proc_address(s))
+                            },
+                            _ => return,
+                        };
                         scene_renderer = Some(renderer::Scene3DRenderer::new(context));
                         coverage_renderer = Some(renderer::Scene3DRenderer::new(context2));
+                        tdoa3_renderer = Some(renderer::Scene3DRenderer::new(context3));
                     }
                     slint::RenderingState::BeforeRendering => {
                         if let (Some(renderer), Some(app)) =
@@ -3943,12 +3982,91 @@ async fn main() {
                                 }
                             }
 
+                            // --- TDoA3 Coverage rendering ---
+                            if let Some(t3_renderer) = tdoa3_renderer.as_mut() {
+                                let t3_w = app.get_tdoa3_width() as u32;
+                                let t3_h = app.get_tdoa3_height() as u32;
+                                if t3_w > 0 && t3_h > 0 {
+                                    let t3_yaw = app.get_tdoa3_cam_yaw();
+                                    let t3_pitch = app.get_tdoa3_cam_pitch();
+                                    let t3_dist = app.get_tdoa3_cam_distance();
+                                    let t3_pan_x = app.get_tdoa3_cam_pan_x();
+                                    let t3_pan_y = app.get_tdoa3_cam_pan_y();
+
+                                    let (room, room_offset, anchor_positions, voxels) = {
+                                        let ts = tdoa3_state.lock().unwrap();
+                                        (ts.room, ts.room_offset, ts.anchor_positions.clone(), ts.voxels.clone())
+                                    };
+
+                                    let max_scale: f32 = app.get_tdoa3_scale_value()
+                                        .parse().unwrap_or(5.0);
+                                    let show_uncovered = app.get_tdoa3_show_uncovered();
+                                    let metric_index = app.get_tdoa3_metric_index() as usize;
+                                    // Pairs & pair sensitivity: higher value = better = green
+                                    let invert_gradient = metric_index == tdoa3::METRIC_PAIRS
+                                        || metric_index == tdoa3::METRIC_PAIR_SENSITIVITY;
+
+                                    let t3_tex = t3_renderer.render_tdoa3(
+                                        t3_w, t3_h,
+                                        t3_yaw, t3_pitch, t3_dist, t3_pan_x, t3_pan_y,
+                                        room, room_offset,
+                                        &anchor_positions,
+                                        &voxels,
+                                        max_scale,
+                                        show_uncovered,
+                                        invert_gradient,
+                                        app.get_tdoa3_selected_anchor(),
+                                        app.get_tdoa3_active_handle(),
+                                    );
+                                    app.set_tdoa3_texture(t3_tex);
+
+                                    // Grid measurement labels
+                                    let t3_mvp = renderer::compute_mvp(
+                                        t3_yaw, t3_pitch, t3_dist, t3_pan_x, t3_pan_y,
+                                        t3_w as f32 / t3_h as f32,
+                                    );
+                                    let mut labels = Vec::new();
+                                    let gx = room[0].ceil() as i32;
+                                    let gy = room[1].ceil() as i32;
+                                    for i in 0..=gx {
+                                        let wx = i as f32 + room_offset[0];
+                                        if let Some((sx, sy)) = renderer::project_to_screen(
+                                            [wx, room_offset[1], room_offset[2]], &t3_mvp, t3_w, t3_h,
+                                        ) {
+                                            labels.push(VizLabel {
+                                                text: format!("{}", i).into(),
+                                                screen_x: sx,
+                                                screen_y: sy + 12.0,
+                                            });
+                                        }
+                                    }
+                                    for i in 0..=gy {
+                                        let wy = i as f32 + room_offset[1];
+                                        if i != 0 {
+                                            if let Some((sx, sy)) = renderer::project_to_screen(
+                                                [room_offset[0], wy, room_offset[2]], &t3_mvp, t3_w, t3_h,
+                                            ) {
+                                                labels.push(VizLabel {
+                                                    text: format!("{}", i).into(),
+                                                    screen_x: sx + 4.0,
+                                                    screen_y: sy,
+                                                });
+                                            }
+                                        }
+                                    }
+                                    app.set_tdoa3_grid_labels(
+                                        slint::ModelRc::new(slint::VecModel::from(labels)),
+                                    );
+                                }
+                            }
+
                             app.window().request_redraw();
                         }
                     }
                     slint::RenderingState::RenderingTeardown => {
                         drop(scene_renderer.take());
                         drop(coverage_renderer.take());
+                        drop(tdoa3_renderer.take());
                     }
                     _ => {}
                 }
@@ -4893,6 +5011,445 @@ async fn main() {
             );
             ui.set_lh_cov_cam_pan_y(
                 ui.get_lh_cov_cam_pan_y() + dx * (-cy) + dy * sy,
+            );
+        });
+    }
+
+    // --- TDoA3 Coverage callbacks ---
+    {
+        let tdoa3_state = tdoa3_state.clone();
+        let ui_weak = ui.as_weak();
+
+        // Save scene
+        let ts = tdoa3_state.clone();
+        let uw = ui_weak.clone();
+        ui.on_tdoa3_save_scene(move || {
+            let Some(ui) = uw.upgrade() else { return };
+            let ts = ts.lock().unwrap();
+            let scene = tdoa3::Tdoa3Scene::new(
+                ui.get_tdoa3_room_x().parse().unwrap_or(10.0),
+                ui.get_tdoa3_room_y().parse().unwrap_or(10.0),
+                ui.get_tdoa3_room_z().parse().unwrap_or(3.0),
+                ui.get_tdoa3_resolution().parse().unwrap_or(2.0),
+                ui.get_tdoa3_center_origin(),
+                ui.get_tdoa3_max_range().parse().unwrap_or(15.0),
+                ui.get_tdoa3_scale_value().parse().unwrap_or(5.0),
+                ui.get_tdoa3_show_uncovered(),
+                &ts.anchors,
+            );
+            drop(ts);
+            if let Some(path) = rfd::FileDialog::new()
+                .set_title("Save TDoA3 Scene")
+                .add_filter("YAML", &["yaml", "yml"])
+                .save_file()
+            {
+                if let Err(e) = tdoa3::save_scene(&path, &scene) {
+                    eprintln!("Save error: {}", e);
+                }
+            }
+        });
+
+        // Load scene
+        let ts = tdoa3_state.clone();
+        let uw = ui_weak.clone();
+        ui.on_tdoa3_load_scene(move || {
+            let Some(ui) = uw.upgrade() else { return };
+            let Some(path) = rfd::FileDialog::new()
+                .set_title("Open TDoA3 Scene")
+                .add_filter("YAML", &["yaml", "yml"])
+                .pick_file()
+            else {
+                return;
+            };
+            match tdoa3::load_scene(&path) {
+                Ok(scene) => {
+                    let mut ts = ts.lock().unwrap();
+                    ts.anchors = scene.anchors();
+                    update_anchor_ui_model(&ui, &ts.anchors);
+                    ui.set_tdoa3_room_x(format!("{}", scene.room_x).into());
+                    ui.set_tdoa3_room_y(format!("{}", scene.room_y).into());
+                    ui.set_tdoa3_room_z(format!("{}", scene.room_z).into());
+                    ui.set_tdoa3_resolution(format!("{}", scene.resolution).into());
+                    ui.set_tdoa3_center_origin(scene.center_origin);
+                    ui.set_tdoa3_max_range(format!("{}", scene.max_range).into());
+                    ui.set_tdoa3_scale_value(format!("{}", scene.max_gdop_display).into());
+                    ui.set_tdoa3_show_uncovered(scene.show_uncovered);
+                }
+                Err(e) => eprintln!("Load error: {}", e),
+            }
+        });
+
+        // Add anchor
+        let ts = tdoa3_state.clone();
+        let uw = ui_weak.clone();
+        ui.on_tdoa3_add_anchor(move || {
+            let Some(ui) = uw.upgrade() else { return };
+            let mut ts = ts.lock().unwrap();
+            let snapshot = ts.anchors.clone();
+            ts.undo_stack.push(snapshot);
+            ts.anchors.push(tdoa3::Anchor {
+                pos: [0.0, 0.0, 2.5],
+            });
+            update_anchor_ui_model(&ui, &ts.anchors);
+        });
+
+        // Undo
+        let ts = tdoa3_state.clone();
+        let uw = ui_weak.clone();
+        ui.on_tdoa3_undo(move || {
+            let Some(ui) = uw.upgrade() else { return };
+            let mut ts = ts.lock().unwrap();
+            if let Some(prev) = ts.undo_stack.pop() {
+                ts.anchors = prev;
+                update_anchor_ui_model(&ui, &ts.anchors);
+                ui.set_tdoa3_selected_anchor(-1);
+            }
+        });
+
+        // Remove anchor
+        let ts = tdoa3_state.clone();
+        let uw = ui_weak.clone();
+        ui.on_tdoa3_remove_anchor(move |idx| {
+            let Some(ui) = uw.upgrade() else { return };
+            let idx = idx as usize;
+            let mut ts = ts.lock().unwrap();
+            if idx < ts.anchors.len() {
+                let snapshot = ts.anchors.clone();
+                ts.undo_stack.push(snapshot);
+                ts.anchors.remove(idx);
+                update_anchor_ui_model(&ui, &ts.anchors);
+                ui.set_tdoa3_selected_anchor(-1);
+            }
+        });
+
+        // Update anchor from UI fields
+        let ts = tdoa3_state.clone();
+        ui.on_tdoa3_update_anchor(move |idx, data| {
+            let idx = idx as usize;
+            let mut ts = ts.lock().unwrap();
+            if idx < ts.anchors.len() {
+                ts.anchors[idx] = tdoa3::Anchor {
+                    pos: [
+                        data.x.parse().unwrap_or(0.0),
+                        data.y.parse().unwrap_or(0.0),
+                        data.z.parse().unwrap_or(0.0),
+                    ],
+                };
+            }
+        });
+
+        // Helper: extract voxels and update stats for the selected metric.
+        fn update_tdoa3_display(
+            ui: &AppWindow,
+            ts: &mut Tdoa3State,
+        ) {
+            let metric = ui.get_tdoa3_metric_index() as usize;
+            let scale: f32 = ui.get_tdoa3_scale_value().parse().unwrap_or(5.0);
+
+            if metric == tdoa3::METRIC_PAIR_SENSITIVITY {
+                update_tdoa3_pair_sensitivity(ui, ts);
+                return;
+            }
+
+            let Some(result) = &ts.gdop_result else { return };
+
+            let metric_name = match metric {
+                tdoa3::METRIC_GDOP => "GDOP",
+                tdoa3::METRIC_HDOP => "HDOP",
+                tdoa3::METRIC_VDOP => "VDOP",
+                tdoa3::METRIC_PAIRS => "Pairs",
+                _ => "GDOP",
+            };
+
+            let (min_v, max_v, avg_v) = result.stats(metric);
+            ui.set_tdoa3_stats_text_1(
+                format!("{} min: {:.2}  max: {:.2}  avg: {:.2}", metric_name, min_v, max_v, avg_v).into(),
+            );
+
+            if metric == tdoa3::METRIC_PAIRS {
+                let ratio3 = result.coverage_ratio_pairs(3.0);
+                let ratio6 = result.coverage_ratio_pairs(6.0);
+                ui.set_tdoa3_stats_text_2(
+                    format!("≥3 pairs: {:.1}%  ≥6 pairs: {:.1}%", ratio3 * 100.0, ratio6 * 100.0).into(),
+                );
+            } else {
+                let ratio = result.coverage_ratio(metric, scale);
+                ui.set_tdoa3_stats_text_2(
+                    format!("Coverage ({} < {}): {:.1}%", metric_name, scale, ratio * 100.0).into(),
+                );
+            }
+
+            let n = ts.anchors.len();
+            ui.set_tdoa3_stats_text_3(
+                format!("{} anchors, {} pairs", n, n * n.saturating_sub(1) / 2).into(),
+            );
+
+            ts.voxels = result.iter_voxels(ts.room_offset, metric).collect();
+        }
+
+        // Compute and display pair sensitivity for a single anchor pair.
+        fn update_tdoa3_pair_sensitivity(
+            ui: &AppWindow,
+            ts: &mut Tdoa3State,
+        ) {
+            let idx_a: usize = ui.get_tdoa3_pair_a().parse().unwrap_or(0);
+            let idx_b: usize = ui.get_tdoa3_pair_b().parse().unwrap_or(1);
+
+            if idx_a >= ts.anchors.len() || idx_b >= ts.anchors.len() || idx_a == idx_b {
+                ui.set_tdoa3_stats_text_1("Select two different valid anchor indices".into());
+                ui.set_tdoa3_stats_text_2("".into());
+                ui.set_tdoa3_stats_text_3("".into());
+                ts.voxels.clear();
+                return;
+            }
+
+            let room_x: f32 = ui.get_tdoa3_room_x().parse().unwrap_or(10.0);
+            let room_y: f32 = ui.get_tdoa3_room_y().parse().unwrap_or(10.0);
+            let room_z: f32 = ui.get_tdoa3_room_z().parse().unwrap_or(3.0);
+            let resolution: f32 = ui.get_tdoa3_resolution().parse().unwrap_or(2.0);
+            let max_range: f32 = ui.get_tdoa3_max_range().parse().unwrap_or(15.0);
+
+            let voxels = tdoa3::compute_pair_sensitivity(
+                room_x, room_y, room_z, resolution,
+                ts.anchors[idx_a].pos,
+                ts.anchors[idx_b].pos,
+                max_range,
+                ts.room_offset,
+            );
+
+            let (min_v, max_v, avg_v) = tdoa3::voxel_stats(&voxels);
+            ui.set_tdoa3_stats_text_1(
+                format!("|h| min: {:.2}  max: {:.2}  avg: {:.2}", min_v, max_v, avg_v).into(),
+            );
+            ui.set_tdoa3_stats_text_2(
+                format!("Pair: anchor {} ↔ anchor {} (0 = degenerate, 2 = ideal)", idx_a, idx_b).into(),
+            );
+            ui.set_tdoa3_stats_text_3("".into());
+
+            ts.voxels = voxels;
+        }
+
+        // Recompute
+        let ts = tdoa3_state.clone();
+        let uw = ui_weak.clone();
+        ui.on_tdoa3_recompute(move || {
+            let Some(ui) = uw.upgrade() else { return };
+
+            let room_x: f32 = ui.get_tdoa3_room_x().parse().unwrap_or(10.0);
+            let room_y: f32 = ui.get_tdoa3_room_y().parse().unwrap_or(10.0);
+            let room_z: f32 = ui.get_tdoa3_room_z().parse().unwrap_or(3.0);
+            let resolution: f32 = ui.get_tdoa3_resolution().parse().unwrap_or(2.0);
+            let max_range: f32 = ui.get_tdoa3_max_range().parse().unwrap_or(15.0);
+            let center = ui.get_tdoa3_center_origin();
+
+            let offset = if center {
+                [-room_x / 2.0, -room_y / 2.0, 0.0]
+            } else {
+                [0.0, 0.0, 0.0]
+            };
+
+            let mut ts = ts.lock().unwrap();
+
+            let result = tdoa3::compute_gdop(
+                room_x, room_y, room_z, resolution,
+                &ts.anchors,
+                max_range,
+                offset,
+            );
+
+            ts.room = [room_x, room_y, room_z];
+            ts.room_offset = offset;
+            ts.anchor_positions = ts.anchors.iter().map(|a| a.pos).collect();
+            ts.gdop_result = Some(result);
+
+            update_tdoa3_display(&ui, &mut ts);
+        });
+
+        // Metric changed: re-extract voxels from cached result (no recompute needed)
+        let ts = tdoa3_state.clone();
+        let uw = ui_weak.clone();
+        ui.on_tdoa3_metric_changed(move |_idx| {
+            let Some(ui) = uw.upgrade() else { return };
+            let mut ts = ts.lock().unwrap();
+            update_tdoa3_display(&ui, &mut ts);
+        });
+
+        // Pair selection changed: recompute pair sensitivity
+        let ts = tdoa3_state.clone();
+        let uw = ui_weak.clone();
+        ui.on_tdoa3_pair_changed(move || {
+            let Some(ui) = uw.upgrade() else { return };
+            if ui.get_tdoa3_metric_index() as usize == tdoa3::METRIC_PAIR_SENSITIVITY {
+                let mut ts = ts.lock().unwrap();
+                update_tdoa3_pair_sensitivity(&ui, &mut ts);
+            }
+        });
+
+        // Helper to sync anchor data back to the UI model
+        fn update_anchor_ui_model(ui: &AppWindow, anchors: &[tdoa3::Anchor]) {
+            let model: Vec<Tdoa3AnchorData> = anchors
+                .iter()
+                .map(|a| Tdoa3AnchorData {
+                    x: format!("{:.2}", a.pos[0]).into(),
+                    y: format!("{:.2}", a.pos[1]).into(),
+                    z: format!("{:.2}", a.pos[2]).into(),
+                })
+                .collect();
+            ui.set_tdoa3_anchors(slint::ModelRc::new(slint::VecModel::from(model)));
+        }
+
+        // --- TDoA3 gizmo mouse interaction ---
+
+        let ts = tdoa3_state.clone();
+        let gs = tdoa3_gizmo_state.clone();
+        let uw = ui_weak.clone();
+        ui.on_tdoa3_view_mouse_pressed(move |x, y| {
+            let Some(ui) = uw.upgrade() else { return };
+
+            let width = ui.get_tdoa3_width() as u32;
+            let height = ui.get_tdoa3_height() as u32;
+            if width == 0 || height == 0 {
+                return;
+            }
+
+            let mvp = renderer::compute_mvp(
+                ui.get_tdoa3_cam_yaw(),
+                ui.get_tdoa3_cam_pitch(),
+                ui.get_tdoa3_cam_distance(),
+                ui.get_tdoa3_cam_pan_x(),
+                ui.get_tdoa3_cam_pan_y(),
+                width as f32 / height as f32,
+            );
+
+            let ts = ts.lock().unwrap();
+            let sel = ui.get_tdoa3_selected_anchor();
+
+            // First check gizmo handles if an anchor is selected
+            if sel >= 0 && (sel as usize) < ts.anchor_positions.len() {
+                let handle = renderer::hit_test_anchor_gizmo(
+                    x, y,
+                    ts.anchor_positions[sel as usize],
+                    &mvp, width, height,
+                );
+                if handle != renderer::HANDLE_NONE {
+                    let mut gs = gs.lock().unwrap();
+                    gs.drag_start_screen = [x, y];
+                    gs.drag_start_pos = ts.anchor_positions[sel as usize];
+                    ui.set_tdoa3_handle_active(true);
+                    ui.set_tdoa3_active_handle(handle);
+                    return;
+                }
+            }
+
+            // Then check anchor hit
+            let hit = renderer::hit_test_anchor(
+                x, y,
+                &ts.anchor_positions,
+                &mvp, width, height,
+                20.0,
+            );
+            ui.set_tdoa3_selected_anchor(hit);
+            ui.set_tdoa3_handle_active(false);
+            ui.set_tdoa3_active_handle(renderer::HANDLE_NONE);
+        });
+
+        // Mouse moved: drag handle
+        let ts = tdoa3_state.clone();
+        let gs = tdoa3_gizmo_state.clone();
+        let uw = ui_weak.clone();
+        ui.on_tdoa3_view_mouse_moved(move |x, y| {
+            let Some(ui) = uw.upgrade() else { return };
+            if !ui.get_tdoa3_handle_active() {
+                return;
+            }
+
+            let sel = ui.get_tdoa3_selected_anchor();
+            let active_handle = ui.get_tdoa3_active_handle();
+            let mut ts = ts.lock().unwrap();
+            let gs = gs.lock().unwrap();
+
+            let idx = sel as usize;
+            if idx >= ts.anchors.len() {
+                return;
+            }
+
+            let dx_screen = x - gs.drag_start_screen[0];
+            let dy_screen = y - gs.drag_start_screen[1];
+
+            match active_handle {
+                renderer::HANDLE_TRANSLATE_X
+                | renderer::HANDLE_TRANSLATE_Y
+                | renderer::HANDLE_TRANSLATE_Z => {
+                    let width = ui.get_tdoa3_width() as u32;
+                    let height = ui.get_tdoa3_height() as u32;
+                    if width == 0 || height == 0 {
+                        return;
+                    }
+                    let mvp = renderer::compute_mvp(
+                        ui.get_tdoa3_cam_yaw(),
+                        ui.get_tdoa3_cam_pitch(),
+                        ui.get_tdoa3_cam_distance(),
+                        ui.get_tdoa3_cam_pan_x(),
+                        ui.get_tdoa3_cam_pan_y(),
+                        width as f32 / height as f32,
+                    );
+
+                    let axis_idx = (active_handle - 1) as usize;
+                    let mut axis_dir = [0.0f32; 3];
+                    axis_dir[axis_idx] = 1.0;
+
+                    let p0 = gs.drag_start_pos;
+                    let p1 = [
+                        p0[0] + axis_dir[0],
+                        p0[1] + axis_dir[1],
+                        p0[2] + axis_dir[2],
+                    ];
+
+                    if let (Some((sx0, sy0)), Some((sx1, sy1))) = (
+                        renderer::project_to_screen(p0, &mvp, width, height),
+                        renderer::project_to_screen(p1, &mvp, width, height),
+                    ) {
+                        let sdx = sx1 - sx0;
+                        let sdy = sy1 - sy0;
+                        let slen = (sdx * sdx + sdy * sdy).sqrt();
+                        if slen > 1e-5 {
+                            let proj = (dx_screen * sdx + dy_screen * sdy) / slen;
+                            let world_delta = proj / slen;
+                            let mut new_pos = gs.drag_start_pos;
+                            new_pos[axis_idx] += world_delta;
+                            ts.anchors[idx].pos = new_pos;
+                            ts.anchor_positions[idx] = new_pos;
+                            update_anchor_ui_model(&ui, &ts.anchors);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        });
+
+        // Mouse released
+        let uw = ui_weak.clone();
+        ui.on_tdoa3_view_mouse_released(move || {
+            if let Some(ui) = uw.upgrade() {
+                ui.set_tdoa3_handle_active(false);
+                ui.set_tdoa3_active_handle(renderer::HANDLE_NONE);
+            }
+        });
+
+        // Pan
+        let uw = ui_weak.clone();
+        ui.on_tdoa3_view_pan(move |dx_px, dy_px| {
+            let Some(ui) = uw.upgrade() else { return };
+            let yaw = ui.get_tdoa3_cam_yaw();
+            let scale = 0.01_f32;
+            let (sy, cy) = yaw.sin_cos();
+            let dx = dx_px * scale;
+            let dy = -dy_px * scale;
+            ui.set_tdoa3_cam_pan_x(
+                ui.get_tdoa3_cam_pan_x() + dx * sy + dy * cy,
+            );
+            ui.set_tdoa3_cam_pan_y(
+                ui.get_tdoa3_cam_pan_y() + dx * (-cy) + dy * sy,
             );
         });
     }
