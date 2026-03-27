@@ -359,3 +359,52 @@ pub fn load_scene(path: &std::path::Path) -> Result<Scene, String> {
         std::fs::read_to_string(path).map_err(|e| format!("Failed to read file: {}", e))?;
     serde_yaml::from_str(&content).map_err(|e| format!("Failed to parse scene: {}", e))
 }
+
+/// Load trajectories from a CSV file.
+///
+/// The CSV has a header row and each subsequent row is a timestep.
+/// Every 3 columns represent one Crazyflie (x, y, z).
+/// Returns one `Vec<[f32; 3]>` per Crazyflie containing the ordered waypoints.
+pub fn load_trajectories_csv(path: &std::path::Path) -> Result<Vec<Vec<[f32; 3]>>, String> {
+    let content =
+        std::fs::read_to_string(path).map_err(|e| format!("Failed to read file: {}", e))?;
+    let mut lines = content.lines();
+
+    // Skip header
+    lines.next().ok_or("CSV file is empty")?;
+
+    let mut all_rows: Vec<Vec<f32>> = Vec::new();
+    for (line_no, line) in lines.enumerate() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let vals: Result<Vec<f32>, _> = line.split(',').map(|s| {
+            s.trim().parse::<f32>()
+        }).collect();
+        let vals = vals.map_err(|e| format!("CSV parse error on line {}: {}", line_no + 2, e))?;
+        all_rows.push(vals);
+    }
+
+    if all_rows.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let ncols = all_rows[0].len();
+    if ncols % 3 != 0 {
+        return Err(format!("CSV column count ({}) is not a multiple of 3", ncols));
+    }
+    let n_cfs = ncols / 3;
+
+    let mut trajectories: Vec<Vec<[f32; 3]>> = vec![Vec::with_capacity(all_rows.len()); n_cfs];
+    for row in &all_rows {
+        if row.len() != ncols {
+            continue;
+        }
+        for cf in 0..n_cfs {
+            trajectories[cf].push([row[cf * 3], row[cf * 3 + 1], row[cf * 3 + 2]]);
+        }
+    }
+
+    Ok(trajectories)
+}

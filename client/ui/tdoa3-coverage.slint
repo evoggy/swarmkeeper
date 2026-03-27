@@ -1,4 +1,4 @@
-import { VerticalBox, HorizontalBox, Button, LineEdit, ScrollView, Palette, CheckBox, ComboBox } from "std-widgets.slint";
+import { VerticalBox, HorizontalBox, Button, LineEdit, ScrollView, Palette, CheckBox, ComboBox, Slider } from "std-widgets.slint";
 import { VizLabel } from "visualization.slint";
 
 export struct Tdoa3AnchorData {
@@ -29,7 +29,7 @@ export component Tdoa3CoverageContent inherits Rectangle {
     in-out property <[Tdoa3AnchorData]> anchors;
 
     // Metric selector
-    in-out property <[string]> metric-names: ["GDOP", "HDOP", "VDOP", "Anchor Pairs", "Pair Sensitivity"];
+    in-out property <[string]> metric-names: ["GDOP", "HDOP", "VDOP", "XDOP", "YDOP", "Anchor Pairs", "Pair Sensitivity", "X Error (m)", "Y Error (m)", "Z Error (m)", "XY Error (m)", "Global Error (m)", "X Sensitivity", "Y Sensitivity", "Z Sensitivity", "Min XYZ Sensitivity", "Min XY Sensitivity"];
     in-out property <int> metric-index: 0;
     callback metric-changed(int);
 
@@ -38,10 +38,15 @@ export component Tdoa3CoverageContent inherits Rectangle {
     in-out property <string> pair-b: "1";
     callback pair-changed();
 
+    // Measurement noise for error metrics (σ_tdoa in metres)
+    in-out property <string> measurement-noise: "0.10";
+
     // Display options
     in-out property <string> max-range: "15.0";
-    in-out property <string> scale-value: "5.0";
-    in-out property <bool> show-uncovered: true;
+    in-out property <float> scale-min-value: 0.0;
+    in-out property <float> scale-max-value: 0.5;
+    in-out property <float> scale-limit: 2.0;
+    in-out property <bool> show-outside-hull: true;
     in-out property <bool> center-origin: false;
 
     // Stats (set from Rust)
@@ -235,6 +240,16 @@ export component Tdoa3CoverageContent inherits Rectangle {
                     }
                 }
 
+                if root.metric-index >= 5 && root.metric-index <= 7: HorizontalLayout {
+                    spacing: 4px;
+                    Text { text: "σ TDoA (m):"; font-size: 12px; vertical-alignment: center; }
+                    LineEdit {
+                        text <=> root.measurement-noise;
+                        width: 80px;
+                        edited(val) => { root.metric-changed(root.metric-index); }
+                    }
+                }
+
                 if root.metric-index == 4: HorizontalLayout {
                     spacing: 4px;
                     Text { text: "Anchor A:"; font-size: 12px; vertical-alignment: center; }
@@ -263,16 +278,41 @@ export component Tdoa3CoverageContent inherits Rectangle {
 
                 HorizontalLayout {
                     spacing: 4px;
-                    Text { text: "Scale:"; font-size: 12px; vertical-alignment: center; }
-                    LineEdit {
-                        text <=> root.scale-value;
-                        width: 80px;
+                    Text { text: "Min:"; font-size: 12px; vertical-alignment: center; width: 28px; }
+                    Slider {
+                        horizontal-stretch: 1;
+                        minimum: 0;
+                        maximum: root.scale-limit;
+                        value <=> root.scale-min-value;
+                    }
+                    Text {
+                        text: round(root.scale-min-value * 100) / 100;
+                        font-size: 12px;
+                        vertical-alignment: center;
+                        width: 40px;
+                    }
+                }
+
+                HorizontalLayout {
+                    spacing: 4px;
+                    Text { text: "Max:"; font-size: 12px; vertical-alignment: center; width: 28px; }
+                    Slider {
+                        horizontal-stretch: 1;
+                        minimum: 0.01;
+                        maximum: root.scale-limit;
+                        value <=> root.scale-max-value;
+                    }
+                    Text {
+                        text: round(root.scale-max-value * 100) / 100;
+                        font-size: 12px;
+                        vertical-alignment: center;
+                        width: 40px;
                     }
                 }
 
                 CheckBox {
-                    text: "Show uncovered";
-                    checked <=> root.show-uncovered;
+                    text: "Show outside convex hull";
+                    checked <=> root.show-outside-hull;
                 }
 
                 CheckBox {
@@ -318,64 +358,76 @@ export component Tdoa3CoverageContent inherits Rectangle {
                 }
             }
 
-            TouchArea {
-                property <float> prev-x;
-                property <float> prev-y;
-                property <bool> dragging;
-                property <bool> panning;
-
-                scroll-event(e) => {
-                    if (e.delta-y > 0) {
-                        root.cam-distance = max(1.0, root.cam-distance - 0.5);
-                    } else if (e.delta-y < 0) {
-                        root.cam-distance = min(30.0, root.cam-distance + 0.5);
+            view-focus := FocusScope {
+                key-pressed(e) => {
+                    if ((e.text == Key.Delete || e.text == Key.Backspace) && root.selected-anchor >= 0) {
+                        root.remove-anchor(root.selected-anchor);
+                        accept
+                    } else {
+                        reject
                     }
-                    accept
                 }
 
-                pointer-event(e) => {
-                    if (e.kind == PointerEventKind.down) {
-                        if (e.button == PointerEventButton.left) {
-                            root.view-mouse-pressed(self.mouse-x / 1px, self.mouse-y / 1px);
-                            if (!root.handle-active) {
+                TouchArea {
+                    property <float> prev-x;
+                    property <float> prev-y;
+                    property <bool> dragging;
+                    property <bool> panning;
+
+                    scroll-event(e) => {
+                        if (e.delta-y > 0) {
+                            root.cam-distance = max(1.0, root.cam-distance - 0.5);
+                        } else if (e.delta-y < 0) {
+                            root.cam-distance = min(30.0, root.cam-distance + 0.5);
+                        }
+                        accept
+                    }
+
+                    pointer-event(e) => {
+                        if (e.kind == PointerEventKind.down) {
+                            view-focus.focus();
+                            if (e.button == PointerEventButton.left) {
+                                root.view-mouse-pressed(self.mouse-x / 1px, self.mouse-y / 1px);
+                                if (!root.handle-active) {
+                                    self.prev-x = self.mouse-x / 1px;
+                                    self.prev-y = self.mouse-y / 1px;
+                                    self.dragging = true;
+                                    self.panning = false;
+                                }
+                            } else if (e.button == PointerEventButton.middle) {
                                 self.prev-x = self.mouse-x / 1px;
                                 self.prev-y = self.mouse-y / 1px;
-                                self.dragging = true;
-                                self.panning = false;
+                                self.panning = true;
+                            } else if (e.button == PointerEventButton.right) {
+                                self.prev-x = self.mouse-x / 1px;
+                                self.prev-y = self.mouse-y / 1px;
+                                self.panning = true;
                             }
-                        } else if (e.button == PointerEventButton.middle) {
-                            self.prev-x = self.mouse-x / 1px;
-                            self.prev-y = self.mouse-y / 1px;
-                            self.panning = true;
-                        } else if (e.button == PointerEventButton.right) {
-                            self.prev-x = self.mouse-x / 1px;
-                            self.prev-y = self.mouse-y / 1px;
-                            self.panning = true;
+                        } else if (e.kind == PointerEventKind.up) {
+                            if (root.handle-active) {
+                                root.view-mouse-released();
+                            }
+                            self.dragging = false;
+                            self.panning = false;
                         }
-                    } else if (e.kind == PointerEventKind.up) {
-                        if (root.handle-active) {
-                            root.view-mouse-released();
-                        }
-                        self.dragging = false;
-                        self.panning = false;
                     }
-                }
 
-                moved => {
-                    if (root.handle-active) {
-                        root.view-mouse-moved(self.mouse-x / 1px, self.mouse-y / 1px);
-                    } else if (self.panning) {
-                        root.view-pan(
-                            self.mouse-x / 1px - self.prev-x,
-                            self.mouse-y / 1px - self.prev-y,
-                        );
-                        self.prev-x = self.mouse-x / 1px;
-                        self.prev-y = self.mouse-y / 1px;
-                    } else if (self.dragging) {
-                        root.cam-yaw -= (self.mouse-x / 1px - self.prev-x) * 0.01;
-                        root.cam-pitch = clamp(root.cam-pitch + (self.mouse-y / 1px - self.prev-y) * 0.01, 0.1, 1.5);
-                        self.prev-x = self.mouse-x / 1px;
-                        self.prev-y = self.mouse-y / 1px;
+                    moved => {
+                        if (root.handle-active) {
+                            root.view-mouse-moved(self.mouse-x / 1px, self.mouse-y / 1px);
+                        } else if (self.panning) {
+                            root.view-pan(
+                                self.mouse-x / 1px - self.prev-x,
+                                self.mouse-y / 1px - self.prev-y,
+                            );
+                            self.prev-x = self.mouse-x / 1px;
+                            self.prev-y = self.mouse-y / 1px;
+                        } else if (self.dragging) {
+                            root.cam-yaw -= (self.mouse-x / 1px - self.prev-x) * 0.01;
+                            root.cam-pitch = clamp(root.cam-pitch + (self.mouse-y / 1px - self.prev-y) * 0.01, 0.1, 1.5);
+                            self.prev-x = self.mouse-x / 1px;
+                            self.prev-y = self.mouse-y / 1px;
+                        }
                     }
                 }
             }

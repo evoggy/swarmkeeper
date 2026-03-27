@@ -12,17 +12,19 @@ pub struct Anchor {
     pub pos: [f32; 3],
 }
 
-/// Available metrics for visualization.
+/// Storage metric indices (into the per-voxel array).
 pub const METRIC_GDOP: usize = 0;
 pub const METRIC_HDOP: usize = 1;
 pub const METRIC_VDOP: usize = 2;
 pub const METRIC_PAIRS: usize = 3;
-pub const METRIC_PAIR_SENSITIVITY: usize = 4;
+pub const METRIC_XDOP: usize = 4; // sqrt(inv[0][0])
+pub const METRIC_YDOP: usize = 5; // sqrt(inv[1][1])
 
-/// Per-voxel metrics: `[GDOP, HDOP, VDOP, pair_count]`.
-/// GDOP/HDOP/VDOP are `f32::INFINITY` when fewer than 3 anchor pairs are in range.
+/// Per-voxel metrics: `[GDOP, HDOP, VDOP, pair_count, XDOP, YDOP]`.
+/// DOP values are `f32::INFINITY` when fewer than 3 anchor pairs are in range.
 /// `pair_count` is always finite.
-type VoxelMetrics = [f32; 4];
+/// XDOP = sqrt(inv[0][0]), YDOP = sqrt(inv[1][1]), VDOP (=ZDOP) = sqrt(inv[2][2]).
+type VoxelMetrics = [f32; 6];
 
 /// Result of GDOP computation over a voxel grid.
 pub struct GdopResult {
@@ -145,7 +147,7 @@ pub fn compute_gdop(
     let ny = (room_y * resolution) as usize + 1;
     let nz = (room_z * resolution) as usize + 1;
 
-    let inf_metrics: VoxelMetrics = [f32::INFINITY, f32::INFINITY, f32::INFINITY, 0.0];
+    let inf_metrics: VoxelMetrics = [f32::INFINITY, f32::INFINITY, f32::INFINITY, 0.0, f32::INFINITY, f32::INFINITY];
     let mut voxels = vec![vec![vec![inf_metrics; nx]; ny]; nz];
 
     // Precompute all anchor pair indices
@@ -213,6 +215,8 @@ pub fn compute_gdop(
                             voxels[iz][iy][ix][METRIC_GDOP] = gdop;
                             voxels[iz][iy][ix][METRIC_HDOP] = hdop;
                             voxels[iz][iy][ix][METRIC_VDOP] = vdop;
+                            voxels[iz][iy][ix][METRIC_XDOP] = inv[0][0].sqrt();
+                            voxels[iz][iy][ix][METRIC_YDOP] = inv[1][1].sqrt();
                         }
                     }
                 }
@@ -276,6 +280,171 @@ pub fn compute_pair_sensitivity(
 }
 
 /// Compute basic stats over a flat voxel list (for pair sensitivity).
+/// Compute the combined TDoA measurement sensitivity along a single world axis
+/// at every voxel.
+///
+/// For each voxel, the sensitivity along axis `k` is:
+///
+/// ```text
+/// S_k = sqrt( Σ  h_pair[k]² )
+/// ```
+///
+/// where the sum runs over all in-range anchor pairs and `h_pair[k]` is the
+/// k-th component of the Jacobian row for that pair.
+///
+/// High values mean the measurements respond strongly to movement along that
+/// axis (good tracking). Low values mean the hyperbolas are nearly flat in that
+/// direction — the "parabola effect".
+///
+/// `axis`: 0 = X, 1 = Y, 2 = Z.
+pub fn compute_axis_sensitivity(
+    room_x: f32,
+    room_y: f32,
+    room_z: f32,
+    resolution: f32,
+    anchors: &[Anchor],
+    max_range: f32,
+    offset: [f32; 3],
+    axis: usize,
+) -> Vec<(f32, f32, f32, f32)> {
+    let nx = (room_x * resolution) as usize + 1;
+    let ny = (room_y * resolution) as usize + 1;
+    let nz = (room_z * resolution) as usize + 1;
+
+    let n_anchors = anchors.len();
+    let mut pairs: Vec<(usize, usize)> = Vec::new();
+    for i in 0..n_anchors {
+        for j in (i + 1)..n_anchors {
+            pairs.push((i, j));
+        }
+    }
+
+    let mut dists = vec![0.0f32; n_anchors];
+    let mut in_range = vec![false; n_anchors];
+    let mut result = Vec::with_capacity(nx * ny * nz);
+
+    for iz in 0..nz {
+        for iy in 0..ny {
+            for ix in 0..nx {
+                let pos = [
+                    ix as f32 / resolution + offset[0],
+                    iy as f32 / resolution + offset[1],
+                    iz as f32 / resolution + offset[2],
+                ];
+
+                for (idx, anchor) in anchors.iter().enumerate() {
+                    let d = dist3(&pos, &anchor.pos);
+                    dists[idx] = d;
+                    in_range[idx] = d <= max_range && d > 1e-6;
+                }
+
+                let mut sum_sq = 0.0f32;
+                let mut n_pairs = 0u32;
+                for &(i, j) in &pairs {
+                    if in_range[i] && in_range[j] {
+                        let h_k = (pos[axis] - anchors[i].pos[axis]) / dists[i]
+                            - (pos[axis] - anchors[j].pos[axis]) / dists[j];
+                        sum_sq += h_k * h_k;
+                        n_pairs += 1;
+                    }
+                }
+
+                let sensitivity = if n_pairs >= 1 {
+                    sum_sq.sqrt()
+                } else {
+                    f32::INFINITY
+                };
+
+                result.push((pos[0], pos[1], pos[2], sensitivity));
+            }
+        }
+    }
+
+    result
+}
+
+/// Compute the minimum axis sensitivity at every voxel.
+///
+/// At each point, computes the sensitivity for each axis independently and
+/// returns the minimum. This reveals the weakest axis — the bottleneck for
+/// positioning quality.
+///
+/// When `include_z` is false, only X and Y are considered (horizontal).
+pub fn compute_min_axis_sensitivity(
+    room_x: f32,
+    room_y: f32,
+    room_z: f32,
+    resolution: f32,
+    anchors: &[Anchor],
+    max_range: f32,
+    offset: [f32; 3],
+    include_z: bool,
+) -> Vec<(f32, f32, f32, f32)> {
+    let nx = (room_x * resolution) as usize + 1;
+    let ny = (room_y * resolution) as usize + 1;
+    let nz = (room_z * resolution) as usize + 1;
+
+    let n_anchors = anchors.len();
+    let mut pairs: Vec<(usize, usize)> = Vec::new();
+    for i in 0..n_anchors {
+        for j in (i + 1)..n_anchors {
+            pairs.push((i, j));
+        }
+    }
+
+    let mut dists = vec![0.0f32; n_anchors];
+    let mut in_range = vec![false; n_anchors];
+    let mut result = Vec::with_capacity(nx * ny * nz);
+
+    for iz in 0..nz {
+        for iy in 0..ny {
+            for ix in 0..nx {
+                let pos = [
+                    ix as f32 / resolution + offset[0],
+                    iy as f32 / resolution + offset[1],
+                    iz as f32 / resolution + offset[2],
+                ];
+
+                for (idx, anchor) in anchors.iter().enumerate() {
+                    let d = dist3(&pos, &anchor.pos);
+                    dists[idx] = d;
+                    in_range[idx] = d <= max_range && d > 1e-6;
+                }
+
+                let mut sum_sq = [0.0f32; 3];
+                let mut n_pairs = 0u32;
+                for &(i, j) in &pairs {
+                    if in_range[i] && in_range[j] {
+                        for axis in 0..3 {
+                            let h_k = (pos[axis] - anchors[i].pos[axis]) / dists[i]
+                                - (pos[axis] - anchors[j].pos[axis]) / dists[j];
+                            sum_sq[axis] += h_k * h_k;
+                        }
+                        n_pairs += 1;
+                    }
+                }
+
+                let sensitivity = if n_pairs >= 1 {
+                    let sx = sum_sq[0].sqrt();
+                    let sy = sum_sq[1].sqrt();
+                    let sz = sum_sq[2].sqrt();
+                    if include_z {
+                        sx.min(sy).min(sz)
+                    } else {
+                        sx.min(sy)
+                    }
+                } else {
+                    f32::INFINITY
+                };
+
+                result.push((pos[0], pos[1], pos[2], sensitivity));
+            }
+        }
+    }
+
+    result
+}
+
 pub fn voxel_stats(voxels: &[(f32, f32, f32, f32)]) -> (f32, f32, f32) {
     let mut min = f32::INFINITY;
     let mut max = 0.0f32;
@@ -294,6 +463,101 @@ pub fn voxel_stats(voxels: &[(f32, f32, f32, f32)]) -> (f32, f32, f32) {
     } else {
         (min, max, (sum / count as f64) as f32)
     }
+}
+
+// --- 2D Convex Hull (XY projection) ---
+
+/// A 2D convex hull of anchor positions projected onto the XY plane,
+/// combined with Z bounds from the anchor positions.
+pub struct ConvexHull {
+    /// Ordered hull vertices in CCW order (x, y).
+    hull: Vec<[f32; 2]>,
+    /// Z range from anchor positions. `None` if all anchors are at the same height.
+    z_range: Option<(f32, f32)>,
+}
+
+impl ConvexHull {
+    /// Build the convex hull from 3D points.
+    /// XY: 2D convex hull. Z: min/max bounds (skipped if all same height).
+    /// Returns `None` if fewer than 3 non-collinear XY points.
+    pub fn build(points: &[[f32; 3]]) -> Option<Self> {
+        if points.len() < 3 {
+            return None;
+        }
+
+        // Extract unique XY points
+        let mut pts: Vec<[f32; 2]> = points.iter().map(|p| [p[0], p[1]]).collect();
+
+        // Sort by x, then y
+        pts.sort_by(|a, b| a[0].partial_cmp(&b[0]).unwrap().then(a[1].partial_cmp(&b[1]).unwrap()));
+        pts.dedup_by(|a, b| (a[0] - b[0]).abs() < 1e-6 && (a[1] - b[1]).abs() < 1e-6);
+
+        if pts.len() < 3 {
+            return None;
+        }
+
+        // Andrew's monotone chain algorithm
+        let n = pts.len();
+        let mut hull = Vec::with_capacity(2 * n);
+
+        // Lower hull
+        for p in &pts {
+            while hull.len() >= 2 && cross2d(&hull[hull.len() - 2], &hull[hull.len() - 1], p) <= 0.0 {
+                hull.pop();
+            }
+            hull.push(*p);
+        }
+
+        // Upper hull
+        let lower_len = hull.len() + 1;
+        for p in pts.iter().rev() {
+            while hull.len() >= lower_len && cross2d(&hull[hull.len() - 2], &hull[hull.len() - 1], p) <= 0.0 {
+                hull.pop();
+            }
+            hull.push(*p);
+        }
+
+        hull.pop(); // Remove last point (duplicate of first)
+
+        if hull.len() < 3 {
+            return None; // Collinear points
+        }
+
+        // Z bounds: only filter if anchors have meaningful Z spread
+        let z_min = points.iter().map(|p| p[2]).fold(f32::INFINITY, f32::min);
+        let z_max = points.iter().map(|p| p[2]).fold(f32::NEG_INFINITY, f32::max);
+        let z_range = if (z_max - z_min) > 0.1 {
+            Some((z_min, z_max))
+        } else {
+            None
+        };
+
+        Some(ConvexHull { hull, z_range })
+    }
+
+    /// Test if a 3D point is inside the convex hull (XY hull + Z bounds).
+    pub fn contains(&self, point: &[f32; 3]) -> bool {
+        if let Some((z_min, z_max)) = self.z_range {
+            if point[2] < z_min - 1e-4 || point[2] > z_max + 1e-4 {
+                return false;
+            }
+        }
+        let p = [point[0], point[1]];
+        let n = self.hull.len();
+        for i in 0..n {
+            let j = (i + 1) % n;
+            if cross2d(&self.hull[i], &self.hull[j], &p) < -1e-4 {
+                return false;
+            }
+        }
+        true
+    }
+}
+
+/// 2D cross product of vectors (o->a) and (o->b).
+/// Positive if CCW, negative if CW, zero if collinear.
+fn cross2d(o: &[f32; 2], a: &[f32; 2], b: &[f32; 2]) -> f32 {
+    (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0])
 }
 
 fn dist3(a: &[f32; 3], b: &[f32; 3]) -> f32 {

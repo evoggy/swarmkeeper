@@ -1,0 +1,249 @@
+import { VerticalBox, HorizontalBox, Button, LineEdit, ScrollView, Palette, CheckBox, Slider } from "std-widgets.slint";
+import { VizLabel } from "visualization.slint";
+
+export component CombinedCoverageContent inherits Rectangle {
+    in-out property <image> texture;
+    out property <float> viewport-width: view-area.width / 1px;
+    out property <float> viewport-height: view-area.height / 1px;
+
+    // Camera state
+    in-out property <float> cam-yaw: 0.8;
+    in-out property <float> cam-pitch: 0.6;
+    in-out property <float> cam-distance: 12.0;
+    in-out property <float> cam-pan-x: 0;
+    in-out property <float> cam-pan-y: 0;
+
+    // Display toggles
+    in-out property <bool> show-lh-voxels: true;
+    in-out property <bool> show-lh-coverage-0: false;
+    in-out property <bool> show-lh-coverage-1: true;
+    in-out property <bool> show-lh-coverage-2: true;
+    in-out property <bool> show-lh-coverage-3: true;
+    in-out property <bool> show-lh-coverage-4: true;
+    in-out property <bool> show-tdoa3-voxels: true;
+    in-out property <bool> show-tdoa3-uncovered: false;
+
+    // TDoA3 scale
+    in-out property <float> tdoa3-scale-min: 0.0;
+    in-out property <float> tdoa3-scale-max: 0.5;
+    in-out property <float> tdoa3-scale-limit: 2.0;
+
+    // Info
+    in-out property <int> lh-bs-count: 0;
+    in-out property <int> tdoa3-anchor-count: 0;
+    in-out property <string> stats-text-1: "";
+    in-out property <string> stats-text-2: "";
+
+    // Grid labels
+    in-out property <[VizLabel]> grid-labels;
+
+    // Callbacks
+    callback load-lh-scene();
+    callback load-tdoa3-scene();
+    callback view-pan(/* dx_px */ float, /* dy_px */ float);
+
+    HorizontalLayout {
+        spacing: 0px;
+
+        // Left panel: configuration
+        Rectangle {
+            width: 320px;
+            border-width: 0px;
+            background: Palette.alternate-background;
+
+            VerticalLayout {
+                padding: 12px;
+                spacing: 10px;
+
+                Text {
+                    text: "Combined Coverage";
+                    font-size: 16px;
+                    font-weight: 600;
+                    vertical-alignment: center;
+                }
+
+                HorizontalLayout {
+                    spacing: 4px;
+                    Button {
+                        text: "Load LH Scene";
+                        clicked => { root.load-lh-scene(); }
+                    }
+                    Button {
+                        text: "Load TDoA3 Scene";
+                        clicked => { root.load-tdoa3-scene(); }
+                    }
+                }
+
+                Rectangle { height: 1px; background: Palette.border; }
+
+                // Lighthouse section
+                Text {
+                    text: "Lighthouse";
+                    font-size: 12px;
+                    font-weight: 600;
+                    color: Palette.foreground.transparentize(0.3);
+                }
+
+                HorizontalLayout {
+                    spacing: 4px;
+                    Text {
+                        text: root.lh-bs-count == 0 ? "No scene loaded" : root.lh-bs-count + " base stations";
+                        font-size: 12px;
+                        vertical-alignment: center;
+                    }
+                }
+
+                CheckBox {
+                    text: "Show LH coverage";
+                    checked <=> root.show-lh-voxels;
+                }
+
+                if root.show-lh-voxels: HorizontalLayout {
+                    spacing: 8px;
+                    CheckBox { text: "0 BS"; checked <=> root.show-lh-coverage-0; }
+                    CheckBox { text: "1 BS"; checked <=> root.show-lh-coverage-1; }
+                    CheckBox { text: "2+"; checked <=> root.show-lh-coverage-2; }
+                }
+
+                Rectangle { height: 1px; background: Palette.border; }
+
+                // TDoA3 section
+                Text {
+                    text: "TDoA3";
+                    font-size: 12px;
+                    font-weight: 600;
+                    color: Palette.foreground.transparentize(0.3);
+                }
+
+                HorizontalLayout {
+                    spacing: 4px;
+                    Text {
+                        text: root.tdoa3-anchor-count == 0 ? "No scene loaded" : root.tdoa3-anchor-count + " anchors";
+                        font-size: 12px;
+                        vertical-alignment: center;
+                    }
+                }
+
+                CheckBox {
+                    text: "Show TDoA3 coverage (GDOP)";
+                    checked <=> root.show-tdoa3-voxels;
+                }
+
+                if root.show-tdoa3-voxels: VerticalLayout {
+                    spacing: 6px;
+
+                    HorizontalLayout {
+                        spacing: 4px;
+                        Text { text: "Max:"; font-size: 12px; vertical-alignment: center; width: 28px; }
+                        Slider {
+                            horizontal-stretch: 1;
+                            minimum: 0.01;
+                            maximum: root.tdoa3-scale-limit;
+                            value <=> root.tdoa3-scale-max;
+                        }
+                        Text {
+                            text: round(root.tdoa3-scale-max * 100) / 100;
+                            font-size: 12px;
+                            vertical-alignment: center;
+                            width: 40px;
+                        }
+                    }
+
+                    CheckBox {
+                        text: "Show uncovered";
+                        checked <=> root.show-tdoa3-uncovered;
+                    }
+                }
+
+                Rectangle { height: 1px; background: Palette.border; }
+
+                if root.stats-text-1 != "": VerticalLayout {
+                    spacing: 2px;
+                    Text { text: root.stats-text-1; font-size: 12px; }
+                    Text { text: root.stats-text-2; font-size: 12px; }
+                }
+
+                Rectangle { vertical-stretch: 1; }
+            }
+        }
+
+        // Right panel: 3D view
+        view-area := Rectangle {
+            horizontal-stretch: 1;
+
+            Image {
+                source: root.texture;
+                width: 100%;
+                height: 100%;
+                image-fit: fill;
+            }
+
+            // Grid measurement labels
+            Rectangle {
+                width: 100%;
+                height: 100%;
+                for label in root.grid-labels: Text {
+                    x: label.screen-x * 1px;
+                    y: label.screen-y * 1px;
+                    text: label.text;
+                    font-size: 9px;
+                    color: #4d4d59;
+                }
+            }
+
+            TouchArea {
+                property <float> prev-x;
+                property <float> prev-y;
+                property <bool> dragging;
+                property <bool> panning;
+
+                scroll-event(e) => {
+                    if (e.delta-y > 0) {
+                        root.cam-distance = max(1.0, root.cam-distance - 0.5);
+                    } else if (e.delta-y < 0) {
+                        root.cam-distance = min(30.0, root.cam-distance + 0.5);
+                    }
+                    accept
+                }
+
+                pointer-event(e) => {
+                    if (e.kind == PointerEventKind.down) {
+                        if (e.button == PointerEventButton.left) {
+                            self.prev-x = self.mouse-x / 1px;
+                            self.prev-y = self.mouse-y / 1px;
+                            self.dragging = true;
+                            self.panning = false;
+                        } else if (e.button == PointerEventButton.middle) {
+                            self.prev-x = self.mouse-x / 1px;
+                            self.prev-y = self.mouse-y / 1px;
+                            self.panning = true;
+                        } else if (e.button == PointerEventButton.right) {
+                            self.prev-x = self.mouse-x / 1px;
+                            self.prev-y = self.mouse-y / 1px;
+                            self.panning = true;
+                        }
+                    } else if (e.kind == PointerEventKind.up) {
+                        self.dragging = false;
+                        self.panning = false;
+                    }
+                }
+
+                moved => {
+                    if (self.panning) {
+                        root.view-pan(
+                            self.mouse-x / 1px - self.prev-x,
+                            self.mouse-y / 1px - self.prev-y,
+                        );
+                        self.prev-x = self.mouse-x / 1px;
+                        self.prev-y = self.mouse-y / 1px;
+                    } else if (self.dragging) {
+                        root.cam-yaw -= (self.mouse-x / 1px - self.prev-x) * 0.01;
+                        root.cam-pitch = clamp(root.cam-pitch + (self.mouse-y / 1px - self.prev-y) * 0.01, 0.1, 1.5);
+                        self.prev-x = self.mouse-x / 1px;
+                        self.prev-y = self.mouse-y / 1px;
+                    }
+                }
+            }
+        }
+    }
+}

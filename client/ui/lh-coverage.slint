@@ -46,6 +46,13 @@ export component LhCoverageContent inherits Rectangle {
     in-out property <string> coverage-1-text: "";
     in-out property <string> coverage-2-text: "";
 
+    // Trajectories
+    in-out property <string> trajectories-status: "";
+    in-out property <bool> show-trajectories: true;
+    in-out property <string> traj-offset-x: "0.0";
+    in-out property <string> traj-offset-y: "0.0";
+    in-out property <string> traj-offset-z: "0.0";
+
     // Grid labels (set from Rust)
     in-out property <[VizLabel]> grid-labels;
 
@@ -63,6 +70,7 @@ export component LhCoverageContent inherits Rectangle {
     callback remove-base-station(int);
     callback update-base-station(int, LhBaseStationData);
     callback recompute();
+    callback load-trajectories();
     callback view-mouse-pressed(/* x */ float, /* y */ float);
     callback view-mouse-moved(/* x */ float, /* y */ float);
     callback view-mouse-released();
@@ -332,6 +340,45 @@ export component LhCoverageContent inherits Rectangle {
                     spacing: 2px;
                     Text { text: root.coverage-1-text; font-size: 12px; }
                     Text { text: root.coverage-2-text; font-size: 12px; }
+                }
+
+                Rectangle { height: 1px; background: Palette.border; }
+
+                HorizontalLayout {
+                    spacing: 4px;
+                    Text {
+                        text: "Trajectories";
+                        font-size: 12px;
+                        font-weight: 600;
+                        color: Palette.foreground.transparentize(0.3);
+                        vertical-alignment: center;
+                    }
+                    Rectangle { horizontal-stretch: 1; }
+                    Button {
+                        text: "Load CSV";
+                        clicked => { root.load-trajectories(); }
+                    }
+                }
+
+                CheckBox {
+                    text: "Show trajectories";
+                    checked <=> root.show-trajectories;
+                }
+
+                HorizontalLayout {
+                    spacing: 4px;
+                    Text { text: "Offset X:"; font-size: 12px; vertical-alignment: center; }
+                    LineEdit { text <=> root.traj-offset-x; width: 70px; }
+                    Text { text: "Y:"; font-size: 12px; vertical-alignment: center; }
+                    LineEdit { text <=> root.traj-offset-y; width: 70px; }
+                    Text { text: "Z:"; font-size: 12px; vertical-alignment: center; }
+                    LineEdit { text <=> root.traj-offset-z; width: 70px; }
+                }
+
+                if root.trajectories-status != "": Text {
+                    text: root.trajectories-status;
+                    font-size: 11px;
+                    color: Palette.foreground.transparentize(0.4);
                 }
             }
         }

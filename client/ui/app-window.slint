@@ -5,6 +5,8 @@ import { UnitData, UnitState, JournalEntryData } from "unit-card.slint";
 import { RadioTestContent, ChannelResult } from "radio-test.slint";
 import { LhCoverageContent, LhBaseStationData } from "lh-coverage.slint";
 import { Tdoa3CoverageContent, Tdoa3AnchorData } from "tdoa3-coverage.slint";
+import { CombinedCoverageContent } from "combined-coverage.slint";
+import { LhWizardContent, WizardSampleData, WizardBsData } from "lh-wizard.slint";
 
 export struct HealthTestResult {
     name: string,
@@ -541,6 +543,11 @@ export component AppWindow inherits Window {
     in-out property <[VizLabel]> lh-cov-grid-labels;
     in-out property <string> lh-cov-coverage-1-text;
     in-out property <string> lh-cov-coverage-2-text;
+    in-out property <string> lh-cov-trajectories-status <=> lh-cov-content.trajectories-status;
+    in-out property <bool> lh-cov-show-trajectories <=> lh-cov-content.show-trajectories;
+    in-out property <string> lh-cov-traj-offset-x <=> lh-cov-content.traj-offset-x;
+    in-out property <string> lh-cov-traj-offset-y <=> lh-cov-content.traj-offset-y;
+    in-out property <string> lh-cov-traj-offset-z <=> lh-cov-content.traj-offset-z;
     callback lh-cov-load-geometry();
     callback lh-cov-save-scene();
     callback lh-cov-load-scene();
@@ -549,10 +556,58 @@ export component AppWindow inherits Window {
     callback lh-cov-remove-bs(int);
     callback lh-cov-update-bs(int, LhBaseStationData);
     callback lh-cov-recompute();
+    callback lh-cov-load-trajectories();
     callback lh-cov-view-mouse-pressed(float, float);
     callback lh-cov-view-mouse-moved(float, float);
     callback lh-cov-view-mouse-released();
     callback lh-cov-view-pan(float, float);
+
+    // LH Wizard
+    in-out property <image> lh-wizard-texture;
+    out property <float> lh-wizard-width: lh-wizard-content.viewport-width;
+    out property <float> lh-wizard-height: lh-wizard-content.viewport-height;
+    out property <float> lh-wizard-cam-yaw: lh-wizard-content.cam-yaw;
+    out property <float> lh-wizard-cam-pitch: lh-wizard-content.cam-pitch;
+    out property <float> lh-wizard-cam-distance: lh-wizard-content.cam-distance;
+    in-out property <float> lh-wizard-cam-pan-x <=> lh-wizard-content.cam-pan-x;
+    in-out property <float> lh-wizard-cam-pan-y <=> lh-wizard-content.cam-pan-y;
+    in-out property <int> lh-wizard-current-step <=> lh-wizard-content.current-step;
+    in-out property <string> lh-wizard-step-instructions <=> lh-wizard-content.step-instructions;
+    in-out property <string> lh-wizard-measure-button-text <=> lh-wizard-content.measure-button-text;
+    in-out property <bool> lh-wizard-measure-enabled <=> lh-wizard-content.measure-enabled;
+    in-out property <bool> lh-wizard-measuring <=> lh-wizard-content.measuring;
+    in-out property <[string]> lh-wizard-cf-names <=> lh-wizard-content.cf-names;
+    in-out property <int> lh-wizard-selected-cf <=> lh-wizard-content.selected-cf;
+    in-out property <string> lh-wizard-origin-status <=> lh-wizard-content.origin-status;
+    in-out property <bool> lh-wizard-origin-ok <=> lh-wizard-content.origin-ok;
+    in-out property <string> lh-wizard-x-axis-status <=> lh-wizard-content.x-axis-status;
+    in-out property <bool> lh-wizard-x-axis-ok <=> lh-wizard-content.x-axis-ok;
+    in-out property <string> lh-wizard-xy-plane-status <=> lh-wizard-content.xy-plane-status;
+    in-out property <bool> lh-wizard-xy-plane-ok <=> lh-wizard-content.xy-plane-ok;
+    in-out property <string> lh-wizard-progress-info <=> lh-wizard-content.progress-info;
+    in-out property <bool> lh-wizard-has-converged <=> lh-wizard-content.has-converged;
+    in-out property <string> lh-wizard-error-mean <=> lh-wizard-content.error-mean;
+    in-out property <string> lh-wizard-error-max <=> lh-wizard-content.error-max;
+    in-out property <int> lh-wizard-xy-plane-count <=> lh-wizard-content.xy-plane-count;
+    in-out property <int> lh-wizard-xyz-space-count <=> lh-wizard-content.xyz-space-count;
+    in-out property <int> lh-wizard-verification-count <=> lh-wizard-content.verification-count;
+    in-out property <string> lh-wizard-notification-text <=> lh-wizard-content.notification-text;
+    in-out property <color> lh-wizard-notification-color <=> lh-wizard-content.notification-color;
+    in-out property <[WizardSampleData]> lh-wizard-sample-details <=> lh-wizard-content.sample-details;
+    in-out property <[WizardBsData]> lh-wizard-bs-details <=> lh-wizard-content.bs-details;
+    in-out property <[VizLabel]> lh-wizard-grid-labels;
+    callback lh-wizard-measure();
+    callback lh-wizard-step-next();
+    callback lh-wizard-step-prev();
+    callback lh-wizard-clear();
+    callback lh-wizard-import();
+    callback lh-wizard-export();
+    callback lh-wizard-upload();
+    callback lh-wizard-select-cf(int);
+    callback lh-wizard-view-mouse-pressed(float, float);
+    callback lh-wizard-view-mouse-moved(float, float);
+    callback lh-wizard-view-mouse-released();
+    callback lh-wizard-view-pan(float, float);
 
     // TDoA3 Coverage
     in-out property <image> tdoa3-texture;
@@ -569,12 +624,15 @@ export component AppWindow inherits Window {
     in-out property <string> tdoa3-resolution <=> tdoa3-content.resolution;
     in-out property <[Tdoa3AnchorData]> tdoa3-anchors;
     in-out property <string> tdoa3-max-range <=> tdoa3-content.max-range;
-    in-out property <string> tdoa3-scale-value <=> tdoa3-content.scale-value;
-    in-out property <bool> tdoa3-show-uncovered <=> tdoa3-content.show-uncovered;
+    in-out property <float> tdoa3-scale-min-value <=> tdoa3-content.scale-min-value;
+    in-out property <float> tdoa3-scale-max-value <=> tdoa3-content.scale-max-value;
+    in-out property <float> tdoa3-scale-limit <=> tdoa3-content.scale-limit;
+    in-out property <bool> tdoa3-show-outside-hull <=> tdoa3-content.show-outside-hull;
     in-out property <bool> tdoa3-center-origin <=> tdoa3-content.center-origin;
     in-out property <int> tdoa3-metric-index <=> tdoa3-content.metric-index;
     in-out property <string> tdoa3-pair-a <=> tdoa3-content.pair-a;
     in-out property <string> tdoa3-pair-b <=> tdoa3-content.pair-b;
+    in-out property <string> tdoa3-measurement-noise <=> tdoa3-content.measurement-noise;
     callback tdoa3-metric-changed(int);
     callback tdoa3-pair-changed();
     in-out property <int> tdoa3-selected-anchor: -1;
@@ -595,6 +653,35 @@ export component AppWindow inherits Window {
     callback tdoa3-view-mouse-moved(float, float);
     callback tdoa3-view-mouse-released();
     callback tdoa3-view-pan(float, float);
+
+    // Combined Coverage
+    in-out property <image> combined-texture;
+    out property <float> combined-width: combined-content.viewport-width;
+    out property <float> combined-height: combined-content.viewport-height;
+    out property <float> combined-cam-yaw: combined-content.cam-yaw;
+    out property <float> combined-cam-pitch: combined-content.cam-pitch;
+    out property <float> combined-cam-distance: combined-content.cam-distance;
+    in-out property <float> combined-cam-pan-x <=> combined-content.cam-pan-x;
+    in-out property <float> combined-cam-pan-y <=> combined-content.cam-pan-y;
+    in-out property <bool> combined-show-lh-voxels <=> combined-content.show-lh-voxels;
+    in-out property <bool> combined-show-lh-coverage-0 <=> combined-content.show-lh-coverage-0;
+    in-out property <bool> combined-show-lh-coverage-1 <=> combined-content.show-lh-coverage-1;
+    in-out property <bool> combined-show-lh-coverage-2 <=> combined-content.show-lh-coverage-2;
+    in-out property <bool> combined-show-lh-coverage-3 <=> combined-content.show-lh-coverage-3;
+    in-out property <bool> combined-show-lh-coverage-4 <=> combined-content.show-lh-coverage-4;
+    in-out property <bool> combined-show-tdoa3-voxels <=> combined-content.show-tdoa3-voxels;
+    in-out property <bool> combined-show-tdoa3-uncovered <=> combined-content.show-tdoa3-uncovered;
+    in-out property <float> combined-tdoa3-scale-min <=> combined-content.tdoa3-scale-min;
+    in-out property <float> combined-tdoa3-scale-max <=> combined-content.tdoa3-scale-max;
+    in-out property <float> combined-tdoa3-scale-limit <=> combined-content.tdoa3-scale-limit;
+    in-out property <int> combined-lh-bs-count <=> combined-content.lh-bs-count;
+    in-out property <int> combined-tdoa3-anchor-count <=> combined-content.tdoa3-anchor-count;
+    in-out property <[VizLabel]> combined-grid-labels;
+    in-out property <string> combined-stats-text-1;
+    in-out property <string> combined-stats-text-2;
+    callback combined-load-lh-scene();
+    callback combined-load-tdoa3-scene();
+    callback combined-view-pan(float, float);
 
     VerticalBox {
         padding: 0px;
@@ -723,10 +810,30 @@ export component AppWindow inherits Window {
                     remove-base-station(idx) => { root.lh-cov-remove-bs(idx); }
                     update-base-station(idx, data) => { root.lh-cov-update-bs(idx, data); }
                     recompute => { root.lh-cov-recompute(); }
+                    load-trajectories => { root.lh-cov-load-trajectories(); }
                     view-mouse-pressed(x, y) => { root.lh-cov-view-mouse-pressed(x, y); }
                     view-mouse-moved(x, y) => { root.lh-cov-view-mouse-moved(x, y); }
                     view-mouse-released => { root.lh-cov-view-mouse-released(); }
                     view-pan(dx, dy) => { root.lh-cov-view-pan(dx, dy); }
+                }
+            }
+            Tab {
+                title: "LH Wizard";
+                lh-wizard-content := LhWizardContent {
+                    texture <=> root.lh-wizard-texture;
+                    grid-labels: root.lh-wizard-grid-labels;
+                    measure-clicked => { root.lh-wizard-measure(); }
+                    step-next => { root.lh-wizard-step-next(); }
+                    step-prev => { root.lh-wizard-step-prev(); }
+                    clear-samples => { root.lh-wizard-clear(); }
+                    import-session => { root.lh-wizard-import(); }
+                    export-session => { root.lh-wizard-export(); }
+                    upload-geometry => { root.lh-wizard-upload(); }
+                    select-cf(idx) => { root.lh-wizard-select-cf(idx); }
+                    view-mouse-pressed(x, y) => { root.lh-wizard-view-mouse-pressed(x, y); }
+                    view-mouse-moved(x, y) => { root.lh-wizard-view-mouse-moved(x, y); }
+                    view-mouse-released => { root.lh-wizard-view-mouse-released(); }
+                    view-pan(dx, dy) => { root.lh-wizard-view-pan(dx, dy); }
                 }
             }
             Tab {
@@ -754,6 +861,18 @@ export component AppWindow inherits Window {
                     view-mouse-moved(x, y) => { root.tdoa3-view-mouse-moved(x, y); }
                     view-mouse-released => { root.tdoa3-view-mouse-released(); }
                     view-pan(dx, dy) => { root.tdoa3-view-pan(dx, dy); }
+                }
+            }
+            Tab {
+                title: "Combined";
+                combined-content := CombinedCoverageContent {
+                    texture <=> root.combined-texture;
+                    grid-labels: root.combined-grid-labels;
+                    stats-text-1: root.combined-stats-text-1;
+                    stats-text-2: root.combined-stats-text-2;
+                    load-lh-scene => { root.combined-load-lh-scene(); }
+                    load-tdoa3-scene => { root.combined-load-tdoa3-scene(); }
+                    view-pan(dx, dy) => { root.combined-view-pan(dx, dy); }
                 }
             }
         }

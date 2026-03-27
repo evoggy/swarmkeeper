@@ -22,6 +22,8 @@ chrono = "0.4"
 rfd = "0.15"
 confy = "0.6"
 gilrs = "0.11"
+nalgebra = { version = "0.33", features = ["serde-serialize"] }
+levenberg-marquardt = "0.14"
 
 [build-dependencies]
 slint-build = "1.14.1"

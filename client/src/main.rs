@@ -6,6 +6,8 @@ use slint::{Model, StandardListViewItem};
 use tokio::sync::Mutex;
 
 mod coverage;
+mod lh_geo;
+mod lh_wizard;
 mod renderer;
 mod tdoa3;
 
@@ -132,8 +134,15 @@ fn apply_swarm_config(ui: &AppWindow, config: &SwarmConfig) {
     ui.set_positioning_source_names(slint::ModelRc::new(slint::VecModel::from(unit_names.clone())));
     ui.set_positioning_source_index(0);
 
-    ui.set_radio_test_unit_names(slint::ModelRc::new(slint::VecModel::from(unit_names)));
+    ui.set_radio_test_unit_names(slint::ModelRc::new(slint::VecModel::from(unit_names.clone())));
     ui.set_radio_test_selected_unit(0);
+
+    // Populate wizard CF names
+    ui.set_lh_wizard_cf_names(slint::ModelRc::new(slint::VecModel::from(unit_names.clone())));
+    if !unit_names.is_empty() {
+        ui.set_lh_wizard_selected_cf(0);
+        ui.set_lh_wizard_measure_enabled(true);
+    }
 
     ui.set_units(slint::ModelRc::new(slint::VecModel::from(units_data)));
     ui.set_swarm_connected(false);
@@ -3601,6 +3610,7 @@ async fn main() {
         room_offset: [f32; 3],
         bs_render_data: Vec<([f32; 3], [[f32; 3]; 3])>,
         undo_stack: Vec<Vec<coverage::BaseStation>>,
+        trajectories: Vec<Vec<[f32; 3]>>,
     }
     let coverage_state = std::sync::Arc::new(std::sync::Mutex::new(CoverageState {
         base_stations: Vec::new(),
@@ -3609,6 +3619,7 @@ async fn main() {
         room_offset: [0.0; 3],
         bs_render_data: Vec::new(),
         undo_stack: Vec::new(),
+        trajectories: Vec::new(),
     }));
 
     struct GizmoState {
@@ -3633,6 +3644,7 @@ async fn main() {
         room_offset: [f32; 3],
         undo_stack: Vec<Vec<tdoa3::Anchor>>,
         gdop_result: Option<tdoa3::GdopResult>,
+        convex_hull: Option<tdoa3::ConvexHull>,
     }
     let tdoa3_state = std::sync::Arc::new(std::sync::Mutex::new(Tdoa3State {
         anchors: Vec::new(),
@@ -3642,6 +3654,7 @@ async fn main() {
         room_offset: [0.0; 3],
         undo_stack: Vec::new(),
         gdop_result: None,
+        convex_hull: None,
     }));
 
     struct Tdoa3GizmoState {
@@ -3653,6 +3666,31 @@ async fn main() {
         drag_start_pos: [0.0; 3],
     }));
 
+    // Combined Coverage shared state
+    struct CombinedState {
+        lh_base_stations: Vec<coverage::BaseStation>,
+        lh_voxels: Vec<(f32, f32, f32, u8)>,
+        lh_bs_render_data: Vec<([f32; 3], [[f32; 3]; 3])>,
+        tdoa3_anchors: Vec<tdoa3::Anchor>,
+        tdoa3_voxels: Vec<(f32, f32, f32, f32)>,
+        tdoa3_anchor_positions: Vec<[f32; 3]>,
+        room: [f32; 3],
+        room_offset: [f32; 3],
+    }
+    let combined_state = std::sync::Arc::new(std::sync::Mutex::new(CombinedState {
+        lh_base_stations: Vec::new(),
+        lh_voxels: Vec::new(),
+        lh_bs_render_data: Vec::new(),
+        tdoa3_anchors: Vec::new(),
+        tdoa3_voxels: Vec::new(),
+        tdoa3_anchor_positions: Vec::new(),
+        room: [10.0, 10.0, 3.0],
+        room_offset: [0.0; 3],
+    }));
+
+    // LH Wizard shared state
+    let wizard_state = Arc::new(std::sync::Mutex::new(lh_wizard::LhWizardState::new()));
+
     // Set up OpenGL 3D rendering
     {
         let app_weak = ui.as_weak();
@@ -3660,9 +3698,13 @@ async fn main() {
         let trajectory_data = trajectory_data.clone();
         let coverage_state = coverage_state.clone();
         let tdoa3_state = tdoa3_state.clone();
+        let combined_state_render = combined_state.clone();
+        let wizard_state_render = wizard_state.clone();
         let mut scene_renderer: Option<renderer::Scene3DRenderer> = None;
         let mut coverage_renderer: Option<renderer::Scene3DRenderer> = None;
         let mut tdoa3_renderer: Option<renderer::Scene3DRenderer> = None;
+        let mut wizard_renderer: Option<renderer::Scene3DRenderer> = None;
+        let mut combined_renderer: Option<renderer::Scene3DRenderer> = None;
 
         ui.window()
             .set_rendering_notifier(move |state, graphics_api| {
@@ -3686,9 +3728,23 @@ async fn main() {
                             },
                             _ => return,
                         };
+                        let context4 = match graphics_api {
+                            slint::GraphicsAPI::NativeOpenGL { get_proc_address } => unsafe {
+                                glow::Context::from_loader_function_cstr(|s| get_proc_address(s))
+                            },
+                            _ => return,
+                        };
+                        let context5 = match graphics_api {
+                            slint::GraphicsAPI::NativeOpenGL { get_proc_address } => unsafe {
+                                glow::Context::from_loader_function_cstr(|s| get_proc_address(s))
+                            },
+                            _ => return,
+                        };
                         scene_renderer = Some(renderer::Scene3DRenderer::new(context));
                         coverage_renderer = Some(renderer::Scene3DRenderer::new(context2));
                         tdoa3_renderer = Some(renderer::Scene3DRenderer::new(context3));
+                        wizard_renderer = Some(renderer::Scene3DRenderer::new(context4));
+                        combined_renderer = Some(renderer::Scene3DRenderer::new(context5));
                     }
                     slint::RenderingState::BeforeRendering => {
                         if let (Some(renderer), Some(app)) =
@@ -3913,9 +3969,9 @@ async fn main() {
                                     let cov_pan_x = app.get_lh_cov_cam_pan_x();
                                     let cov_pan_y = app.get_lh_cov_cam_pan_y();
 
-                                    let (room, room_offset, bs_render, voxels) = {
+                                    let (room, room_offset, bs_render, voxels, trajectories) = {
                                         let cs = coverage_state.lock().unwrap();
-                                        (cs.room, cs.room_offset, cs.bs_render_data.clone(), cs.voxels.clone())
+                                        (cs.room, cs.room_offset, cs.bs_render_data.clone(), cs.voxels.clone(), cs.trajectories.clone())
                                     };
 
                                     let show_coverage = [
@@ -3925,6 +3981,22 @@ async fn main() {
                                         app.get_lh_cov_show_coverage_3(),
                                         app.get_lh_cov_show_coverage_4(),
                                     ];
+
+                                    let offset_traj = if app.get_lh_cov_show_trajectories() && !trajectories.is_empty() {
+                                        let ox: f32 = app.get_lh_cov_traj_offset_x().parse().unwrap_or(0.0);
+                                        let oy: f32 = app.get_lh_cov_traj_offset_y().parse().unwrap_or(0.0);
+                                        let oz: f32 = app.get_lh_cov_traj_offset_z().parse().unwrap_or(0.0);
+                                        if ox == 0.0 && oy == 0.0 && oz == 0.0 {
+                                            trajectories.clone()
+                                        } else {
+                                            trajectories.iter().map(|traj| {
+                                                traj.iter().map(|p| [p[0] + ox, p[1] + oy, p[2] + oz]).collect()
+                                            }).collect()
+                                        }
+                                    } else {
+                                        Vec::new()
+                                    };
+                                    let traj_to_render = &offset_traj;
 
                                     let cov_tex = cov_renderer.render_coverage(
                                         cov_w, cov_h,
@@ -3936,6 +4008,7 @@ async fn main() {
                                         &show_coverage,
                                         app.get_lh_cov_selected_bs(),
                                         app.get_lh_cov_active_handle(),
+                                        traj_to_render,
                                     );
                                     app.set_lh_coverage_texture(cov_tex);
 
@@ -3998,13 +4071,14 @@ async fn main() {
                                         (ts.room, ts.room_offset, ts.anchor_positions.clone(), ts.voxels.clone())
                                     };
 
-                                    let max_scale: f32 = app.get_tdoa3_scale_value()
-                                        .parse().unwrap_or(5.0);
-                                    let show_uncovered = app.get_tdoa3_show_uncovered();
+                                    let min_scale: f32 = app.get_tdoa3_scale_min_value();
+                                    let max_scale: f32 = app.get_tdoa3_scale_max_value();
                                     let metric_index = app.get_tdoa3_metric_index() as usize;
-                                    // Pairs & pair sensitivity: higher value = better = green
-                                    let invert_gradient = metric_index == tdoa3::METRIC_PAIRS
-                                        || metric_index == tdoa3::METRIC_PAIR_SENSITIVITY;
+                                    // Invert for metrics where higher = better:
+                                    // Pairs (5), pair sensitivity (6), axis sensitivity (12+)
+                                    let invert_gradient = metric_index == 5
+                                        || metric_index == 6
+                                        || metric_index >= 12;
 
                                     let t3_tex = t3_renderer.render_tdoa3(
                                         t3_w, t3_h,
@@ -4012,8 +4086,9 @@ async fn main() {
                                         room, room_offset,
                                         &anchor_positions,
                                         &voxels,
+                                        min_scale,
                                         max_scale,
-                                        show_uncovered,
+                                        true, // uncovered voxels already filtered by hull
                                         invert_gradient,
                                         app.get_tdoa3_selected_anchor(),
                                         app.get_tdoa3_active_handle(),
@@ -4060,6 +4135,170 @@ async fn main() {
                                 }
                             }
 
+                            // Wizard 3D rendering
+                            if let Some(wiz_renderer) = wizard_renderer.as_mut() {
+                                let wiz_w = app.get_lh_wizard_width() as u32;
+                                let wiz_h = app.get_lh_wizard_height() as u32;
+                                if wiz_w > 0 && wiz_h > 0 {
+                                    let yaw = app.get_lh_wizard_cam_yaw();
+                                    let pitch = app.get_lh_wizard_cam_pitch();
+                                    let dist = app.get_lh_wizard_cam_distance();
+                                    let pan_x = app.get_lh_wizard_cam_pan_x();
+                                    let pan_y = app.get_lh_wizard_cam_pan_y();
+
+                                    let ws = wizard_state_render.lock().unwrap();
+                                    let mut bs_data: Vec<([f32; 3], [[f32; 3]; 3])> = Vec::new();
+
+                                    if let Some(ref sol) = ws.latest_solution {
+                                        for pose in sol.bs_poses.values() {
+                                            let p = [pose.translation[0] as f32, pose.translation[1] as f32, pose.translation[2] as f32];
+                                            let r = [
+                                                [pose.rot_matrix[(0,0)] as f32, pose.rot_matrix[(1,0)] as f32, pose.rot_matrix[(2,0)] as f32],
+                                                [pose.rot_matrix[(0,1)] as f32, pose.rot_matrix[(1,1)] as f32, pose.rot_matrix[(2,1)] as f32],
+                                                [pose.rot_matrix[(0,2)] as f32, pose.rot_matrix[(1,2)] as f32, pose.rot_matrix[(2,2)] as f32],
+                                            ];
+                                            bs_data.push((p, r));
+                                        }
+                                    }
+                                    drop(ws);
+
+                                    let room = [10.0f32, 10.0, 3.0];
+                                    let room_offset = [-5.0f32, -5.0, 0.0];
+                                    let show_cov = [false; 5];
+
+                                    let wiz_tex = wiz_renderer.render_coverage(
+                                        wiz_w, wiz_h, yaw, pitch, dist, pan_x, pan_y,
+                                        room, room_offset,
+                                        &bs_data, &[],
+                                        60.0, 60.0, &show_cov,
+                                        -1, 0,
+                                        &[],
+                                    );
+                                    app.set_lh_wizard_texture(wiz_tex);
+
+                                    // Grid labels along room edges (matching the grid the renderer draws)
+                                    let aspect = wiz_w as f32 / wiz_h.max(1) as f32;
+                                    let mvp = renderer::compute_mvp(yaw, pitch, dist, pan_x, pan_y, aspect);
+                                    let mut labels = Vec::new();
+                                    let gx = room[0].ceil() as i32;
+                                    let gy = room[1].ceil() as i32;
+                                    let ox = room_offset[0];
+                                    let oy = room_offset[1];
+                                    let oz = room_offset[2];
+                                    // Labels along X axis (at Y=min edge)
+                                    for i in 0..=gx {
+                                        let wx = i as f32 + ox;
+                                        if let Some((sx, sy)) = renderer::project_to_screen(
+                                            [wx, oy, oz], &mvp, wiz_w, wiz_h,
+                                        ) {
+                                            labels.push(VizLabel {
+                                                text: format!("{}", wx as i32).into(),
+                                                screen_x: sx,
+                                                screen_y: sy + 4.0,
+                                            });
+                                        }
+                                    }
+                                    // Labels along Y axis (at X=min edge)
+                                    for i in 1..=gy {
+                                        let wy = i as f32 + oy;
+                                        if let Some((sx, sy)) = renderer::project_to_screen(
+                                            [ox, wy, oz], &mvp, wiz_w, wiz_h,
+                                        ) {
+                                            labels.push(VizLabel {
+                                                text: format!("{}", wy as i32).into(),
+                                                screen_x: sx + 4.0,
+                                                screen_y: sy,
+                                            });
+                                        }
+                                    }
+                                    app.set_lh_wizard_grid_labels(
+                                        slint::ModelRc::new(slint::VecModel::from(labels)),
+                                    );
+                                }
+                            }
+
+                            // --- Combined Coverage rendering ---
+                            if let Some(comb_renderer) = combined_renderer.as_mut() {
+                                let cw = app.get_combined_width() as u32;
+                                let ch = app.get_combined_height() as u32;
+                                if cw > 0 && ch > 0 {
+                                    let yaw = app.get_combined_cam_yaw();
+                                    let pitch = app.get_combined_cam_pitch();
+                                    let dist = app.get_combined_cam_distance();
+                                    let pan_x = app.get_combined_cam_pan_x();
+                                    let pan_y = app.get_combined_cam_pan_y();
+
+                                    let (room, room_offset, bs_render, lh_voxels, anchor_positions, tdoa3_voxels) = {
+                                        let cs = combined_state_render.lock().unwrap();
+                                        (cs.room, cs.room_offset, cs.lh_bs_render_data.clone(),
+                                         cs.lh_voxels.clone(), cs.tdoa3_anchor_positions.clone(),
+                                         cs.tdoa3_voxels.clone())
+                                    };
+
+                                    let show_lh_coverage = [
+                                        app.get_combined_show_lh_coverage_0(),
+                                        app.get_combined_show_lh_coverage_1(),
+                                        app.get_combined_show_lh_coverage_2(),
+                                        app.get_combined_show_lh_coverage_3(),
+                                        app.get_combined_show_lh_coverage_4(),
+                                    ];
+
+                                    let tex = comb_renderer.render_combined(
+                                        cw, ch,
+                                        yaw, pitch, dist, pan_x, pan_y,
+                                        room, room_offset,
+                                        &bs_render, &lh_voxels, 160.0, 115.0,
+                                        &show_lh_coverage,
+                                        app.get_combined_show_lh_voxels(),
+                                        &anchor_positions, &tdoa3_voxels,
+                                        app.get_combined_tdoa3_scale_min(),
+                                        app.get_combined_tdoa3_scale_max(),
+                                        app.get_combined_show_tdoa3_voxels(),
+                                        app.get_combined_show_tdoa3_uncovered(),
+                                    );
+                                    app.set_combined_texture(tex);
+
+                                    // Grid labels
+                                    let mvp = renderer::compute_mvp(
+                                        yaw, pitch, dist, pan_x, pan_y,
+                                        cw as f32 / ch as f32,
+                                    );
+                                    let mut labels = Vec::new();
+                                    let gx = room[0].ceil() as i32;
+                                    let gy = room[1].ceil() as i32;
+                                    let ox = room_offset[0];
+                                    let oy = room_offset[1];
+                                    let oz = room_offset[2];
+                                    for i in 0..=gx {
+                                        let wx = i as f32 + ox;
+                                        if let Some((sx, sy)) = renderer::project_to_screen(
+                                            [wx, oy, oz], &mvp, cw, ch,
+                                        ) {
+                                            labels.push(VizLabel {
+                                                text: format!("{}", wx as i32).into(),
+                                                screen_x: sx,
+                                                screen_y: sy + 4.0,
+                                            });
+                                        }
+                                    }
+                                    for i in 1..=gy {
+                                        let wy = i as f32 + oy;
+                                        if let Some((sx, sy)) = renderer::project_to_screen(
+                                            [ox, wy, oz], &mvp, cw, ch,
+                                        ) {
+                                            labels.push(VizLabel {
+                                                text: format!("{}", wy as i32).into(),
+                                                screen_x: sx + 4.0,
+                                                screen_y: sy,
+                                            });
+                                        }
+                                    }
+                                    app.set_combined_grid_labels(
+                                        slint::ModelRc::new(slint::VecModel::from(labels)),
+                                    );
+                                }
+                            }
+
                             app.window().request_redraw();
                         }
                     }
@@ -4067,6 +4306,8 @@ async fn main() {
                         drop(scene_renderer.take());
                         drop(coverage_renderer.take());
                         drop(tdoa3_renderer.take());
+                        drop(wizard_renderer.take());
+                        drop(combined_renderer.take());
                     }
                     _ => {}
                 }
@@ -4826,6 +5067,33 @@ async fn main() {
                 .collect();
         });
 
+        // Load trajectories from CSV
+        let cs = coverage_state.clone();
+        let uw = ui_weak.clone();
+        ui.on_lh_cov_load_trajectories(move || {
+            let Some(ui) = uw.upgrade() else { return };
+            let dialog = rfd::FileDialog::new()
+                .add_filter("CSV files", &["csv"])
+                .set_title("Load Trajectories CSV");
+            if let Some(path) = dialog.pick_file() {
+                match coverage::load_trajectories_csv(&path) {
+                    Ok(trajectories) => {
+                        let n_cfs = trajectories.len();
+                        let n_steps = trajectories.first().map(|t| t.len()).unwrap_or(0);
+                        ui.set_lh_cov_trajectories_status(
+                            format!("{} CFs, {} steps", n_cfs, n_steps).into(),
+                        );
+                        cs.lock().unwrap().trajectories = trajectories;
+                    }
+                    Err(e) => {
+                        ui.set_lh_cov_trajectories_status(
+                            format!("Error: {}", e).into(),
+                        );
+                    }
+                }
+            }
+        });
+
         // --- Gizmo mouse interaction callbacks ---
 
         // Helper to sync BS data back to the UI model
@@ -5033,8 +5301,8 @@ async fn main() {
                 ui.get_tdoa3_resolution().parse().unwrap_or(2.0),
                 ui.get_tdoa3_center_origin(),
                 ui.get_tdoa3_max_range().parse().unwrap_or(15.0),
-                ui.get_tdoa3_scale_value().parse().unwrap_or(5.0),
-                ui.get_tdoa3_show_uncovered(),
+                ui.get_tdoa3_scale_max_value(),
+                ui.get_tdoa3_show_outside_hull(),
                 &ts.anchors,
             );
             drop(ts);
@@ -5072,8 +5340,13 @@ async fn main() {
                     ui.set_tdoa3_resolution(format!("{}", scene.resolution).into());
                     ui.set_tdoa3_center_origin(scene.center_origin);
                     ui.set_tdoa3_max_range(format!("{}", scene.max_range).into());
-                    ui.set_tdoa3_scale_value(format!("{}", scene.max_gdop_display).into());
-                    ui.set_tdoa3_show_uncovered(scene.show_uncovered);
+                    ui.set_tdoa3_metric_index(DISP_GDOP as i32);
+                    ui.set_tdoa3_scale_limit(2.0);
+                    ui.set_tdoa3_scale_min_value(0.0);
+                    ui.set_tdoa3_scale_max_value(0.5);
+                    ui.set_tdoa3_show_outside_hull(scene.show_uncovered);
+                    drop(ts);
+                    ui.invoke_tdoa3_recompute();
                 }
                 Err(e) => eprintln!("Load error: {}", e),
             }
@@ -5091,6 +5364,8 @@ async fn main() {
                 pos: [0.0, 0.0, 2.5],
             });
             update_anchor_ui_model(&ui, &ts.anchors);
+            drop(ts);
+            ui.invoke_tdoa3_recompute();
         });
 
         // Undo
@@ -5119,6 +5394,8 @@ async fn main() {
                 ts.anchors.remove(idx);
                 update_anchor_ui_model(&ui, &ts.anchors);
                 ui.set_tdoa3_selected_anchor(-1);
+                drop(ts);
+                ui.invoke_tdoa3_recompute();
             }
         });
 
@@ -5139,43 +5416,155 @@ async fn main() {
         });
 
         // Helper: extract voxels and update stats for the selected metric.
+        // Display metric indices (ComboBox order)
+        const DISP_GDOP: usize = 0;
+        const DISP_HDOP: usize = 1;
+        const DISP_VDOP: usize = 2;
+        const DISP_XDOP: usize = 3;
+        const DISP_YDOP: usize = 4;
+        const DISP_PAIRS: usize = 5;
+        const DISP_PAIR_SENS: usize = 6;
+        const DISP_X_ERR: usize = 7;
+        const DISP_Y_ERR: usize = 8;
+        const DISP_Z_ERR: usize = 9;
+        const DISP_XY_ERR: usize = 10;
+        const DISP_GLOBAL_ERR: usize = 11;
+        const DISP_X_SENS: usize = 12;
+        const DISP_Y_SENS: usize = 13;
+        const DISP_Z_SENS: usize = 14;
+        const DISP_MIN_SENS: usize = 15;
+        const DISP_MIN_XY_SENS: usize = 16;
+
         fn update_tdoa3_display(
             ui: &AppWindow,
             ts: &mut Tdoa3State,
         ) {
-            let metric = ui.get_tdoa3_metric_index() as usize;
-            let scale: f32 = ui.get_tdoa3_scale_value().parse().unwrap_or(5.0);
+            let display_metric = ui.get_tdoa3_metric_index() as usize;
+            let scale: f32 = ui.get_tdoa3_scale_max_value();
 
-            if metric == tdoa3::METRIC_PAIR_SENSITIVITY {
+            if display_metric == DISP_PAIR_SENS {
                 update_tdoa3_pair_sensitivity(ui, ts);
+                return;
+            }
+
+            if display_metric >= DISP_X_SENS && display_metric <= DISP_Z_SENS {
+                update_tdoa3_axis_sensitivity(ui, ts, display_metric - DISP_X_SENS);
+                return;
+            }
+
+            if display_metric == DISP_MIN_SENS {
+                update_tdoa3_min_sensitivity(ui, ts, true);
+                return;
+            }
+
+            if display_metric == DISP_MIN_XY_SENS {
+                update_tdoa3_min_sensitivity(ui, ts, false);
                 return;
             }
 
             let Some(result) = &ts.gdop_result else { return };
 
-            let metric_name = match metric {
-                tdoa3::METRIC_GDOP => "GDOP",
-                tdoa3::METRIC_HDOP => "HDOP",
-                tdoa3::METRIC_VDOP => "VDOP",
-                tdoa3::METRIC_PAIRS => "Pairs",
-                _ => "GDOP",
+            // Map display metric to storage metric + optional σ multiplier
+            let sigma: f32 = ui.get_tdoa3_measurement_noise().parse().unwrap_or(0.10);
+            let (storage_metric, metric_name, sigma_mult) = match display_metric {
+                DISP_GDOP => (tdoa3::METRIC_GDOP, "GDOP", 1.0),
+                DISP_HDOP => (tdoa3::METRIC_HDOP, "HDOP", 1.0),
+                DISP_VDOP => (tdoa3::METRIC_VDOP, "VDOP", 1.0),
+                DISP_XDOP => (tdoa3::METRIC_XDOP, "XDOP", 1.0),
+                DISP_YDOP => (tdoa3::METRIC_YDOP, "YDOP", 1.0),
+                DISP_PAIRS => (tdoa3::METRIC_PAIRS, "Pairs", 1.0),
+                DISP_X_ERR => (tdoa3::METRIC_XDOP, "σ_x", sigma),
+                DISP_Y_ERR => (tdoa3::METRIC_YDOP, "σ_y", sigma),
+                DISP_Z_ERR => (tdoa3::METRIC_VDOP, "σ_z", sigma),
+                DISP_XY_ERR => (tdoa3::METRIC_HDOP, "σ_xy", sigma),
+                DISP_GLOBAL_ERR => (tdoa3::METRIC_GDOP, "σ_xyz", sigma),
+                _ => (tdoa3::METRIC_GDOP, "GDOP", 1.0),
             };
 
-            let (min_v, max_v, avg_v) = result.stats(metric);
-            ui.set_tdoa3_stats_text_1(
-                format!("{} min: {:.2}  max: {:.2}  avg: {:.2}", metric_name, min_v, max_v, avg_v).into(),
-            );
+            // Extract voxels and apply scaling
+            let show_outside_hull = ui.get_tdoa3_show_outside_hull();
+            ts.voxels = result.iter_voxels(ts.room_offset, storage_metric)
+                .filter(|(x, y, z, _)| {
+                    show_outside_hull || ts.convex_hull.as_ref().map_or(true, |h| h.contains(&[*x, *y, *z]))
+                })
+                .collect();
+            if sigma_mult != 1.0 {
+                for v in &mut ts.voxels {
+                    if v.3.is_finite() {
+                        v.3 *= sigma_mult;
+                    }
+                }
+            }
 
-            if metric == tdoa3::METRIC_PAIRS {
+            // Stats within slider range (min_scale..max_scale after sigma scaling)
+            let min_slider = ui.get_tdoa3_scale_min_value();
+            let max_slider = scale;
+
+            // Compute min, max, mean, stddev over visible voxels
+            let mut vis_min = f32::INFINITY;
+            let mut vis_max = f32::NEG_INFINITY;
+            let mut vis_sum = 0.0_f64;
+            let mut vis_sum_sq = 0.0_f64;
+            let mut vis_count = 0u32;
+            let mut total_finite = 0u32;
+            for &(_, _, _, v) in &ts.voxels {
+                if v.is_finite() {
+                    total_finite += 1;
+                    if v >= min_slider && v <= max_slider {
+                        vis_min = vis_min.min(v);
+                        vis_max = vis_max.max(v);
+                        vis_sum += v as f64;
+                        vis_sum_sq += (v as f64) * (v as f64);
+                        vis_count += 1;
+                    }
+                }
+            }
+            let vis_mean = if vis_count > 0 { vis_sum / vis_count as f64 } else { 0.0 };
+            let vis_std = if vis_count > 1 {
+                ((vis_sum_sq / vis_count as f64) - vis_mean * vis_mean).max(0.0).sqrt()
+            } else {
+                0.0
+            };
+
+            if (DISP_X_ERR..=DISP_GLOBAL_ERR).contains(&display_metric) {
+                let axis = match display_metric {
+                    DISP_X_ERR => "X",
+                    DISP_Y_ERR => "Y",
+                    DISP_Z_ERR => "Z",
+                    DISP_XY_ERR => "XY",
+                    _ => "Global",
+                };
+                ui.set_tdoa3_stats_text_1(
+                    format!("{} error: min {:.3}m  max {:.3}m  avg {:.3}m  σ {:.3}m",
+                        axis, vis_min, vis_max, vis_mean, vis_std).into(),
+                );
+                let ratio = if total_finite > 0 { vis_count as f32 / total_finite as f32 } else { 0.0 };
+                ui.set_tdoa3_stats_text_2(
+                    format!("{} ∈ [{:.2}, {:.2}]m: {:.1}% (σ_tdoa = {}m)",
+                        metric_name, min_slider, max_slider, ratio * 100.0, sigma).into(),
+                );
+            } else if display_metric == DISP_PAIRS {
+                ui.set_tdoa3_stats_text_1(
+                    format!("{} min: {:.0}  max: {:.0}  avg: {:.1}", metric_name,
+                        if vis_min.is_finite() { vis_min } else { 0.0 },
+                        if vis_max.is_finite() { vis_max } else { 0.0 },
+                        vis_mean).into(),
+                );
                 let ratio3 = result.coverage_ratio_pairs(3.0);
                 let ratio6 = result.coverage_ratio_pairs(6.0);
                 ui.set_tdoa3_stats_text_2(
                     format!("≥3 pairs: {:.1}%  ≥6 pairs: {:.1}%", ratio3 * 100.0, ratio6 * 100.0).into(),
                 );
             } else {
-                let ratio = result.coverage_ratio(metric, scale);
+                ui.set_tdoa3_stats_text_1(
+                    format!("{} min: {:.3}  max: {:.3}  avg: {:.3}  σ: {:.3}", metric_name,
+                        if vis_min.is_finite() { vis_min } else { 0.0 },
+                        if vis_max.is_finite() { vis_max } else { 0.0 },
+                        vis_mean, vis_std).into(),
+                );
+                let ratio = if total_finite > 0 { vis_count as f32 / total_finite as f32 } else { 0.0 };
                 ui.set_tdoa3_stats_text_2(
-                    format!("Coverage ({} < {}): {:.1}%", metric_name, scale, ratio * 100.0).into(),
+                    format!("{} ∈ [{:.2}, {:.2}]: {:.1}%", metric_name, min_slider, max_slider, ratio * 100.0).into(),
                 );
             }
 
@@ -5183,8 +5572,6 @@ async fn main() {
             ui.set_tdoa3_stats_text_3(
                 format!("{} anchors, {} pairs", n, n * n.saturating_sub(1) / 2).into(),
             );
-
-            ts.voxels = result.iter_voxels(ts.room_offset, metric).collect();
         }
 
         // Compute and display pair sensitivity for a single anchor pair.
@@ -5217,12 +5604,106 @@ async fn main() {
                 ts.room_offset,
             );
 
+            let show_outside_hull = ui.get_tdoa3_show_outside_hull();
+            let voxels: Vec<_> = if show_outside_hull {
+                voxels
+            } else {
+                voxels.into_iter()
+                    .filter(|(x, y, z, _)| ts.convex_hull.as_ref().map_or(true, |h| h.contains(&[*x, *y, *z])))
+                    .collect()
+            };
+
             let (min_v, max_v, avg_v) = tdoa3::voxel_stats(&voxels);
             ui.set_tdoa3_stats_text_1(
                 format!("|h| min: {:.2}  max: {:.2}  avg: {:.2}", min_v, max_v, avg_v).into(),
             );
             ui.set_tdoa3_stats_text_2(
                 format!("Pair: anchor {} ↔ anchor {} (0 = degenerate, 2 = ideal)", idx_a, idx_b).into(),
+            );
+            ui.set_tdoa3_stats_text_3("".into());
+
+            ts.voxels = voxels;
+        }
+
+        // Compute and display axis sensitivity (X, Y, or Z).
+        fn update_tdoa3_axis_sensitivity(
+            ui: &AppWindow,
+            ts: &mut Tdoa3State,
+            axis: usize, // 0=X, 1=Y, 2=Z
+        ) {
+            let axis_name = ["X", "Y", "Z"][axis];
+
+            let room_x: f32 = ui.get_tdoa3_room_x().parse().unwrap_or(10.0);
+            let room_y: f32 = ui.get_tdoa3_room_y().parse().unwrap_or(10.0);
+            let room_z: f32 = ui.get_tdoa3_room_z().parse().unwrap_or(3.0);
+            let resolution: f32 = ui.get_tdoa3_resolution().parse().unwrap_or(2.0);
+            let max_range: f32 = ui.get_tdoa3_max_range().parse().unwrap_or(15.0);
+
+            let voxels = tdoa3::compute_axis_sensitivity(
+                room_x, room_y, room_z, resolution,
+                &ts.anchors,
+                max_range,
+                ts.room_offset,
+                axis,
+            );
+
+            let show_outside_hull = ui.get_tdoa3_show_outside_hull();
+            let voxels: Vec<_> = if show_outside_hull {
+                voxels
+            } else {
+                voxels.into_iter()
+                    .filter(|(x, y, z, _)| ts.convex_hull.as_ref().map_or(true, |h| h.contains(&[*x, *y, *z])))
+                    .collect()
+            };
+
+            let (min_v, max_v, avg_v) = tdoa3::voxel_stats(&voxels);
+            ui.set_tdoa3_stats_text_1(
+                format!("{} sensitivity: min {:.2}  max {:.2}  avg {:.2}", axis_name, min_v, max_v, avg_v).into(),
+            );
+            ui.set_tdoa3_stats_text_2(
+                "High = measurements respond to movement, low = flat hyperbolas".into(),
+            );
+            ui.set_tdoa3_stats_text_3("".into());
+
+            ts.voxels = voxels;
+        }
+
+        // Compute and display min-of-three-axes sensitivity.
+        fn update_tdoa3_min_sensitivity(
+            ui: &AppWindow,
+            ts: &mut Tdoa3State,
+            include_z: bool,
+        ) {
+            let room_x: f32 = ui.get_tdoa3_room_x().parse().unwrap_or(10.0);
+            let room_y: f32 = ui.get_tdoa3_room_y().parse().unwrap_or(10.0);
+            let room_z: f32 = ui.get_tdoa3_room_z().parse().unwrap_or(3.0);
+            let resolution: f32 = ui.get_tdoa3_resolution().parse().unwrap_or(2.0);
+            let max_range: f32 = ui.get_tdoa3_max_range().parse().unwrap_or(15.0);
+
+            let voxels = tdoa3::compute_min_axis_sensitivity(
+                room_x, room_y, room_z, resolution,
+                &ts.anchors,
+                max_range,
+                ts.room_offset,
+                include_z,
+            );
+
+            let show_outside_hull = ui.get_tdoa3_show_outside_hull();
+            let voxels: Vec<_> = if show_outside_hull {
+                voxels
+            } else {
+                voxels.into_iter()
+                    .filter(|(x, y, z, _)| ts.convex_hull.as_ref().map_or(true, |h| h.contains(&[*x, *y, *z])))
+                    .collect()
+            };
+
+            let label = if include_z { "Min XYZ" } else { "Min XY" };
+            let (min_v, max_v, avg_v) = tdoa3::voxel_stats(&voxels);
+            ui.set_tdoa3_stats_text_1(
+                format!("{} sensitivity: min {:.2}  max {:.2}  avg {:.2}", label, min_v, max_v, avg_v).into(),
+            );
+            ui.set_tdoa3_stats_text_2(
+                "Weakest axis at each point (low = bottleneck for positioning)".into(),
             );
             ui.set_tdoa3_stats_text_3("".into());
 
@@ -5260,6 +5741,7 @@ async fn main() {
             ts.room = [room_x, room_y, room_z];
             ts.room_offset = offset;
             ts.anchor_positions = ts.anchors.iter().map(|a| a.pos).collect();
+            ts.convex_hull = tdoa3::ConvexHull::build(&ts.anchor_positions);
             ts.gdop_result = Some(result);
 
             update_tdoa3_display(&ui, &mut ts);
@@ -5268,8 +5750,23 @@ async fn main() {
         // Metric changed: re-extract voxels from cached result (no recompute needed)
         let ts = tdoa3_state.clone();
         let uw = ui_weak.clone();
-        ui.on_tdoa3_metric_changed(move |_idx| {
+        ui.on_tdoa3_metric_changed(move |idx| {
             let Some(ui) = uw.upgrade() else { return };
+            let idx = idx as usize;
+            // Set sensible slider range and default for the selected metric
+            let (max, default): (f32, f32) = match idx {
+                DISP_PAIRS => (30.0, 10.0),
+                DISP_PAIR_SENS => (2.0, 2.0),
+                DISP_X_ERR | DISP_Y_ERR | DISP_Z_ERR | DISP_XY_ERR => (1.0, 0.03),
+                DISP_GLOBAL_ERR => (1.0, 0.05),
+                DISP_X_SENS | DISP_Y_SENS | DISP_Z_SENS | DISP_MIN_SENS | DISP_MIN_XY_SENS => (10.0, 5.0),
+                DISP_XDOP | DISP_YDOP => (2.0, 0.2),
+                DISP_GDOP => (2.0, 0.5),
+                _ => (2.0, 0.3), // HDOP, VDOP
+            };
+            ui.set_tdoa3_scale_limit(max);
+            ui.set_tdoa3_scale_min_value(0.0);
+            ui.set_tdoa3_scale_max_value(default.min(max));
             let mut ts = ts.lock().unwrap();
             update_tdoa3_display(&ui, &mut ts);
         });
@@ -5279,7 +5776,7 @@ async fn main() {
         let uw = ui_weak.clone();
         ui.on_tdoa3_pair_changed(move || {
             let Some(ui) = uw.upgrade() else { return };
-            if ui.get_tdoa3_metric_index() as usize == tdoa3::METRIC_PAIR_SENSITIVITY {
+            if ui.get_tdoa3_metric_index() as usize == DISP_PAIR_SENS {
                 let mut ts = ts.lock().unwrap();
                 update_tdoa3_pair_sensitivity(&ui, &mut ts);
             }
@@ -5450,6 +5947,552 @@ async fn main() {
             );
             ui.set_tdoa3_cam_pan_y(
                 ui.get_tdoa3_cam_pan_y() + dx * (-cy) + dy * sy,
+            );
+        });
+    }
+
+    // Combined Coverage callbacks
+    {
+        let ui_weak = ui.as_weak();
+        let cs = combined_state.clone();
+        let uw = ui_weak.clone();
+        ui.on_combined_load_lh_scene(move || {
+            let Some(ui) = uw.upgrade() else { return };
+            let Some(path) = rfd::FileDialog::new()
+                .set_title("Open LH Scene for Combined View")
+                .add_filter("YAML", &["yaml", "yml"])
+                .pick_file()
+            else {
+                return;
+            };
+            match coverage::load_scene(&path) {
+                Ok(scene) => {
+                    let mut cs = cs.lock().unwrap();
+                    cs.lh_base_stations = scene.base_stations();
+
+                    // Use the LH scene room dimensions (take max with existing if TDoA3 already loaded)
+                    let lh_room = [scene.room_x, scene.room_y, scene.room_z];
+                    cs.room = [
+                        cs.room[0].max(lh_room[0]),
+                        cs.room[1].max(lh_room[1]),
+                        cs.room[2].max(lh_room[2]),
+                    ];
+                    let center = scene.center_origin;
+                    cs.room_offset = if center {
+                        [-cs.room[0] / 2.0, -cs.room[1] / 2.0, 0.0]
+                    } else {
+                        [0.0, 0.0, 0.0]
+                    };
+
+                    // Compute LH coverage
+                    let receiver_fov = if scene.receiver_fov_enabled { Some(170.0_f32) } else { None };
+                    let tilt_reduction = if scene.tilt_compensation_enabled { Some(scene.max_tilt_angle) } else { None };
+                    let result = coverage::compute_coverage(
+                        cs.room[0], cs.room[1], cs.room[2],
+                        scene.resolution,
+                        &cs.lh_base_stations,
+                        160.0, 115.0,
+                        receiver_fov,
+                        tilt_reduction,
+                        scene.max_bs_distance,
+                        cs.room_offset,
+                    );
+                    cs.lh_voxels = result.iter_voxels(cs.room_offset).collect();
+
+                    // Build render data
+                    cs.lh_bs_render_data = cs.lh_base_stations
+                        .iter()
+                        .map(|bs| (bs.pos, bs.rotation_matrix()))
+                        .collect();
+
+                    ui.set_combined_lh_bs_count(cs.lh_base_stations.len() as i32);
+
+                    // Update stats
+                    let total = cs.lh_voxels.len() as f32;
+                    if total > 0.0 {
+                        let covered_1 = cs.lh_voxels.iter().filter(|v| v.3 >= 1).count() as f32;
+                        let covered_2 = cs.lh_voxels.iter().filter(|v| v.3 >= 2).count() as f32;
+                        ui.set_combined_stats_text_1(
+                            format!(
+                                "LH: ≥1 BS {:.1}%  ≥2 BS {:.1}%",
+                                covered_1 / total * 100.0,
+                                covered_2 / total * 100.0,
+                            ).into(),
+                        );
+                    }
+                }
+                Err(e) => eprintln!("Load LH scene error: {}", e),
+            }
+        });
+
+        let cs = combined_state.clone();
+        let uw = ui_weak.clone();
+        ui.on_combined_load_tdoa3_scene(move || {
+            let Some(ui) = uw.upgrade() else { return };
+            let Some(path) = rfd::FileDialog::new()
+                .set_title("Open TDoA3 Scene for Combined View")
+                .add_filter("YAML", &["yaml", "yml"])
+                .pick_file()
+            else {
+                return;
+            };
+            match tdoa3::load_scene(&path) {
+                Ok(scene) => {
+                    let mut cs = cs.lock().unwrap();
+                    cs.tdoa3_anchors = scene.anchors();
+
+                    // Use the TDoA3 scene room dimensions (take max with existing)
+                    let tdoa_room = [scene.room_x, scene.room_y, scene.room_z];
+                    cs.room = [
+                        cs.room[0].max(tdoa_room[0]),
+                        cs.room[1].max(tdoa_room[1]),
+                        cs.room[2].max(tdoa_room[2]),
+                    ];
+                    let center = scene.center_origin;
+                    cs.room_offset = if center {
+                        [-cs.room[0] / 2.0, -cs.room[1] / 2.0, 0.0]
+                    } else {
+                        [0.0, 0.0, 0.0]
+                    };
+
+                    // Compute GDOP
+                    let result = tdoa3::compute_gdop(
+                        cs.room[0], cs.room[1], cs.room[2],
+                        scene.resolution,
+                        &cs.tdoa3_anchors,
+                        scene.max_range,
+                        cs.room_offset,
+                    );
+
+                    // Extract GDOP voxels
+                    cs.tdoa3_voxels = result.iter_voxels(cs.room_offset, tdoa3::METRIC_GDOP).collect();
+
+                    cs.tdoa3_anchor_positions = cs.tdoa3_anchors.iter().map(|a| a.pos).collect();
+
+                    ui.set_combined_tdoa3_anchor_count(cs.tdoa3_anchors.len() as i32);
+
+                    // Update stats
+                    let (min_v, max_v, avg_v) = result.stats(tdoa3::METRIC_GDOP);
+                    ui.set_combined_stats_text_2(
+                        format!(
+                            "TDoA3 GDOP: min {:.2}  max {:.2}  avg {:.2}",
+                            min_v, max_v, avg_v,
+                        ).into(),
+                    );
+                }
+                Err(e) => eprintln!("Load TDoA3 scene error: {}", e),
+            }
+        });
+
+        let uw = ui_weak.clone();
+        ui.on_combined_view_pan(move |dx_px, dy_px| {
+            let Some(ui) = uw.upgrade() else { return };
+            let yaw = ui.get_combined_cam_yaw();
+            let scale = 0.01_f32;
+            let (sy, cy) = yaw.sin_cos();
+            let dx = dx_px * scale;
+            let dy = -dy_px * scale;
+            ui.set_combined_cam_pan_x(
+                ui.get_combined_cam_pan_x() + dx * sy + dy * cy,
+            );
+            ui.set_combined_cam_pan_y(
+                ui.get_combined_cam_pan_y() + dx * (-cy) + dy * sy,
+            );
+        });
+    }
+
+    // LH Wizard callbacks
+    {
+        let ui_weak = ui.as_weak();
+        let ws = wizard_state.clone();
+        let uw = ui_weak.clone();
+        ui.on_lh_wizard_step_next(move || {
+            let mut ws = ws.lock().unwrap();
+            let next = (ws.current_step as i32 + 1).min(4);
+            ws.current_step = lh_wizard::WizardStep::from_index(next);
+            if let Some(ui) = uw.upgrade() {
+                ui.set_lh_wizard_current_step(next);
+                ui.set_lh_wizard_step_instructions(ws.current_step.instructions().into());
+                ui.set_lh_wizard_measure_button_text(ws.current_step.button_text().into());
+            }
+        });
+
+        let ws = wizard_state.clone();
+        let uw = ui_weak.clone();
+        ui.on_lh_wizard_step_prev(move || {
+            let mut ws = ws.lock().unwrap();
+            let prev = (ws.current_step as i32 - 1).max(0);
+            ws.current_step = lh_wizard::WizardStep::from_index(prev);
+            if let Some(ui) = uw.upgrade() {
+                ui.set_lh_wizard_current_step(prev);
+                ui.set_lh_wizard_step_instructions(ws.current_step.instructions().into());
+                ui.set_lh_wizard_measure_button_text(ws.current_step.button_text().into());
+            }
+        });
+
+        let ws = wizard_state.clone();
+        let uw = ui_weak.clone();
+        ui.on_lh_wizard_clear(move || {
+            let mut ws = ws.lock().unwrap();
+            ws.container.clear_all_samples();
+            ws.latest_solution = None;
+            ws.current_step = lh_wizard::WizardStep::Origin;
+            if let Some(ui) = uw.upgrade() {
+                ui.set_lh_wizard_current_step(0);
+                ui.set_lh_wizard_step_instructions(lh_wizard::WizardStep::Origin.instructions().into());
+                ui.set_lh_wizard_measure_button_text(lh_wizard::WizardStep::Origin.button_text().into());
+                ui.set_lh_wizard_origin_ok(false);
+                ui.set_lh_wizard_x_axis_ok(false);
+                ui.set_lh_wizard_xy_plane_ok(false);
+                ui.set_lh_wizard_has_converged(false);
+                ui.set_lh_wizard_error_mean("".into());
+                ui.set_lh_wizard_error_max("".into());
+                ui.set_lh_wizard_progress_info("".into());
+                ui.set_lh_wizard_notification_text("Samples cleared".into());
+                ui.set_lh_wizard_notification_color(slint::Color::from_argb_u8(255, 255, 235, 59));
+                ui.set_lh_wizard_xy_plane_count(0);
+                ui.set_lh_wizard_xyz_space_count(0);
+                ui.set_lh_wizard_verification_count(0);
+                ui.set_lh_wizard_sample_details(Default::default());
+                ui.set_lh_wizard_bs_details(Default::default());
+            }
+        });
+
+        let ws = wizard_state.clone();
+        let uw = ui_weak.clone();
+        let ss = swarm_state.clone();
+        ui.on_lh_wizard_measure(move || {
+            let ws = ws.clone();
+            let uw = uw.clone();
+            let ss = ss.clone();
+
+            // Get selected CF index and current step
+            let (selected_cf, current_step) = {
+                let ws_lock = ws.lock().unwrap();
+                (
+                    if let Some(ui) = uw.upgrade() { ui.get_lh_wizard_selected_cf() } else { -1 },
+                    ws_lock.current_step,
+                )
+            };
+
+            if selected_cf < 0 {
+                if let Some(ui) = uw.upgrade() {
+                    ui.set_lh_wizard_notification_text("No Crazyflie selected".into());
+                    ui.set_lh_wizard_notification_color(slint::Color::from_argb_u8(255, 255, 183, 77));
+                }
+                return;
+            }
+
+            // Set measuring state
+            if let Some(ui) = uw.upgrade() {
+                ui.set_lh_wizard_measuring(true);
+                ui.set_lh_wizard_notification_text("Collecting angles...".into());
+                ui.set_lh_wizard_notification_color(slint::Color::from_argb_u8(255, 255, 235, 59));
+            }
+
+            let unit_index = selected_cf as usize;
+
+            tokio::spawn(async move {
+                // Get CF from swarm state
+                let cf = {
+                    let state = ss.lock().await;
+                    state.get(&unit_index).map(|u| u.cf.clone())
+                };
+
+                let Some(cf) = cf else {
+                    slint::invoke_from_event_loop(move || {
+                        if let Some(ui) = uw.upgrade() {
+                            ui.set_lh_wizard_measuring(false);
+                            ui.set_lh_wizard_notification_text("Crazyflie not connected".into());
+                            ui.set_lh_wizard_notification_color(slint::Color::from_argb_u8(255, 244, 67, 54));
+                        }
+                    }).ok();
+                    return;
+                };
+
+                // Enable angle stream
+                if let Err(e) = cf.param.set("locSrv.enLhAngleStream", 1u8).await {
+                    eprintln!("Failed to enable angle stream: {}", e);
+                    slint::invoke_from_event_loop(move || {
+                        if let Some(ui) = uw.upgrade() {
+                            ui.set_lh_wizard_measuring(false);
+                            ui.set_lh_wizard_notification_text("Failed to enable angle stream".into());
+                            ui.set_lh_wizard_notification_color(slint::Color::from_argb_u8(255, 244, 67, 54));
+                        }
+                    }).ok();
+                    return;
+                };
+
+                // Collect angle samples (average 50 readings per BS)
+                use futures::StreamExt;
+                let mut angle_stream = cf.localization.lighthouse.angle_stream().await;
+                let mut bs_samples: std::collections::HashMap<u8, Vec<([f32; 4], [f32; 4])>> = std::collections::HashMap::new();
+                let samples_needed = 50;
+                let timeout = tokio::time::Duration::from_secs(3);
+
+                let result = tokio::time::timeout(timeout, async {
+                    loop {
+                        let all_have_enough = !bs_samples.is_empty() &&
+                            bs_samples.values().all(|v| v.len() >= samples_needed);
+                        if all_have_enough {
+                            break;
+                        }
+
+                        if let Some(data) = angle_stream.next().await {
+                            bs_samples.entry(data.base_station)
+                                .or_default()
+                                .push((data.angles.x, data.angles.y));
+                        }
+                    }
+                }).await;
+
+                // Disable angle stream
+                let _ = cf.param.set("locSrv.enLhAngleStream", 0u8).await;
+
+                // Debug: print collection results
+                eprintln!("[LH Wizard] Angle collection done. Timeout: {}, BS count: {}", result.is_err(), bs_samples.len());
+                for (bs_id, samples) in &bs_samples {
+                    eprintln!("[LH Wizard]   BS {}: {} samples", bs_id, samples.len());
+                    if let Some(first) = samples.first() {
+                        eprintln!("[LH Wizard]     first x: {:?}", first.0);
+                        eprintln!("[LH Wizard]     first y: {:?}", first.1);
+                    }
+                }
+
+                if result.is_err() && bs_samples.is_empty() {
+                    slint::invoke_from_event_loop(move || {
+                        if let Some(ui) = uw.upgrade() {
+                            ui.set_lh_wizard_measuring(false);
+                            ui.set_lh_wizard_notification_text("Timeout - no angle data received".into());
+                            ui.set_lh_wizard_notification_color(slint::Color::from_argb_u8(255, 244, 67, 54));
+                        }
+                    }).ok();
+                    return;
+                }
+
+                // Average the collected angles and create a sample
+                let mut averaged_angles = std::collections::HashMap::new();
+                let bs_count = bs_samples.len();
+                for (bs_id, samples) in &bs_samples {
+                    let n = samples.len() as f64;
+                    let mut avg_x = [0.0f64; 4];
+                    let mut avg_y = [0.0f64; 4];
+                    for (x, y) in samples {
+                        for s in 0..4 {
+                            avg_x[s] += x[s] as f64;
+                            avg_y[s] += y[s] as f64;
+                        }
+                    }
+                    for s in 0..4 {
+                        avg_x[s] /= n;
+                        avg_y[s] /= n;
+                    }
+
+                    // Convert to LighthouseBsVectors (V2 angles → V1 via from_lh2)
+                    use crate::lh_geo::bs_vector::LighthouseBsVector;
+                    let vectors = [
+                        LighthouseBsVector::from_lh2(avg_x[0], avg_y[0]),
+                        LighthouseBsVector::from_lh2(avg_x[1], avg_y[1]),
+                        LighthouseBsVector::from_lh2(avg_x[2], avg_y[2]),
+                        LighthouseBsVector::from_lh2(avg_x[3], avg_y[3]),
+                    ];
+                    averaged_angles.insert(*bs_id, vectors);
+                }
+
+                let sample = crate::lh_geo::sample::LhCfPoseSample::new(averaged_angles);
+                eprintln!("[LH Wizard] Created sample with {} BS, uid={}", sample.angles_calibrated.len(), sample.uid());
+
+                // Add sample to container based on current step
+                {
+                    let ws_lock = ws.lock().unwrap();
+                    eprintln!("[LH Wizard] Adding sample as {:?}, container version before: {}", current_step, ws_lock.container.get_data_version());
+                    match current_step {
+                        lh_wizard::WizardStep::Origin => ws_lock.container.set_origin_sample(sample),
+                        lh_wizard::WizardStep::XAxis => ws_lock.container.set_x_axis_sample(sample),
+                        lh_wizard::WizardStep::XyPlane => ws_lock.container.append_xy_plane_sample(sample),
+                        lh_wizard::WizardStep::XyzSpace => ws_lock.container.append_xyz_space_samples(vec![sample]),
+                        lh_wizard::WizardStep::Verification => ws_lock.container.append_verification_samples(vec![sample]),
+                    }
+                }
+
+                // Run solver in background
+                let solution = {
+                    let ws_lock = ws.lock().unwrap();
+                    lh_wizard::run_solver(&ws_lock.container)
+                };
+
+                eprintln!("[LH Wizard] Solver done. converged={}, bs_poses={}, progress_ok={}, progress_info={}",
+                    solution.has_converged, solution.bs_poses.len(), solution.progress_is_ok, solution.progress_info);
+
+                let has_converged = solution.has_converged;
+                let sample_details = lh_wizard::get_sample_details(&solution);
+                let bs_details = lh_wizard::get_bs_details(&solution);
+                let error_stats = solution.error_stats.clone();
+                let origin_ok = solution.is_origin_sample_valid;
+                let origin_info = solution.origin_sample_info.clone();
+                let x_axis_ok = solution.is_x_axis_samples_valid;
+                let x_axis_info = solution.x_axis_samples_info.clone();
+                let xy_plane_ok = solution.is_xy_plane_samples_valid;
+                let xy_plane_info = solution.xy_plane_samples_info.clone();
+                let progress_info = solution.progress_info.clone();
+
+                // Count samples by type
+                let mut xy_count = 0i32;
+                let mut xyz_count = 0i32;
+                let mut verif_count = 0i32;
+                for s in &solution.samples {
+                    match s.sample_type {
+                        crate::lh_geo::sample::LhCfPoseSampleType::XyPlane => xy_count += 1,
+                        crate::lh_geo::sample::LhCfPoseSampleType::XyzSpace => xyz_count += 1,
+                        crate::lh_geo::sample::LhCfPoseSampleType::Verification => verif_count += 1,
+                        _ => {}
+                    }
+                }
+
+                // Store solution
+                ws.lock().unwrap().latest_solution = Some(solution);
+
+                // Update UI
+                let step_name = format!("{:?}", current_step);
+                slint::invoke_from_event_loop(move || {
+                    let Some(ui) = uw.upgrade() else { return };
+                    ui.set_lh_wizard_measuring(false);
+                    ui.set_lh_wizard_notification_text(
+                        format!("{} measured ({} BS, {} samples avg)", step_name, bs_count,
+                            samples_needed.min(bs_samples.values().map(|v| v.len()).min().unwrap_or(0))).into()
+                    );
+                    ui.set_lh_wizard_notification_color(slint::Color::from_argb_u8(255, 129, 199, 132));
+
+                    // Update solution status
+                    ui.set_lh_wizard_origin_ok(origin_ok);
+                    ui.set_lh_wizard_origin_status(origin_info.into());
+                    ui.set_lh_wizard_x_axis_ok(x_axis_ok);
+                    ui.set_lh_wizard_x_axis_status(x_axis_info.into());
+                    ui.set_lh_wizard_xy_plane_ok(xy_plane_ok);
+                    ui.set_lh_wizard_xy_plane_status(xy_plane_info.into());
+                    ui.set_lh_wizard_has_converged(has_converged);
+                    ui.set_lh_wizard_progress_info(progress_info.into());
+                    ui.set_lh_wizard_xy_plane_count(xy_count);
+                    ui.set_lh_wizard_xyz_space_count(xyz_count);
+                    ui.set_lh_wizard_verification_count(verif_count);
+
+                    if let Some(stats) = &error_stats {
+                        ui.set_lh_wizard_error_mean(format!("{:.4}m", stats.mean).into());
+                        ui.set_lh_wizard_error_max(format!("{:.4}m", stats.max).into());
+                    }
+
+                    // Update sample details
+                    let sd: Vec<WizardSampleData> = sample_details.iter().map(|s| WizardSampleData {
+                        sample_type: s.sample_type.clone().into(),
+                        x: s.x.clone().into(),
+                        y: s.y.clone().into(),
+                        z: s.z.clone().into(),
+                        error: s.error.clone().into(),
+                        is_verification: s.is_verification,
+                        is_invalid: s.is_invalid,
+                        is_large_error: s.is_large_error,
+                    }).collect();
+                    ui.set_lh_wizard_sample_details(slint::ModelRc::new(slint::VecModel::from(sd)));
+
+                    // Update BS details
+                    let bd: Vec<WizardBsData> = bs_details.iter().map(|b| WizardBsData {
+                        id: b.id,
+                        x: b.x.clone().into(),
+                        y: b.y.clone().into(),
+                        z: b.z.clone().into(),
+                        samples: b.samples,
+                        links: b.links,
+                        low_links: b.low_links,
+                    }).collect();
+                    ui.set_lh_wizard_bs_details(slint::ModelRc::new(slint::VecModel::from(bd)));
+                }).ok();
+            });
+        });
+
+        // Import/Export session
+        let ws = wizard_state.clone();
+        let uw = ui_weak.clone();
+        ui.on_lh_wizard_import(move || {
+            let Some(path) = rfd::FileDialog::new()
+                .add_filter("YAML", &["yaml", "yml"])
+                .pick_file()
+            else { return };
+
+            match std::fs::read_to_string(&path) {
+                Ok(yaml_str) => {
+                    let ws_lock = ws.lock().unwrap();
+                    match ws_lock.container.load_from_yaml(&yaml_str) {
+                        Ok(()) => {
+                            if let Some(ui) = uw.upgrade() {
+                                ui.set_lh_wizard_notification_text("Session imported".into());
+                                ui.set_lh_wizard_notification_color(slint::Color::from_argb_u8(255, 129, 199, 132));
+                            }
+                        }
+                        Err(e) => {
+                            eprintln!("Failed to import session: {}", e);
+                        }
+                    }
+                }
+                Err(e) => eprintln!("Failed to read file: {}", e),
+            }
+        });
+
+        let ws = wizard_state.clone();
+        ui.on_lh_wizard_export(move || {
+            let Some(path) = rfd::FileDialog::new()
+                .add_filter("YAML", &["yaml", "yml"])
+                .set_file_name("lh_geo_session.yaml")
+                .save_file()
+            else { return };
+
+            let ws_lock = ws.lock().unwrap();
+            match ws_lock.container.save_to_yaml() {
+                Ok(yaml_str) => {
+                    if let Err(e) = std::fs::write(&path, yaml_str) {
+                        eprintln!("Failed to write file: {}", e);
+                    }
+                }
+                Err(e) => eprintln!("Failed to serialize: {}", e),
+            }
+        });
+
+        // Upload geometry - placeholder
+        ui.on_lh_wizard_upload(move || {
+            // TODO: Upload geometry to connected CFs
+        });
+
+        // CF selection - placeholder
+        ui.on_lh_wizard_select_cf(move |_idx| {
+            // TODO: Select which CF to use for measurements
+        });
+
+        // View interaction callbacks (camera rotation via mouse drag)
+        let uw = ui_weak.clone();
+        ui.on_lh_wizard_view_mouse_pressed(move |_x, _y| {
+            // Start camera rotation
+        });
+
+        let uw = ui_weak.clone();
+        ui.on_lh_wizard_view_mouse_moved(move |x, y| {
+            // Camera rotation while dragging
+            // The Slint touch area handles basic yaw/pitch updates
+        });
+
+        ui.on_lh_wizard_view_mouse_released(move || {});
+
+        let uw = ui_weak.clone();
+        ui.on_lh_wizard_view_pan(move |dx_px, dy_px| {
+            let Some(ui) = uw.upgrade() else { return };
+            let yaw = ui.get_lh_wizard_cam_yaw();
+            let sy = yaw.sin();
+            let cy = yaw.cos();
+            let dx = dx_px * 0.01;
+            let dy = dy_px * 0.01;
+            ui.set_lh_wizard_cam_pan_x(
+                ui.get_lh_wizard_cam_pan_x() + dx * sy + dy * cy,
+            );
+            ui.set_lh_wizard_cam_pan_y(
+                ui.get_lh_wizard_cam_pan_y() + dx * (-cy) + dy * sy,
             );
         });
     }

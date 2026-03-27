@@ -1,0 +1,505 @@
+import { VerticalBox, HorizontalBox, Button, Palette, ScrollView, ComboBox } from "std-widgets.slint";
+import { VizLabel } from "visualization.slint";
+
+export struct WizardSampleData {
+    sample-type: string,
+    x: string,
+    y: string,
+    z: string,
+    error: string,
+    is-verification: bool,
+    is-invalid: bool,
+    is-large-error: bool,
+}
+
+export struct WizardBsData {
+    id: int,
+    x: string,
+    y: string,
+    z: string,
+    samples: int,
+    links: int,
+    low-links: bool,
+}
+
+export component LhWizardContent inherits Rectangle {
+    in-out property <image> texture;
+    out property <float> viewport-width: view-area.width / 1px;
+    out property <float> viewport-height: view-area.height / 1px;
+
+    // Camera state
+    in-out property <float> cam-yaw: 0.8;
+    in-out property <float> cam-pitch: 0.6;
+    in-out property <float> cam-distance: 12.0;
+    in-out property <float> cam-pan-x: 0;
+    in-out property <float> cam-pan-y: 0;
+
+    // Step state
+    in-out property <int> current-step: 0;  // 0=origin, 1=x_axis, 2=xy_plane, 3=xyz_space, 4=verification
+    in-out property <string> step-instructions: "Put the Crazyflie where you want the origin of your coordinate system.";
+    in-out property <string> measure-button-text: "Measure Origin";
+    in-out property <bool> measure-enabled: false;
+    in-out property <bool> measuring: false;
+
+    // CF selection
+    in-out property <[string]> cf-names: [];
+    in-out property <int> selected-cf: -1;
+
+    // Solution status
+    in-out property <string> origin-status: "";
+    in-out property <bool> origin-ok: false;
+    in-out property <string> x-axis-status: "";
+    in-out property <bool> x-axis-ok: false;
+    in-out property <string> xy-plane-status: "";
+    in-out property <bool> xy-plane-ok: false;
+    in-out property <string> progress-info: "";
+    in-out property <bool> has-converged: false;
+    in-out property <string> error-mean: "";
+    in-out property <string> error-max: "";
+
+    // Sample counts
+    in-out property <int> xy-plane-count: 0;
+    in-out property <int> xyz-space-count: 0;
+    in-out property <int> verification-count: 0;
+
+    // Notification
+    in-out property <string> notification-text: "";
+    in-out property <color> notification-color: transparent;
+
+    // Details data
+    in-out property <[WizardSampleData]> sample-details: [];
+    in-out property <[WizardBsData]> bs-details: [];
+    in-out property <bool> show-details: false;
+
+    // Grid labels
+    in-out property <[VizLabel]> grid-labels;
+
+    // Callbacks
+    callback measure-clicked();
+    callback step-next();
+    callback step-prev();
+    callback clear-samples();
+    callback import-session();
+    callback export-session();
+    callback upload-geometry();
+    callback select-cf(int);
+    callback view-mouse-pressed(float, float);
+    callback view-mouse-moved(float, float);
+    callback view-mouse-released();
+    callback view-pan(float, float);
+
+    HorizontalLayout {
+        spacing: 0px;
+
+        // Left panel: wizard controls
+        Rectangle {
+            width: 340px;
+            background: Palette.alternate-background;
+
+            ScrollView {
+                VerticalLayout {
+                    padding: 12px;
+                    spacing: 8px;
+
+                    // Title bar
+                    HorizontalLayout {
+                        spacing: 4px;
+                        Text {
+                            text: "LH Geometry Wizard";
+                            font-size: 16px;
+                            font-weight: 600;
+                            vertical-alignment: center;
+                        }
+                        Rectangle { horizontal-stretch: 1; }
+                        Button {
+                            text: "Import";
+                            clicked => { root.import-session(); }
+                        }
+                        Button {
+                            text: "Export";
+                            clicked => { root.export-session(); }
+                        }
+                    }
+
+                    // CF selector
+                    HorizontalLayout {
+                        spacing: 4px;
+                        Text {
+                            text: "Crazyflie:";
+                            vertical-alignment: center;
+                            font-size: 13px;
+                        }
+                        cf-combo := ComboBox {
+                            horizontal-stretch: 1;
+                            model: root.cf-names;
+                            current-index: root.selected-cf;
+                            selected(value) => { root.select-cf(self.current-index); }
+                        }
+                    }
+
+                    // Step indicators
+                    Rectangle {
+                        height: 2px;
+                        background: Palette.border;
+                    }
+
+                    // Step navigation
+                    HorizontalLayout {
+                        spacing: 4px;
+                        alignment: center;
+
+                        for step-info[idx] in [
+                            { label: "1. Origin", active: root.current-step == 0 },
+                            { label: "2. X-Axis", active: root.current-step == 1 },
+                            { label: "3. XY Plane", active: root.current-step == 2 },
+                            { label: "4. XYZ Space", active: root.current-step == 3 },
+                            { label: "5. Verify", active: root.current-step == 4 },
+                        ]: Rectangle {
+                            background: step-info.active ? Palette.accent-background : transparent;
+                            border-radius: 4px;
+                            height: 24px;
+                            width: 58px;
+                            Text {
+                                text: step-info.label;
+                                font-size: 10px;
+                                font-weight: step-info.active ? 700 : 400;
+                                color: step-info.active ? Palette.accent-foreground : Palette.foreground;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+                            TouchArea {
+                                mouse-cursor: pointer;
+                                clicked => {
+                                    if idx < root.current-step {
+                                        root.current-step = idx;
+                                    } else if idx == root.current-step + 1 {
+                                        root.step-next();
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // Instructions
+                    Rectangle {
+                        background: Palette.background;
+                        border-radius: 6px;
+                        min-height: 60px;
+
+                        VerticalLayout {
+                            padding: 8px;
+                            Text {
+                                text: root.step-instructions;
+                                font-size: 12px;
+                                wrap: word-wrap;
+                            }
+                        }
+                    }
+
+                    // Measure button
+                    HorizontalLayout {
+                        spacing: 4px;
+                        Button {
+                            text: root.measuring ? "Measuring..." : root.measure-button-text;
+                            enabled: root.measure-enabled && !root.measuring;
+                            horizontal-stretch: 1;
+                            clicked => { root.measure-clicked(); }
+                        }
+                    }
+
+                    // Step navigation buttons
+                    HorizontalLayout {
+                        spacing: 4px;
+                        Button {
+                            text: "< Previous";
+                            enabled: root.current-step > 0;
+                            clicked => { root.step-prev(); }
+                        }
+                        Rectangle { horizontal-stretch: 1; }
+                        Button {
+                            text: "Next >";
+                            enabled: root.current-step < 4;
+                            clicked => { root.step-next(); }
+                        }
+                    }
+
+                    // Notification area
+                    if root.notification-text != "": Rectangle {
+                        background: root.notification-color;
+                        border-radius: 4px;
+                        height: 28px;
+                        VerticalLayout {
+                            padding: 4px;
+                            Text {
+                                text: root.notification-text;
+                                font-size: 12px;
+                                horizontal-alignment: center;
+                            }
+                        }
+                    }
+
+                    // Solution status section
+                    Rectangle {
+                        height: 2px;
+                        background: Palette.border;
+                    }
+
+                    Text {
+                        text: "Solution Status";
+                        font-size: 13px;
+                        font-weight: 600;
+                    }
+
+                    // Status indicators
+                    for status-item in [
+                        { label: "Origin:", ok: root.origin-ok, info: root.origin-status },
+                        { label: "X-Axis:", ok: root.x-axis-ok, info: root.x-axis-status },
+                        { label: "XY-Plane:", ok: root.xy-plane-ok, info: root.xy-plane-status },
+                    ]: HorizontalLayout {
+                        spacing: 4px;
+                        Text {
+                            text: status-item.ok ? "●" : "○";
+                            color: status-item.ok ? #4caf50 : (status-item.info != "" ? #f44336 : #9e9e9e);
+                            font-size: 14px;
+                            width: 16px;
+                        }
+                        Text {
+                            text: status-item.label;
+                            font-size: 12px;
+                            width: 70px;
+                        }
+                        Text {
+                            text: status-item.info;
+                            font-size: 11px;
+                            color: Palette.foreground.transparentize(0.4);
+                            horizontal-stretch: 1;
+                            overflow: elide;
+                        }
+                    }
+
+                    // Sample counts
+                    HorizontalLayout {
+                        spacing: 8px;
+                        Text { text: "XY: " + root.xy-plane-count; font-size: 11px; }
+                        Text { text: "XYZ: " + root.xyz-space-count; font-size: 11px; }
+                        Text { text: "Verify: " + root.verification-count; font-size: 11px; }
+                    }
+
+                    // Error stats
+                    if root.error-mean != "": HorizontalLayout {
+                        spacing: 8px;
+                        Text { text: "Err mean: " + root.error-mean; font-size: 11px; }
+                        Text { text: "max: " + root.error-max; font-size: 11px; }
+                    }
+
+                    if root.has-converged: Rectangle {
+                        background: #e8f5e9;
+                        border-radius: 4px;
+                        min-height: 28px;
+                        VerticalLayout {
+                            padding: 6px;
+                            Text {
+                                text: "Geometry estimated - ready to upload";
+                                font-size: 12px;
+                                color: #2e7d32;
+                                horizontal-alignment: center;
+                                font-weight: 600;
+                            }
+                        }
+                    }
+
+                    // Progress info
+                    if root.progress-info != "" && !root.has-converged: Text {
+                        text: root.progress-info;
+                        font-size: 11px;
+                        color: Palette.foreground.transparentize(0.4);
+                    }
+
+                    // Action buttons
+                    Rectangle {
+                        height: 2px;
+                        background: Palette.border;
+                    }
+
+                    HorizontalLayout {
+                        spacing: 4px;
+                        Button {
+                            text: "Upload Geometry";
+                            enabled: root.has-converged;
+                            primary: root.has-converged;
+                            clicked => { root.upload-geometry(); }
+                        }
+                        Rectangle { horizontal-stretch: 1; }
+                        Button {
+                            text: "Clear All";
+                            clicked => { root.clear-samples(); }
+                        }
+                    }
+
+                    // Details toggle
+                    HorizontalLayout {
+                        Rectangle { horizontal-stretch: 1; }
+                        Text {
+                            text: root.show-details ? "▼ Hide Details" : "▶ Show Details";
+                            font-size: 11px;
+                            color: Palette.accent-background;
+                            TouchArea {
+                                mouse-cursor: pointer;
+                                clicked => { root.show-details = !root.show-details; }
+                            }
+                        }
+                    }
+
+                    // Sample details table
+                    if root.show-details && root.sample-details.length > 0: VerticalLayout {
+                        spacing: 2px;
+
+                        Text {
+                            text: "Samples";
+                            font-size: 12px;
+                            font-weight: 600;
+                        }
+
+                        // Header
+                        HorizontalLayout {
+                            spacing: 2px;
+                            Text { text: "Type"; font-size: 10px; font-weight: 600; width: 60px; }
+                            Text { text: "X"; font-size: 10px; font-weight: 600; width: 50px; }
+                            Text { text: "Y"; font-size: 10px; font-weight: 600; width: 50px; }
+                            Text { text: "Z"; font-size: 10px; font-weight: 600; width: 50px; }
+                            Text { text: "Err"; font-size: 10px; font-weight: 600; width: 50px; }
+                        }
+
+                        for sample[idx] in root.sample-details: Rectangle {
+                            background: sample.is-invalid ? #e0e0e0 :
+                                       sample.is-verification ? #fff9c4 :
+                                       sample.is-large-error ? #ffcdd2 : transparent;
+                            border-radius: 2px;
+                            height: 18px;
+
+                            HorizontalLayout {
+                                spacing: 2px;
+                                padding-left: 2px;
+                                Text { text: sample.sample-type; font-size: 10px; width: 60px; overflow: elide; }
+                                Text { text: sample.x; font-size: 10px; width: 50px; }
+                                Text { text: sample.y; font-size: 10px; width: 50px; }
+                                Text { text: sample.z; font-size: 10px; width: 50px; }
+                                Text { text: sample.error; font-size: 10px; width: 50px; }
+                            }
+                        }
+                    }
+
+                    // BS details table
+                    if root.show-details && root.bs-details.length > 0: VerticalLayout {
+                        spacing: 2px;
+
+                        Text {
+                            text: "Base Stations";
+                            font-size: 12px;
+                            font-weight: 600;
+                        }
+
+                        HorizontalLayout {
+                            spacing: 2px;
+                            Text { text: "Id"; font-size: 10px; font-weight: 600; width: 25px; }
+                            Text { text: "X"; font-size: 10px; font-weight: 600; width: 55px; }
+                            Text { text: "Y"; font-size: 10px; font-weight: 600; width: 55px; }
+                            Text { text: "Z"; font-size: 10px; font-weight: 600; width: 55px; }
+                            Text { text: "Smp"; font-size: 10px; font-weight: 600; width: 30px; }
+                            Text { text: "Lnk"; font-size: 10px; font-weight: 600; width: 30px; }
+                        }
+
+                        for bs in root.bs-details: Rectangle {
+                            background: bs.low-links ? #ffcdd2 : transparent;
+                            border-radius: 2px;
+                            height: 18px;
+
+                            HorizontalLayout {
+                                spacing: 2px;
+                                padding-left: 2px;
+                                Text { text: bs.id; font-size: 10px; width: 25px; }
+                                Text { text: bs.x; font-size: 10px; width: 55px; }
+                                Text { text: bs.y; font-size: 10px; width: 55px; }
+                                Text { text: bs.z; font-size: 10px; width: 55px; }
+                                Text { text: bs.samples; font-size: 10px; width: 30px; }
+                                Text { text: bs.links; font-size: 10px; width: 30px; }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Right panel: 3D visualization
+        view-area := Rectangle {
+            horizontal-stretch: 1;
+            clip: true;
+
+            Image {
+                source: root.texture;
+                width: parent.width;
+                height: parent.height;
+                image-fit: fill;
+            }
+
+            // Grid labels overlay
+            for label in root.grid-labels: Text {
+                x: label.screen-x * 1px;
+                y: label.screen-y * 1px;
+                text: label.text;
+                font-size: 10px;
+                color: Palette.foreground.transparentize(0.5);
+            }
+
+            TouchArea {
+                property <float> prev-x;
+                property <float> prev-y;
+                property <bool> dragging;
+                property <bool> panning;
+
+                scroll-event(e) => {
+                    if (e.delta-y > 0) {
+                        root.cam-distance = max(1.0, root.cam-distance - 0.5);
+                    } else if (e.delta-y < 0) {
+                        root.cam-distance = min(30.0, root.cam-distance + 0.5);
+                    }
+                    accept
+                }
+
+                pointer-event(e) => {
+                    if (e.kind == PointerEventKind.down) {
+                        if (e.button == PointerEventButton.left) {
+                            self.prev-x = self.mouse-x / 1px;
+                            self.prev-y = self.mouse-y / 1px;
+                            self.dragging = true;
+                            self.panning = false;
+                        } else if (e.button == PointerEventButton.middle || e.button == PointerEventButton.right) {
+                            self.prev-x = self.mouse-x / 1px;
+                            self.prev-y = self.mouse-y / 1px;
+                            self.panning = true;
+                        }
+                    } else if (e.kind == PointerEventKind.up) {
+                        self.dragging = false;
+                        self.panning = false;
+                    }
+                }
+
+                moved => {
+                    if (self.panning) {
+                        root.view-pan(
+                            self.mouse-x / 1px - self.prev-x,
+                            self.mouse-y / 1px - self.prev-y,
+                        );
+                        self.prev-x = self.mouse-x / 1px;
+                        self.prev-y = self.mouse-y / 1px;
+                    } else if (self.dragging) {
+                        root.cam-yaw -= (self.mouse-x / 1px - self.prev-x) * 0.01;
+                        root.cam-pitch = clamp(root.cam-pitch + (self.mouse-y / 1px - self.prev-y) * 0.01, 0.1, 1.5);
+                        self.prev-x = self.mouse-x / 1px;
+                        self.prev-y = self.mouse-y / 1px;
+                    }
+                }
+            }
+        }
+    }
+}
