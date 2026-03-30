@@ -1,0 +1,964 @@
+import { VerticalBox, HorizontalBox, Button, LineEdit, ScrollView, Palette, CheckBox, Slider, ComboBox } from "std-widgets.slint";
+import { VizLabel } from "visualization.slint";
+import { LhBaseStationData } from "lh-coverage.slint";
+import { Tdoa3AnchorData } from "tdoa3-coverage.slint";
+
+// Collapsible section header with toggle arrow
+component SectionHeader inherits Rectangle {
+    in property <string> title;
+    in-out property <bool> expanded: true;
+    in property <int> count: 0;
+    callback toggle();
+
+    height: 28px;
+    background: touch.has-hover ? Palette.background.darker(0.05) : transparent;
+
+    touch := TouchArea {
+        clicked => {
+            root.expanded = !root.expanded;
+            root.toggle();
+        }
+        mouse-cursor: pointer;
+    }
+
+    HorizontalLayout {
+        spacing: 6px;
+        padding-left: 4px;
+        padding-right: 4px;
+
+        Text {
+            text: root.expanded ? "v" : ">";
+            font-size: 11px;
+            font-weight: 700;
+            vertical-alignment: center;
+            width: 12px;
+            color: Palette.foreground.transparentize(0.4);
+        }
+
+        Text {
+            text: root.title;
+            font-size: 12px;
+            font-weight: 600;
+            color: Palette.foreground.transparentize(0.3);
+            vertical-alignment: center;
+        }
+
+        if root.count > 0: Text {
+            text: "(\{root.count})";
+            font-size: 11px;
+            color: Palette.foreground.transparentize(0.5);
+            vertical-alignment: center;
+        }
+
+        Rectangle { horizontal-stretch: 1; }
+    }
+}
+
+// Minimal numeric input without the clear ("X") button
+component NumericInput inherits Rectangle {
+    in-out property <string> text <=> input.text;
+    callback edited(string);
+    callback accepted(string);
+
+    height: 28px;
+    border-radius: 4px;
+    background: Palette.background;
+    border-width: 1px;
+    border-color: input.has-focus ? Palette.accent-background : Palette.border;
+
+    forward-focus: input;
+
+    input := TextInput {
+        x: 4px;
+        width: parent.width - 8px;
+        vertical-alignment: center;
+        font-size: 12px;
+        color: Palette.foreground;
+        selection-background-color: Palette.accent-background;
+        selection-foreground-color: Palette.accent-foreground;
+        edited => { root.edited(self.text); }
+        accepted => { root.accepted(self.text); }
+    }
+}
+
+export struct PlanObstacleData {
+    kind: string,
+    x: string,
+    y: string,
+    z: string,
+    yaw: string,
+    width: string,
+    depth: string,
+    height: string,
+    radius: string,
+    color-r: float,
+    color-g: float,
+    color-b: float,
+    on-floor: bool,
+}
+
+// Simple color swatch picker
+component ColorPicker inherits Rectangle {
+    in-out property <float> picked-r: 0.45;
+    in-out property <float> picked-g: 0.45;
+    in-out property <float> picked-b: 0.50;
+    callback changed(float, float, float);
+
+    height: 20px;
+
+    HorizontalLayout {
+        spacing: 2px;
+
+        // Preset swatches
+        for preset in [
+            { r: 0.45, g: 0.45, b: 0.50 }, // gray (default)
+            { r: 0.85, g: 0.30, b: 0.25 }, // red
+            { r: 0.20, g: 0.65, b: 0.30 }, // green
+            { r: 0.25, g: 0.50, b: 0.85 }, // blue
+            { r: 0.85, g: 0.70, b: 0.20 }, // yellow
+            { r: 0.70, g: 0.35, b: 0.75 }, // purple
+            { r: 0.20, g: 0.75, b: 0.80 }, // cyan
+            { r: 0.85, g: 0.55, b: 0.25 }, // orange
+            { r: 0.60, g: 0.40, b: 0.25 }, // brown
+            { r: 0.15, g: 0.15, b: 0.15 }, // dark
+        ]: Rectangle {
+            width: 18px;
+            height: 18px;
+            border-radius: 3px;
+            background: Colors.rgb(round(preset.r * 255), round(preset.g * 255), round(preset.b * 255));
+            border-width: (root.picked-r - preset.r) * (root.picked-r - preset.r) < 0.01
+                       && (root.picked-g - preset.g) * (root.picked-g - preset.g) < 0.01
+                       && (root.picked-b - preset.b) * (root.picked-b - preset.b) < 0.01
+                       ? 2px : 0px;
+            border-color: white;
+
+            TouchArea {
+                clicked => {
+                    root.picked-r = preset.r;
+                    root.picked-g = preset.g;
+                    root.picked-b = preset.b;
+                    root.changed(preset.r, preset.g, preset.b);
+                }
+                mouse-cursor: pointer;
+            }
+        }
+    }
+}
+
+export component PlanningContent inherits Rectangle {
+    in-out property <image> texture;
+    out property <float> viewport-width: view-area.width / 1px;
+    out property <float> viewport-height: view-area.height / 1px;
+
+    // Section expand state
+    property <bool> bs-expanded: true;
+    property <bool> anchors-expanded: true;
+    property <bool> obs-expanded: true;
+
+    // Camera state
+    in-out property <float> cam-yaw: 0.8;
+    in-out property <float> cam-pitch: 0.6;
+    in-out property <float> cam-distance: 12.0;
+    in-out property <float> cam-pan-x: 0;
+    in-out property <float> cam-pan-y: 0;
+
+    // Room parameters
+    in-out property <string> room-x: "8.0";
+    in-out property <string> room-y: "8.0";
+    in-out property <string> room-z: "3.0";
+    in-out property <string> resolution: "5.0";
+    in-out property <bool> center-origin: false;
+
+    // Base station list
+    in-out property <[LhBaseStationData]> base-stations;
+    // Anchor list
+    in-out property <[Tdoa3AnchorData]> anchors;
+    // Obstacle list
+    in-out property <[PlanObstacleData]> obstacles;
+
+    // LH coverage settings
+    in-out property <bool> receiver-fov-enabled: true;
+    in-out property <string> max-bs-distance: "5.0";
+    in-out property <bool> show-coverage-0: true;
+    in-out property <bool> show-coverage-1: true;
+    in-out property <bool> show-coverage-2: true;
+    in-out property <bool> show-coverage-3: true;
+    in-out property <bool> show-coverage-4: true;
+
+    // TDoA3 settings
+    in-out property <string> max-range: "15.0";
+    in-out property <float> tdoa3-scale-min: 0.0;
+    in-out property <float> tdoa3-scale-max: 0.05;
+    in-out property <float> tdoa3-scale-limit: 0.1;
+    in-out property <string> measurement-noise: "0.15";
+    in-out property <bool> show-tdoa3-voxels: true;
+    in-out property <bool> computing: false;
+    in-out property <[string]> error-metric-names: ["GERR", "HERR", "VERR"];
+    in-out property <int> error-metric-index: 0;
+    callback error-metric-changed(int);
+
+    // Stats
+    in-out property <string> stats-text-1: "";
+    in-out property <string> stats-text-2: "";
+    in-out property <string> stats-text-3: "";
+
+    // Grid labels
+    in-out property <[VizLabel]> grid-labels;
+
+    // Selection / gizmo state
+    in-out property <int> selected-type: 0;   // 0=none, 1=BS, 2=anchor, 3=obstacle
+    in-out property <int> selected-index: -1;
+    in-out property <bool> handle-active: false;
+    in-out property <int> active-handle: 0;
+
+    // Callbacks
+    callback save-scene();
+    callback load-scene();
+    callback load-lh-scene();
+    callback load-tdoa3-scene();
+    callback add-base-station();
+    callback remove-base-station(int);
+    callback duplicate-base-station(int);
+    callback update-base-station(int, LhBaseStationData);
+    callback add-anchor();
+    callback remove-anchor(int);
+    callback duplicate-anchor(int);
+    callback update-anchor(int, Tdoa3AnchorData);
+    callback add-box();
+    callback add-cylinder();
+    callback remove-obstacle(int);
+    callback duplicate-obstacle(int);
+    callback update-obstacle(int, PlanObstacleData);
+    callback undo();
+    callback recompute();
+    callback view-mouse-pressed(/* x */ float, /* y */ float);
+    callback view-mouse-moved(/* x */ float, /* y */ float);
+    callback view-mouse-released();
+    callback view-pan(/* dx_px */ float, /* dy_px */ float);
+
+    HorizontalLayout {
+        spacing: 0px;
+
+        // Left panel: configuration
+        Rectangle {
+            width: 320px;
+            border-width: 0px;
+            background: Palette.alternate-background;
+
+            VerticalLayout {
+                padding: 12px;
+                spacing: 10px;
+
+                HorizontalLayout {
+                    spacing: 4px;
+                    Text {
+                        text: "Planning";
+                        font-size: 16px;
+                        font-weight: 600;
+                        vertical-alignment: center;
+                    }
+                    Rectangle { horizontal-stretch: 1; }
+                    Button {
+                        text: "Save";
+                        clicked => { root.save-scene(); }
+                    }
+                    Button {
+                        text: "Open";
+                        clicked => { root.load-scene(); }
+                    }
+                }
+
+                HorizontalLayout {
+                    spacing: 4px;
+                    Text {
+                        text: "Import:";
+                        font-size: 11px;
+                        vertical-alignment: center;
+                        color: Palette.foreground.transparentize(0.4);
+                    }
+                    Rectangle { horizontal-stretch: 1; }
+                    Button {
+                        text: "LH Scene";
+                        clicked => { root.load-lh-scene(); }
+                    }
+                    Button {
+                        text: "TDoA3 Scene";
+                        clicked => { root.load-tdoa3-scene(); }
+                    }
+                }
+
+                // Room dimensions
+                Text {
+                    text: "Room (m)";
+                    font-size: 12px;
+                    font-weight: 600;
+                    color: Palette.foreground.transparentize(0.3);
+                }
+
+                HorizontalLayout {
+                    spacing: 4px;
+                    Text { text: "X:"; font-size: 12px; vertical-alignment: center; width: 16px; }
+                    LineEdit { text <=> root.room-x; width: 110px; }
+                    Text { text: "Y:"; font-size: 12px; vertical-alignment: center; width: 16px; }
+                    LineEdit { text <=> root.room-y; width: 110px; }
+                }
+
+                HorizontalLayout {
+                    spacing: 4px;
+                    Text { text: "Z:"; font-size: 12px; vertical-alignment: center; width: 16px; }
+                    LineEdit { text <=> root.room-z; width: 110px; }
+                    Text { text: "Res:"; font-size: 12px; vertical-alignment: center; width: 28px; }
+                    LineEdit { text <=> root.resolution; width: 110px; }
+                }
+
+                CheckBox {
+                    text: "Center room at origin";
+                    checked <=> root.center-origin;
+                }
+
+                Rectangle { height: 1px; background: Palette.border; }
+
+                ScrollView {
+                    vertical-stretch: 1;
+
+                    VerticalLayout {
+                        width: 296px;
+                        spacing: 8px;
+
+                        // --- Base Stations ---
+                        HorizontalLayout {
+                            SectionHeader {
+                                title: "Base Stations";
+                                count: root.base-stations.length;
+                                expanded <=> bs-expanded;
+                                horizontal-stretch: 1;
+                            }
+                            Button {
+                                text: "Add";
+                                clicked => { root.add-base-station(); }
+                            }
+                        }
+
+                        if bs-expanded: VerticalLayout {
+                            spacing: 8px;
+
+                            for bs[idx] in root.base-stations: Rectangle {
+                                border-radius: 4px;
+                                background: root.selected-type == 1 && root.selected-index == idx
+                                    ? Palette.accent-background
+                                    : Palette.background;
+                                border-width: 1px;
+                                border-color: Palette.border;
+
+                                VerticalLayout {
+                                    padding: 8px;
+                                    spacing: 4px;
+
+                                    HorizontalLayout {
+                                        Text {
+                                            text: "BS \{idx + 1}";
+                                            font-size: 12px;
+                                            font-weight: 600;
+                                            vertical-alignment: center;
+                                        }
+                                        Rectangle { horizontal-stretch: 1; }
+                                        Button {
+                                            text: "Dup";
+                                            clicked => { root.duplicate-base-station(idx); }
+                                        }
+                                        Button {
+                                            text: "Remove";
+                                            clicked => { root.remove-base-station(idx); }
+                                        }
+                                    }
+
+                                    HorizontalLayout {
+                                        spacing: 2px;
+                                        Text { text: "X"; font-size: 11px; vertical-alignment: center; width: 14px; }
+                                        bs-x := NumericInput {
+                                            text: bs.x;
+                                            width: 75px;
+                                            edited(val) => {
+                                                root.update-base-station(idx, {
+                                                    x: val, y: bs-y.text, z: bs-z.text,
+                                                    azimuth: bs-az.text, elevation: bs-el.text,
+                                                });
+                                            }
+                                        }
+                                        Text { text: "Y"; font-size: 11px; vertical-alignment: center; width: 14px; }
+                                        bs-y := NumericInput {
+                                            text: bs.y;
+                                            width: 75px;
+                                            edited(val) => {
+                                                root.update-base-station(idx, {
+                                                    x: bs-x.text, y: val, z: bs-z.text,
+                                                    azimuth: bs-az.text, elevation: bs-el.text,
+                                                });
+                                            }
+                                        }
+                                        Text { text: "Z"; font-size: 11px; vertical-alignment: center; width: 14px; }
+                                        bs-z := NumericInput {
+                                            text: bs.z;
+                                            width: 75px;
+                                            edited(val) => {
+                                                root.update-base-station(idx, {
+                                                    x: bs-x.text, y: bs-y.text, z: val,
+                                                    azimuth: bs-az.text, elevation: bs-el.text,
+                                                });
+                                            }
+                                        }
+                                    }
+
+                                    HorizontalLayout {
+                                        spacing: 2px;
+                                        Text { text: "Az"; font-size: 11px; vertical-alignment: center; width: 18px; }
+                                        bs-az := NumericInput {
+                                            text: bs.azimuth;
+                                            width: 85px;
+                                            edited(val) => {
+                                                root.update-base-station(idx, {
+                                                    x: bs-x.text, y: bs-y.text, z: bs-z.text,
+                                                    azimuth: val, elevation: bs-el.text,
+                                                });
+                                            }
+                                        }
+                                        Text { text: "El"; font-size: 11px; vertical-alignment: center; width: 18px; }
+                                        bs-el := NumericInput {
+                                            text: bs.elevation;
+                                            width: 85px;
+                                            edited(val) => {
+                                                root.update-base-station(idx, {
+                                                    x: bs-x.text, y: bs-y.text, z: bs-z.text,
+                                                    azimuth: bs-az.text, elevation: val,
+                                                });
+                                            }
+                                        }
+                                        Text { text: "°"; font-size: 11px; vertical-alignment: center; }
+                                    }
+                                }
+                            }
+                        }
+
+                        Rectangle { height: 1px; background: Palette.border; }
+
+                        // --- TDoA3 Anchors ---
+                        HorizontalLayout {
+                            SectionHeader {
+                                title: "TDoA3 Anchors";
+                                count: root.anchors.length;
+                                expanded <=> anchors-expanded;
+                                horizontal-stretch: 1;
+                            }
+                            Button {
+                                text: "Add";
+                                clicked => { root.add-anchor(); }
+                            }
+                        }
+
+                        if anchors-expanded: VerticalLayout {
+                            spacing: 8px;
+
+                            for anchor[idx] in root.anchors: Rectangle {
+                                border-radius: 4px;
+                                background: root.selected-type == 2 && root.selected-index == idx
+                                    ? Palette.accent-background
+                                    : Palette.background;
+                                border-width: 1px;
+                                border-color: Palette.border;
+
+                                HorizontalLayout {
+                                    padding: 8px;
+                                    spacing: 2px;
+
+                                    Text {
+                                        text: "A\{idx + 1}";
+                                        font-size: 12px;
+                                        font-weight: 600;
+                                        vertical-alignment: center;
+                                        width: 30px;
+                                    }
+                                    Text { text: "X"; font-size: 11px; vertical-alignment: center; width: 14px; }
+                                    a-x := NumericInput {
+                                        text: anchor.x;
+                                        width: 55px;
+                                        edited(val) => {
+                                            root.update-anchor(idx, {
+                                                x: val, y: a-y.text, z: a-z.text,
+                                            });
+                                        }
+                                    }
+                                    Text { text: "Y"; font-size: 11px; vertical-alignment: center; width: 14px; }
+                                    a-y := NumericInput {
+                                        text: anchor.y;
+                                        width: 55px;
+                                        edited(val) => {
+                                            root.update-anchor(idx, {
+                                                x: a-x.text, y: val, z: a-z.text,
+                                            });
+                                        }
+                                    }
+                                    Text { text: "Z"; font-size: 11px; vertical-alignment: center; width: 14px; }
+                                    a-z := NumericInput {
+                                        text: anchor.z;
+                                        width: 55px;
+                                        edited(val) => {
+                                            root.update-anchor(idx, {
+                                                x: a-x.text, y: a-y.text, z: val,
+                                            });
+                                        }
+                                    }
+                                    Button {
+                                        text: "D";
+                                        width: 24px;
+                                        clicked => { root.duplicate-anchor(idx); }
+                                    }
+                                    Button {
+                                        text: "X";
+                                        width: 24px;
+                                        clicked => { root.remove-anchor(idx); }
+                                    }
+                                }
+                            }
+                        }
+
+                        Rectangle { height: 1px; background: Palette.border; }
+
+                        // --- Obstacles ---
+                        HorizontalLayout {
+                            SectionHeader {
+                                title: "Obstacles";
+                                count: root.obstacles.length;
+                                expanded <=> obs-expanded;
+                                horizontal-stretch: 1;
+                            }
+                            Button {
+                                text: "Box";
+                                clicked => { root.add-box(); }
+                            }
+                            Button {
+                                text: "Cyl";
+                                clicked => { root.add-cylinder(); }
+                            }
+                        }
+
+                        if obs-expanded: VerticalLayout {
+                            spacing: 8px;
+
+                            for obs[idx] in root.obstacles: Rectangle {
+                                border-radius: 4px;
+                                background: root.selected-type == 3 && root.selected-index == idx
+                                    ? Palette.accent-background
+                                    : Palette.background;
+                                border-width: 1px;
+                                border-color: Palette.border;
+
+                                VerticalLayout {
+                                    padding: 8px;
+                                    spacing: 4px;
+
+                                    HorizontalLayout {
+                                        Text {
+                                            text: obs.kind + " \{idx + 1}";
+                                            font-size: 12px;
+                                            font-weight: 600;
+                                            vertical-alignment: center;
+                                        }
+                                        Rectangle { horizontal-stretch: 1; }
+                                        CheckBox {
+                                            text: "Floor";
+                                            checked: obs.on-floor;
+                                            toggled => {
+                                                root.update-obstacle(idx, {
+                                                    kind: obs.kind,
+                                                    x: obs-x.text, y: obs-y.text, z: obs-z.text,
+                                                    yaw: obs-yaw.text,
+                                                    width: obs-w.text, depth: obs-d.text, height: obs-h.text,
+                                                    radius: obs-r.text,
+                                                    color-r: obs.color-r, color-g: obs.color-g, color-b: obs.color-b,
+                                                    on-floor: self.checked,
+                                                });
+                                            }
+                                        }
+                                        Button {
+                                            text: "Dup";
+                                            clicked => { root.duplicate-obstacle(idx); }
+                                        }
+                                        Button {
+                                            text: "Remove";
+                                            clicked => { root.remove-obstacle(idx); }
+                                        }
+                                    }
+
+                                    HorizontalLayout {
+                                        spacing: 2px;
+                                        Text { text: "X"; font-size: 11px; vertical-alignment: center; width: 14px; }
+                                        obs-x := NumericInput {
+                                            text: obs.x;
+                                            width: 55px;
+                                            edited(val) => {
+                                                root.update-obstacle(idx, {
+                                                    kind: obs.kind,
+                                                    x: val, y: obs-y.text, z: obs-z.text,
+                                                    yaw: obs-yaw.text,
+                                                    width: obs-w.text, depth: obs-d.text, height: obs-h.text,
+                                                    radius: obs-r.text,
+                                                    color-r: obs.color-r, color-g: obs.color-g, color-b: obs.color-b,
+                                                    on-floor: obs.on-floor,
+                                                });
+                                            }
+                                        }
+                                        Text { text: "Y"; font-size: 11px; vertical-alignment: center; width: 14px; }
+                                        obs-y := NumericInput {
+                                            text: obs.y;
+                                            width: 55px;
+                                            edited(val) => {
+                                                root.update-obstacle(idx, {
+                                                    kind: obs.kind,
+                                                    x: obs-x.text, y: val, z: obs-z.text,
+                                                    yaw: obs-yaw.text,
+                                                    width: obs-w.text, depth: obs-d.text, height: obs-h.text,
+                                                    radius: obs-r.text,
+                                                    color-r: obs.color-r, color-g: obs.color-g, color-b: obs.color-b,
+                                                    on-floor: obs.on-floor,
+                                                });
+                                            }
+                                        }
+                                        Text { text: "Z"; font-size: 11px; vertical-alignment: center; width: 14px; }
+                                        obs-z := NumericInput {
+                                            text: obs.z;
+                                            width: 55px;
+                                            edited(val) => {
+                                                root.update-obstacle(idx, {
+                                                    kind: obs.kind,
+                                                    x: obs-x.text, y: obs-y.text, z: val,
+                                                    yaw: obs-yaw.text,
+                                                    width: obs-w.text, depth: obs-d.text, height: obs-h.text,
+                                                    radius: obs-r.text,
+                                                    color-r: obs.color-r, color-g: obs.color-g, color-b: obs.color-b,
+                                                    on-floor: obs.on-floor,
+                                                });
+                                            }
+                                        }
+                                        Text { text: "Yaw"; font-size: 11px; vertical-alignment: center; width: 24px; }
+                                        obs-yaw := NumericInput {
+                                            text: obs.yaw;
+                                            width: 45px;
+                                            edited(val) => {
+                                                root.update-obstacle(idx, {
+                                                    kind: obs.kind,
+                                                    x: obs-x.text, y: obs-y.text, z: obs-z.text,
+                                                    yaw: val,
+                                                    width: obs-w.text, depth: obs-d.text, height: obs-h.text,
+                                                    radius: obs-r.text,
+                                                    color-r: obs.color-r, color-g: obs.color-g, color-b: obs.color-b,
+                                                    on-floor: obs.on-floor,
+                                                });
+                                            }
+                                        }
+                                    }
+
+                                    HorizontalLayout {
+                                        spacing: 2px;
+                                        Text { text: "W"; font-size: 11px; vertical-alignment: center; width: 14px; }
+                                        obs-w := NumericInput {
+                                            text: obs.width;
+                                            width: 48px;
+                                            edited(val) => {
+                                                root.update-obstacle(idx, {
+                                                    kind: obs.kind,
+                                                    x: obs-x.text, y: obs-y.text, z: obs-z.text,
+                                                    yaw: obs-yaw.text,
+                                                    width: val, depth: obs-d.text, height: obs-h.text,
+                                                    radius: obs-r.text,
+                                                    color-r: obs.color-r, color-g: obs.color-g, color-b: obs.color-b,
+                                                    on-floor: obs.on-floor,
+                                                });
+                                            }
+                                        }
+                                        Text { text: "D"; font-size: 11px; vertical-alignment: center; width: 14px; }
+                                        obs-d := NumericInput {
+                                            text: obs.depth;
+                                            width: 48px;
+                                            edited(val) => {
+                                                root.update-obstacle(idx, {
+                                                    kind: obs.kind,
+                                                    x: obs-x.text, y: obs-y.text, z: obs-z.text,
+                                                    yaw: obs-yaw.text,
+                                                    width: obs-w.text, depth: val, height: obs-h.text,
+                                                    radius: obs-r.text,
+                                                    color-r: obs.color-r, color-g: obs.color-g, color-b: obs.color-b,
+                                                    on-floor: obs.on-floor,
+                                                });
+                                            }
+                                        }
+                                        Text { text: "H"; font-size: 11px; vertical-alignment: center; width: 14px; }
+                                        obs-h := NumericInput {
+                                            text: obs.height;
+                                            width: 48px;
+                                            edited(val) => {
+                                                root.update-obstacle(idx, {
+                                                    kind: obs.kind,
+                                                    x: obs-x.text, y: obs-y.text, z: obs-z.text,
+                                                    yaw: obs-yaw.text,
+                                                    width: obs-w.text, depth: obs-d.text, height: val,
+                                                    radius: obs-r.text,
+                                                    color-r: obs.color-r, color-g: obs.color-g, color-b: obs.color-b,
+                                                    on-floor: obs.on-floor,
+                                                });
+                                            }
+                                        }
+                                        Text { text: "R"; font-size: 11px; vertical-alignment: center; width: 14px; }
+                                        obs-r := NumericInput {
+                                            text: obs.radius;
+                                            width: 48px;
+                                            edited(val) => {
+                                                root.update-obstacle(idx, {
+                                                    kind: obs.kind,
+                                                    x: obs-x.text, y: obs-y.text, z: obs-z.text,
+                                                    yaw: obs-yaw.text,
+                                                    width: obs-w.text, depth: obs-d.text, height: obs-h.text,
+                                                    radius: val,
+                                                    color-r: obs.color-r, color-g: obs.color-g, color-b: obs.color-b,
+                                                    on-floor: obs.on-floor,
+                                                });
+                                            }
+                                        }
+                                    }
+
+                                    ColorPicker {
+                                        picked-r: obs.color-r;
+                                        picked-g: obs.color-g;
+                                        picked-b: obs.color-b;
+                                        changed(r, g, b) => {
+                                            root.update-obstacle(idx, {
+                                                kind: obs.kind,
+                                                x: obs-x.text, y: obs-y.text, z: obs-z.text,
+                                                yaw: obs-yaw.text,
+                                                width: obs-w.text, depth: obs-d.text, height: obs-h.text,
+                                                radius: obs-r.text,
+                                                color-r: r, color-g: g, color-b: b,
+                                                on-floor: obs.on-floor,
+                                            });
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        Rectangle { height: 1px; background: Palette.border; }
+
+                        // --- Coverage ---
+                        Text {
+                            text: "Coverage";
+                            font-size: 12px;
+                            font-weight: 600;
+                            color: Palette.foreground.transparentize(0.3);
+                        }
+
+                        CheckBox {
+                            text: "Receiver FOV (170°)";
+                            checked <=> root.receiver-fov-enabled;
+                        }
+
+                        HorizontalLayout {
+                            spacing: 4px;
+                            Text { text: "Max BS dist:"; font-size: 12px; vertical-alignment: center; }
+                            LineEdit { text <=> root.max-bs-distance; width: 60px; }
+                            Text { text: "m"; font-size: 12px; vertical-alignment: center; }
+                        }
+
+                        HorizontalLayout {
+                            spacing: 4px;
+                            Text { text: "Max range:"; font-size: 12px; vertical-alignment: center; }
+                            LineEdit { text <=> root.max-range; width: 60px; }
+                            Text { text: "m"; font-size: 12px; vertical-alignment: center; }
+                        }
+
+                        Button {
+                            text: "Compute Coverage";
+                            clicked => { root.recompute(); }
+                        }
+
+                        CheckBox { text: "0 BS"; checked <=> root.show-coverage-0; }
+                        CheckBox { text: "1 BS"; checked <=> root.show-coverage-1; }
+                        CheckBox { text: "2 BS"; checked <=> root.show-coverage-2; }
+                        CheckBox {
+                            text: "3+ BS";
+                            checked <=> root.show-coverage-3;
+                            toggled => { root.show-coverage-4 = self.checked; }
+                        }
+
+                        HorizontalLayout {
+                            spacing: 4px;
+                            CheckBox { text: "Show TDoA3"; checked <=> root.show-tdoa3-voxels; }
+                            ComboBox {
+                                model: root.error-metric-names;
+                                current-index: root.error-metric-index;
+                                selected(val) => { root.error-metric-changed(self.current-index); }
+                                width: 80px;
+                            }
+                        }
+
+                        HorizontalLayout {
+                            spacing: 4px;
+                            Text { text: "Noise (m):"; font-size: 11px; vertical-alignment: center; }
+                            LineEdit { text <=> root.measurement-noise; width: 60px; }
+                        }
+
+                        HorizontalLayout {
+                            spacing: 4px;
+                            Text { text: "Err min (cm):"; font-size: 11px; vertical-alignment: center; }
+                            Slider {
+                                minimum: 0;
+                                maximum: root.tdoa3-scale-limit * 100;
+                                value: root.tdoa3-scale-min * 100;
+                                changed(v) => { root.tdoa3-scale-min = v / 100; }
+                                width: 120px;
+                            }
+                            Text {
+                                text: "\{round(root.tdoa3-scale-min * 10000) / 100}";
+                                font-size: 11px;
+                                vertical-alignment: center;
+                                width: 40px;
+                            }
+                        }
+
+                        HorizontalLayout {
+                            spacing: 4px;
+                            Text { text: "Err max (cm):"; font-size: 11px; vertical-alignment: center; }
+                            Slider {
+                                minimum: 0;
+                                maximum: root.tdoa3-scale-limit * 100;
+                                value: root.tdoa3-scale-max * 100;
+                                changed(v) => { root.tdoa3-scale-max = v / 100; }
+                                width: 120px;
+                            }
+                            Text {
+                                text: "\{round(root.tdoa3-scale-max * 10000) / 100}";
+                                font-size: 11px;
+                                vertical-alignment: center;
+                                width: 40px;
+                            }
+                        }
+
+                        if root.stats-text-1 != "": VerticalLayout {
+                            spacing: 2px;
+                            Text { text: root.stats-text-1; font-size: 12px; }
+                            Text { text: root.stats-text-2; font-size: 12px; }
+                            if root.stats-text-3 != "": Text { text: root.stats-text-3; font-size: 12px; }
+                        }
+
+                        Button {
+                            text: "Undo";
+                            clicked => { root.undo(); }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Right panel: 3D view
+        view-area := Rectangle {
+            horizontal-stretch: 1;
+
+            Image {
+                source: root.texture;
+                width: 100%;
+                height: 100%;
+                image-fit: fill;
+            }
+
+            // Grid measurement labels
+            Rectangle {
+                width: 100%;
+                height: 100%;
+                for label in root.grid-labels: Text {
+                    x: label.screen-x * 1px;
+                    y: label.screen-y * 1px;
+                    text: label.text;
+                    font-size: 9px;
+                    color: #4d4d59;
+                }
+            }
+
+            TouchArea {
+                property <float> prev-x;
+                property <float> prev-y;
+                property <bool> dragging;
+                property <bool> panning;
+
+                scroll-event(e) => {
+                    if (e.delta-y > 0) {
+                        root.cam-distance = max(1.0, root.cam-distance - 0.5);
+                    } else if (e.delta-y < 0) {
+                        root.cam-distance = min(30.0, root.cam-distance + 0.5);
+                    }
+                    accept
+                }
+
+                pointer-event(e) => {
+                    if (e.kind == PointerEventKind.down) {
+                        if (e.button == PointerEventButton.left) {
+                            root.view-mouse-pressed(self.mouse-x / 1px, self.mouse-y / 1px);
+                            if (!root.handle-active) {
+                                self.prev-x = self.mouse-x / 1px;
+                                self.prev-y = self.mouse-y / 1px;
+                                self.dragging = true;
+                                self.panning = false;
+                            }
+                        } else if (e.button == PointerEventButton.middle || e.button == PointerEventButton.right) {
+                            self.prev-x = self.mouse-x / 1px;
+                            self.prev-y = self.mouse-y / 1px;
+                            self.panning = true;
+                        }
+                    } else if (e.kind == PointerEventKind.up) {
+                        if (root.handle-active) {
+                            root.view-mouse-released();
+                        }
+                        self.dragging = false;
+                        self.panning = false;
+                    }
+                }
+
+                moved => {
+                    if (root.handle-active) {
+                        root.view-mouse-moved(self.mouse-x / 1px, self.mouse-y / 1px);
+                    } else if (self.panning) {
+                        root.view-pan(
+                            self.mouse-x / 1px - self.prev-x,
+                            self.mouse-y / 1px - self.prev-y,
+                        );
+                        self.prev-x = self.mouse-x / 1px;
+                        self.prev-y = self.mouse-y / 1px;
+                    } else if (self.dragging) {
+                        root.cam-yaw -= (self.mouse-x / 1px - self.prev-x) * 0.01;
+                        root.cam-pitch = clamp(root.cam-pitch + (self.mouse-y / 1px - self.prev-y) * 0.01, 0.1, 1.5);
+                        self.prev-x = self.mouse-x / 1px;
+                        self.prev-y = self.mouse-y / 1px;
+                    }
+                }
+            }
+        }
+
+    }
+
+    // Computing indicator (bottom-right corner, no overlay)
+    if root.computing: Rectangle {
+        width: 180px;
+        height: 36px;
+        x: root.width - self.width - 12px;
+        y: root.height - self.height - 12px;
+        background: Palette.background;
+        border-radius: 6px;
+        border-width: 1px;
+        border-color: Palette.border;
+
+        Text {
+            text: "Computing...";
+            font-size: 12px;
+            font-weight: 600;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+    }
+}

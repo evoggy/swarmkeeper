@@ -41,6 +41,9 @@ export component LhCoverageContent inherits Rectangle {
     in-out property <string> max-tilt-angle: "10";
     in-out property <string> max-bs-distance: "5.0";
     in-out property <bool> center-origin: false;
+    in-out property <string> room-offset-x: "0.0";
+    in-out property <string> room-offset-y: "0.0";
+    in-out property <string> room-offset-z: "0.0";
 
     // Coverage stats (set from Rust)
     in-out property <string> coverage-1-text: "";
@@ -294,7 +297,7 @@ export component LhCoverageContent inherits Rectangle {
                 }
 
                 CheckBox {
-                    text: "4 base stations";
+                    text: "4+ base stations";
                     checked <=> root.show-coverage-4;
                 }
 
@@ -329,6 +332,17 @@ export component LhCoverageContent inherits Rectangle {
                 CheckBox {
                     text: "Center room at origin";
                     checked <=> root.center-origin;
+                }
+
+                HorizontalLayout {
+                    spacing: 4px;
+                    Text { text: "Offset:"; font-size: 12px; vertical-alignment: center; }
+                    Text { text: "X"; font-size: 11px; vertical-alignment: center; }
+                    LineEdit { text <=> root.room-offset-x; width: 55px; }
+                    Text { text: "Y"; font-size: 11px; vertical-alignment: center; }
+                    LineEdit { text <=> root.room-offset-y; width: 55px; }
+                    Text { text: "Z"; font-size: 11px; vertical-alignment: center; }
+                    LineEdit { text <=> root.room-offset-z; width: 55px; }
                 }
 
                 Button {

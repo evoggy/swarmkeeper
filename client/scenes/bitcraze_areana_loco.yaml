@@ -1,0 +1,36 @@
+room_x: 8.0
+room_y: 10.0
+room_z: 4.0
+resolution: 2.0
+center_origin: true
+max_range: 15.0
+max_gdop_display: 2.0
+show_uncovered: false
+anchors:
+- x: 3.0
+  y: 4.08
+  z: 0.2
+- x: 3.0
+  y: -4.08
+  z: 0.2
+- x: -3.0
+  y: -4.08
+  z: 0.2
+- x: -3.0
+  y: 4.08
+  z: 0.2
+- x: 3.0
+  y: 3.71
+  z: 3.18
+- x: 3.0
+  y: -3.73
+  z: 3.18
+- x: -3.0
+  y: -3.73
+  z: 3.18
+- x: -3.0
+  y: 3.71
+  z: 3.18
+- x: 0.02
+  y: -0.02
+  z: 3.18

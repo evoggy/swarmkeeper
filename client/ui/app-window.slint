@@ -5,8 +5,8 @@ import { UnitData, UnitState, JournalEntryData } from "unit-card.slint";
 import { RadioTestContent, ChannelResult } from "radio-test.slint";
 import { LhCoverageContent, LhBaseStationData } from "lh-coverage.slint";
 import { Tdoa3CoverageContent, Tdoa3AnchorData } from "tdoa3-coverage.slint";
-import { CombinedCoverageContent } from "combined-coverage.slint";
 import { LhWizardContent, WizardSampleData, WizardBsData } from "lh-wizard.slint";
+import { PlanningContent, PlanObstacleData } from "planning.slint";
 
 export struct HealthTestResult {
     name: string,
@@ -537,6 +537,9 @@ export component AppWindow inherits Window {
     in-out property <string> lh-cov-max-tilt-angle <=> lh-cov-content.max-tilt-angle;
     in-out property <string> lh-cov-max-bs-distance <=> lh-cov-content.max-bs-distance;
     in-out property <bool> lh-cov-center-origin <=> lh-cov-content.center-origin;
+    in-out property <string> lh-cov-room-offset-x <=> lh-cov-content.room-offset-x;
+    in-out property <string> lh-cov-room-offset-y <=> lh-cov-content.room-offset-y;
+    in-out property <string> lh-cov-room-offset-z <=> lh-cov-content.room-offset-z;
     in-out property <int> lh-cov-selected-bs: -1;
     in-out property <bool> lh-cov-handle-active: false;
     in-out property <int> lh-cov-active-handle: 0;
@@ -654,34 +657,70 @@ export component AppWindow inherits Window {
     callback tdoa3-view-mouse-released();
     callback tdoa3-view-pan(float, float);
 
-    // Combined Coverage
-    in-out property <image> combined-texture;
-    out property <float> combined-width: combined-content.viewport-width;
-    out property <float> combined-height: combined-content.viewport-height;
-    out property <float> combined-cam-yaw: combined-content.cam-yaw;
-    out property <float> combined-cam-pitch: combined-content.cam-pitch;
-    out property <float> combined-cam-distance: combined-content.cam-distance;
-    in-out property <float> combined-cam-pan-x <=> combined-content.cam-pan-x;
-    in-out property <float> combined-cam-pan-y <=> combined-content.cam-pan-y;
-    in-out property <bool> combined-show-lh-voxels <=> combined-content.show-lh-voxels;
-    in-out property <bool> combined-show-lh-coverage-0 <=> combined-content.show-lh-coverage-0;
-    in-out property <bool> combined-show-lh-coverage-1 <=> combined-content.show-lh-coverage-1;
-    in-out property <bool> combined-show-lh-coverage-2 <=> combined-content.show-lh-coverage-2;
-    in-out property <bool> combined-show-lh-coverage-3 <=> combined-content.show-lh-coverage-3;
-    in-out property <bool> combined-show-lh-coverage-4 <=> combined-content.show-lh-coverage-4;
-    in-out property <bool> combined-show-tdoa3-voxels <=> combined-content.show-tdoa3-voxels;
-    in-out property <bool> combined-show-tdoa3-uncovered <=> combined-content.show-tdoa3-uncovered;
-    in-out property <float> combined-tdoa3-scale-min <=> combined-content.tdoa3-scale-min;
-    in-out property <float> combined-tdoa3-scale-max <=> combined-content.tdoa3-scale-max;
-    in-out property <float> combined-tdoa3-scale-limit <=> combined-content.tdoa3-scale-limit;
-    in-out property <int> combined-lh-bs-count <=> combined-content.lh-bs-count;
-    in-out property <int> combined-tdoa3-anchor-count <=> combined-content.tdoa3-anchor-count;
-    in-out property <[VizLabel]> combined-grid-labels;
-    in-out property <string> combined-stats-text-1;
-    in-out property <string> combined-stats-text-2;
-    callback combined-load-lh-scene();
-    callback combined-load-tdoa3-scene();
-    callback combined-view-pan(float, float);
+    // Planning
+    in-out property <image> planning-texture;
+    out property <float> planning-width: planning-content.viewport-width;
+    out property <float> planning-height: planning-content.viewport-height;
+    out property <float> planning-cam-yaw: planning-content.cam-yaw;
+    out property <float> planning-cam-pitch: planning-content.cam-pitch;
+    out property <float> planning-cam-distance: planning-content.cam-distance;
+    in-out property <float> planning-cam-pan-x <=> planning-content.cam-pan-x;
+    in-out property <float> planning-cam-pan-y <=> planning-content.cam-pan-y;
+    in-out property <string> planning-room-x <=> planning-content.room-x;
+    in-out property <string> planning-room-y <=> planning-content.room-y;
+    in-out property <string> planning-room-z <=> planning-content.room-z;
+    in-out property <string> planning-resolution <=> planning-content.resolution;
+    in-out property <bool> planning-center-origin <=> planning-content.center-origin;
+    in-out property <[LhBaseStationData]> planning-base-stations;
+    in-out property <[Tdoa3AnchorData]> planning-anchors;
+    in-out property <[PlanObstacleData]> planning-obstacles;
+    in-out property <bool> planning-receiver-fov-enabled <=> planning-content.receiver-fov-enabled;
+    in-out property <string> planning-max-bs-distance <=> planning-content.max-bs-distance;
+    in-out property <bool> planning-show-coverage-0 <=> planning-content.show-coverage-0;
+    in-out property <bool> planning-show-coverage-1 <=> planning-content.show-coverage-1;
+    in-out property <bool> planning-show-coverage-2 <=> planning-content.show-coverage-2;
+    in-out property <bool> planning-show-coverage-3 <=> planning-content.show-coverage-3;
+    in-out property <bool> planning-show-coverage-4 <=> planning-content.show-coverage-4;
+    in-out property <string> planning-max-range <=> planning-content.max-range;
+    in-out property <float> planning-tdoa3-scale-min <=> planning-content.tdoa3-scale-min;
+    in-out property <float> planning-tdoa3-scale-max <=> planning-content.tdoa3-scale-max;
+    in-out property <float> planning-tdoa3-scale-limit <=> planning-content.tdoa3-scale-limit;
+    in-out property <bool> planning-show-tdoa3-voxels <=> planning-content.show-tdoa3-voxels;
+    in-out property <string> planning-measurement-noise <=> planning-content.measurement-noise;
+    in-out property <int> planning-error-metric-index <=> planning-content.error-metric-index;
+    callback planning-error-metric-changed(int);
+    in-out property <int> planning-selected-type: 0;
+    in-out property <int> planning-selected-index: -1;
+    in-out property <bool> planning-handle-active: false;
+    in-out property <int> planning-active-handle: 0;
+    in-out property <[VizLabel]> planning-grid-labels;
+    in-out property <string> planning-stats-text-1;
+    in-out property <string> planning-stats-text-2;
+    in-out property <string> planning-stats-text-3;
+    in-out property <bool> planning-computing: false;
+    callback planning-save-scene();
+    callback planning-load-scene();
+    callback planning-load-lh-scene();
+    callback planning-load-tdoa3-scene();
+    callback planning-add-bs();
+    callback planning-remove-bs(int);
+    callback planning-duplicate-bs(int);
+    callback planning-update-bs(int, LhBaseStationData);
+    callback planning-add-anchor();
+    callback planning-remove-anchor(int);
+    callback planning-duplicate-anchor(int);
+    callback planning-update-anchor(int, Tdoa3AnchorData);
+    callback planning-add-box();
+    callback planning-add-cylinder();
+    callback planning-remove-obstacle(int);
+    callback planning-duplicate-obstacle(int);
+    callback planning-update-obstacle(int, PlanObstacleData);
+    callback planning-undo();
+    callback planning-recompute();
+    callback planning-view-mouse-pressed(float, float);
+    callback planning-view-mouse-moved(float, float);
+    callback planning-view-mouse-released();
+    callback planning-view-pan(float, float);
 
     VerticalBox {
         padding: 0px;
@@ -864,15 +903,45 @@ export component AppWindow inherits Window {
                 }
             }
             Tab {
-                title: "Combined";
-                combined-content := CombinedCoverageContent {
-                    texture <=> root.combined-texture;
-                    grid-labels: root.combined-grid-labels;
-                    stats-text-1: root.combined-stats-text-1;
-                    stats-text-2: root.combined-stats-text-2;
-                    load-lh-scene => { root.combined-load-lh-scene(); }
-                    load-tdoa3-scene => { root.combined-load-tdoa3-scene(); }
-                    view-pan(dx, dy) => { root.combined-view-pan(dx, dy); }
+                title: "Planning";
+                planning-content := PlanningContent {
+                    texture <=> root.planning-texture;
+                    base-stations <=> root.planning-base-stations;
+                    anchors <=> root.planning-anchors;
+                    obstacles <=> root.planning-obstacles;
+                    selected-type <=> root.planning-selected-type;
+                    selected-index <=> root.planning-selected-index;
+                    handle-active <=> root.planning-handle-active;
+                    active-handle <=> root.planning-active-handle;
+                    grid-labels: root.planning-grid-labels;
+                    stats-text-1: root.planning-stats-text-1;
+                    stats-text-2: root.planning-stats-text-2;
+                    stats-text-3: root.planning-stats-text-3;
+                    computing: root.planning-computing;
+                    save-scene => { root.planning-save-scene(); }
+                    load-scene => { root.planning-load-scene(); }
+                    load-lh-scene => { root.planning-load-lh-scene(); }
+                    load-tdoa3-scene => { root.planning-load-tdoa3-scene(); }
+                    add-base-station => { root.planning-add-bs(); }
+                    remove-base-station(idx) => { root.planning-remove-bs(idx); }
+                    duplicate-base-station(idx) => { root.planning-duplicate-bs(idx); }
+                    update-base-station(idx, data) => { root.planning-update-bs(idx, data); }
+                    add-anchor => { root.planning-add-anchor(); }
+                    remove-anchor(idx) => { root.planning-remove-anchor(idx); }
+                    duplicate-anchor(idx) => { root.planning-duplicate-anchor(idx); }
+                    update-anchor(idx, data) => { root.planning-update-anchor(idx, data); }
+                    add-box => { root.planning-add-box(); }
+                    add-cylinder => { root.planning-add-cylinder(); }
+                    remove-obstacle(idx) => { root.planning-remove-obstacle(idx); }
+                    duplicate-obstacle(idx) => { root.planning-duplicate-obstacle(idx); }
+                    update-obstacle(idx, data) => { root.planning-update-obstacle(idx, data); }
+                    undo => { root.planning-undo(); }
+                    recompute => { root.planning-recompute(); }
+                    error-metric-changed(idx) => { root.planning-error-metric-changed(idx); }
+                    view-mouse-pressed(x, y) => { root.planning-view-mouse-pressed(x, y); }
+                    view-mouse-moved(x, y) => { root.planning-view-mouse-moved(x, y); }
+                    view-mouse-released => { root.planning-view-mouse-released(); }
+                    view-pan(dx, dy) => { root.planning-view-pan(dx, dy); }
                 }
             }
         }

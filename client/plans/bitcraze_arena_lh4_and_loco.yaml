@@ -1,0 +1,66 @@
+room_x: 8.0
+room_y: 8.0
+room_z: 3.0
+resolution: 5.0
+center_origin: true
+base_stations:
+- x: -0.2148197
+  y: -3.4018254
+  z: 3.085914
+  azimuth_deg: 94.44406
+  elevation_deg: 48.495693
+- x: 3.3647006
+  y: -0.038637165
+  z: 3.0834239
+  azimuth_deg: 176.24565
+  elevation_deg: 57.470898
+- x: -0.015999062
+  y: 3.5567863
+  z: 3.059245
+  azimuth_deg: -91.38906
+  elevation_deg: 42.59665
+- x: -3.452585
+  y: 0.16178492
+  z: 3.061424
+  azimuth_deg: -1.28803
+  elevation_deg: 31.984055
+anchors:
+- x: 3.0
+  y: 4.08
+  z: 0.2
+- x: 3.0
+  y: -4.08
+  z: 0.2
+- x: -3.0
+  y: -4.08
+  z: 0.2
+- x: -3.0
+  y: 4.08
+  z: 0.2
+- x: 3.0
+  y: 3.71
+  z: 3.18
+- x: 3.0
+  y: -3.73
+  z: 3.18
+- x: -3.0
+  y: -3.73
+  z: 3.18
+- x: -3.0
+  y: 3.71
+  z: 3.18
+- x: 0.02
+  y: -0.02
+  z: 3.18
+obstacles: []
+receiver_fov_enabled: true
+max_bs_distance: 5.0
+show_coverage:
+- false
+- false
+- false
+- true
+- true
+max_range: 15.0
+tdoa3_scale_min: 0.0
+tdoa3_scale_max: 0.061816406

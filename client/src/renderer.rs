@@ -1278,6 +1278,489 @@ impl Scene3DRenderer {
         std::mem::swap(&mut self.next_texture, &mut self.displayed_texture);
         result
     }
+
+    /// Render the planning scene: BS, anchors, obstacles, and combined coverage.
+    #[allow(clippy::too_many_arguments)]
+    pub fn render_planning(
+        &mut self,
+        width: u32,
+        height: u32,
+        yaw: f32,
+        pitch: f32,
+        distance: f32,
+        pan_x: f32,
+        pan_y: f32,
+        room: [f32; 3],
+        room_offset: [f32; 3],
+        // LH data
+        base_stations: &[([f32; 3], [[f32; 3]; 3])],
+        lh_voxels: &[(f32, f32, f32, u8)],
+        show_lh_coverage: &[bool; 5],
+        // TDoA3 data
+        anchors: &[[f32; 3]],
+        tdoa3_voxels: &[(f32, f32, f32, f32)],
+        min_scale: f32,
+        max_scale: f32,
+        show_tdoa3_voxels: bool,
+        // Obstacles (each is a list of triangle verts + wireframe verts + color)
+        obstacle_triangles: &[Vec<f32>],
+        obstacle_wireframes: &[Vec<f32>],
+        obstacle_colors: &[[f32; 3]],
+        // Selection
+        selected_type: i32,  // 0=none, 1=BS, 2=anchor, 3=obstacle
+        selected_index: i32,
+        active_handle: i32,
+    ) -> slint::Image {
+        let width = width.max(1);
+        let height = height.max(1);
+
+        unsafe {
+            let gl = &self.gl;
+
+            if self.next_texture.width != width || self.next_texture.height != height {
+                let mut new_tex = RenderTexture::new(gl, width, height);
+                std::mem::swap(&mut self.next_texture, &mut new_tex);
+            }
+
+            let _saved_fbo = ScopedFrameBufferBinding::new(gl, Some(self.next_texture.fbo));
+            let mut saved_viewport = [0i32; 4];
+            gl.get_parameter_i32_slice(glow::VIEWPORT, &mut saved_viewport);
+            gl.viewport(0, 0, width as _, height as _);
+
+            gl.clear_color(0.12, 0.12, 0.15, 1.0);
+            gl.clear(glow::COLOR_BUFFER_BIT | glow::DEPTH_BUFFER_BIT);
+            gl.enable(glow::DEPTH_TEST);
+
+            gl.use_program(Some(self.program));
+            gl.uniform_1_f32(Some(&self.u_alpha), 1.0);
+
+            let _saved_vao = ScopedVAOBinding::new(gl, Some(self.vao));
+            let _saved_vbo = ScopedVBOBinding::new(gl, Some(self.vbo));
+
+            let aspect = width as f32 / height as f32;
+            let mvp = build_mvp(yaw, pitch, distance, pan_x, pan_y, aspect);
+            gl.uniform_matrix_4_f32_slice(Some(&self.u_mvp), false, &mvp);
+            gl.uniform_1_f32(Some(&self.u_point_size), 1.0);
+
+            // --- Ground grid ---
+            let ox = room_offset[0];
+            let oy = room_offset[1];
+            let oz = room_offset[2];
+            let mut grid_verts = Vec::new();
+            let gx = room[0].ceil() as i32;
+            let gy = room[1].ceil() as i32;
+            for i in 0..=gx {
+                let v = i as f32 + ox;
+                grid_verts.extend_from_slice(&[v, oy, oz, v, room[1] + oy, oz]);
+            }
+            for i in 0..=gy {
+                let v = i as f32 + oy;
+                grid_verts.extend_from_slice(&[ox, v, oz, room[0] + ox, v, oz]);
+            }
+            gl.uniform_3_f32(Some(&self.u_color), 0.3, 0.3, 0.35);
+            upload_and_draw(gl, self.vbo, &grid_verts, glow::LINES);
+            gl.draw_arrays(glow::LINES, 0, grid_verts.len() as i32 / 3);
+
+            // --- Room box outline ---
+            let (x0, y0, z0) = (ox, oy, oz);
+            let (x1, y1, z1) = (room[0] + ox, room[1] + oy, room[2] + oz);
+            #[rustfmt::skip]
+            let box_verts = [
+                x0, y0, z0,  x1, y0, z0,
+                x1, y0, z0,  x1, y1, z0,
+                x1, y1, z0,  x0, y1, z0,
+                x0, y1, z0,  x0, y0, z0,
+                x0, y0, z1,  x1, y0, z1,
+                x1, y0, z1,  x1, y1, z1,
+                x1, y1, z1,  x0, y1, z1,
+                x0, y1, z1,  x0, y0, z1,
+                x0, y0, z0,  x0, y0, z1,
+                x1, y0, z0,  x1, y0, z1,
+                x1, y1, z0,  x1, y1, z1,
+                x0, y1, z0,  x0, y1, z1,
+            ];
+            gl.uniform_3_f32(Some(&self.u_color), 0.5, 0.5, 0.55);
+            upload_and_draw(gl, self.vbo, &box_verts, glow::LINES);
+            gl.draw_arrays(glow::LINES, 0, box_verts.len() as i32 / 3);
+
+            // --- Obstacles (opaque solid triangles + wireframe) ---
+            for (i, tris) in obstacle_triangles.iter().enumerate() {
+                if !tris.is_empty() {
+                    let is_selected = selected_type == 3 && selected_index == i as i32;
+                    let c = obstacle_colors.get(i).copied().unwrap_or([0.45, 0.45, 0.50]);
+                    if is_selected {
+                        gl.uniform_3_f32(Some(&self.u_color), (c[0] + 0.15).min(1.0), (c[1] + 0.15).min(1.0), (c[2] + 0.15).min(1.0));
+                    } else {
+                        gl.uniform_3_f32(Some(&self.u_color), c[0], c[1], c[2]);
+                    }
+                    gl.uniform_1_f32(Some(&self.u_alpha), 0.85);
+                    upload_and_draw(gl, self.vbo, tris, glow::TRIANGLES);
+                    gl.draw_arrays(glow::TRIANGLES, 0, tris.len() as i32 / 3);
+                }
+            }
+            // Wireframe edges on top
+            for (i, wire) in obstacle_wireframes.iter().enumerate() {
+                if !wire.is_empty() {
+                    let is_selected = selected_type == 3 && selected_index == i as i32;
+                    let c = obstacle_colors.get(i).copied().unwrap_or([0.45, 0.45, 0.50]);
+                    if is_selected {
+                        gl.uniform_3_f32(Some(&self.u_color), (c[0] + 0.3).min(1.0), (c[1] + 0.3).min(1.0), (c[2] + 0.3).min(1.0));
+                    } else {
+                        gl.uniform_3_f32(Some(&self.u_color), (c[0] + 0.2).min(1.0), (c[1] + 0.2).min(1.0), (c[2] + 0.2).min(1.0));
+                    }
+                    gl.uniform_1_f32(Some(&self.u_alpha), 1.0);
+                    upload_and_draw(gl, self.vbo, wire, glow::LINES);
+                    gl.draw_arrays(glow::LINES, 0, wire.len() as i32 / 3);
+                }
+            }
+            gl.uniform_1_f32(Some(&self.u_alpha), 1.0);
+
+            // --- Base station axes and FOV frustum ---
+            let horiz_half = (160.0_f32 / 2.0).to_radians();
+            let vert_half = (115.0_f32 / 2.0).to_radians();
+            let fov_len = 1.5_f32;
+
+            for (bs_i, (pos, rot)) in base_stations.iter().enumerate() {
+                let to_world = |lx: f32, ly: f32, lz: f32| -> [f32; 3] {
+                    [
+                        pos[0] + rot[0][0] * lx + rot[0][1] * ly + rot[0][2] * lz,
+                        pos[1] + rot[1][0] * lx + rot[1][1] * ly + rot[1][2] * lz,
+                        pos[2] + rot[2][0] * lx + rot[2][1] * ly + rot[2][2] * lz,
+                    ]
+                };
+
+                let axis_len = 0.5;
+                let origin = to_world(0.0, 0.0, 0.0);
+                let x_end = to_world(axis_len, 0.0, 0.0);
+                let y_end = to_world(0.0, axis_len, 0.0);
+                let z_end = to_world(0.0, 0.0, axis_len);
+
+                gl.uniform_3_f32(Some(&self.u_color), 0.94, 0.27, 0.27);
+                let line = [origin[0], origin[1], origin[2], x_end[0], x_end[1], x_end[2]];
+                upload_and_draw(gl, self.vbo, &line, glow::LINES);
+                gl.draw_arrays(glow::LINES, 0, 2);
+
+                gl.uniform_3_f32(Some(&self.u_color), 0.29, 0.85, 0.50);
+                let line = [origin[0], origin[1], origin[2], y_end[0], y_end[1], y_end[2]];
+                upload_and_draw(gl, self.vbo, &line, glow::LINES);
+                gl.draw_arrays(glow::LINES, 0, 2);
+
+                gl.uniform_3_f32(Some(&self.u_color), 0.38, 0.65, 0.98);
+                let line = [origin[0], origin[1], origin[2], z_end[0], z_end[1], z_end[2]];
+                upload_and_draw(gl, self.vbo, &line, glow::LINES);
+                gl.draw_arrays(glow::LINES, 0, 2);
+
+                // FOV frustum
+                let tan_h = horiz_half.tan();
+                let tan_v = vert_half.tan();
+                let corners = [
+                    (1.0, tan_h, tan_v),
+                    (1.0, -tan_h, tan_v),
+                    (1.0, -tan_h, -tan_v),
+                    (1.0, tan_h, -tan_v),
+                ];
+
+                gl.uniform_3_f32(Some(&self.u_color), 0.7, 0.4, 0.2);
+                let mut frustum_verts = Vec::new();
+                let mut far_points = Vec::new();
+                for (cx, cy, cz) in &corners {
+                    let len = (cx * cx + cy * cy + cz * cz).sqrt();
+                    let scale = fov_len / len;
+                    let far = to_world(cx * scale, cy * scale, cz * scale);
+                    frustum_verts.extend_from_slice(&[origin[0], origin[1], origin[2], far[0], far[1], far[2]]);
+                    far_points.push(far);
+                }
+                for i in 0..4 {
+                    let j = (i + 1) % 4;
+                    frustum_verts.extend_from_slice(&[
+                        far_points[i][0], far_points[i][1], far_points[i][2],
+                        far_points[j][0], far_points[j][1], far_points[j][2],
+                    ]);
+                }
+                upload_and_draw(gl, self.vbo, &frustum_verts, glow::LINES);
+                gl.draw_arrays(glow::LINES, 0, frustum_verts.len() as i32 / 3);
+
+                // BS point (highlighted if selected)
+                let is_selected = selected_type == 1 && selected_index == bs_i as i32;
+                if is_selected {
+                    gl.uniform_3_f32(Some(&self.u_color), 1.0, 0.5, 0.5);
+                    gl.uniform_1_f32(Some(&self.u_point_size), 12.0);
+                } else {
+                    gl.uniform_3_f32(Some(&self.u_color), 0.94, 0.27, 0.27);
+                    gl.uniform_1_f32(Some(&self.u_point_size), 8.0);
+                }
+                upload_and_draw(gl, self.vbo, &origin, glow::POINTS);
+                gl.draw_arrays(glow::POINTS, 0, 1);
+                gl.uniform_1_f32(Some(&self.u_point_size), 1.0);
+            }
+
+            // --- TDoA3 Anchors ---
+            for (ai, pos) in anchors.iter().enumerate() {
+                let is_selected = selected_type == 2 && selected_index == ai as i32;
+                if is_selected {
+                    gl.uniform_3_f32(Some(&self.u_color), 1.0, 1.0, 0.3);
+                    gl.uniform_1_f32(Some(&self.u_point_size), 12.0);
+                } else {
+                    gl.uniform_3_f32(Some(&self.u_color), 1.0, 0.85, 0.0);
+                    gl.uniform_1_f32(Some(&self.u_point_size), 8.0);
+                }
+                upload_and_draw(gl, self.vbo, pos, glow::POINTS);
+                gl.draw_arrays(glow::POINTS, 0, 1);
+            }
+            gl.uniform_1_f32(Some(&self.u_point_size), 1.0);
+
+            // --- Coverage voxels (transparent) ---
+            gl.depth_mask(false);
+            gl.enable(glow::BLEND);
+            gl.blend_func(glow::SRC_ALPHA, glow::ONE_MINUS_SRC_ALPHA);
+            gl.uniform_1_f32(Some(&self.u_point_size), 12.0);
+
+            // LH coverage voxels
+            if !lh_voxels.is_empty() {
+                let mut buckets: [Vec<f32>; 5] = Default::default();
+                for &(x, y, z, count) in lh_voxels {
+                    let idx = (count as usize).min(4);
+                    buckets[idx].push(x);
+                    buckets[idx].push(y);
+                    buckets[idx].push(z);
+                }
+
+                let has_coverage = (1..5).any(|i| !buckets[i].is_empty());
+                let colors: [[f32; 3]; 5] = [
+                    [0.9, 0.15, 0.15],
+                    [0.95, 0.8, 0.1],
+                    [0.2, 0.9, 0.35],
+                    [0.2, 0.9, 0.35],
+                    [0.2, 0.9, 0.35],
+                ];
+                let alphas: [f32; 5] = [0.06, 0.08, 0.08, 0.08, 0.08];
+
+                for (i, bucket) in buckets.iter().enumerate() {
+                    if bucket.is_empty() || !show_lh_coverage[i] {
+                        continue;
+                    }
+                    if i == 0 && !has_coverage {
+                        continue;
+                    }
+                    gl.uniform_3_f32(Some(&self.u_color), colors[i][0], colors[i][1], colors[i][2]);
+                    gl.uniform_1_f32(Some(&self.u_alpha), alphas[i]);
+                    upload_and_draw(gl, self.vbo, bucket, glow::POINTS);
+                    gl.draw_arrays(glow::POINTS, 0, bucket.len() as i32 / 3);
+                }
+            }
+
+            // TDoA3 GDOP voxels
+            if show_tdoa3_voxels && !tdoa3_voxels.is_empty() {
+                const N_GDOP_BUCKETS: usize = 16;
+                let mut buckets: Vec<Vec<f32>> = vec![Vec::new(); N_GDOP_BUCKETS];
+
+                let range = (max_scale - min_scale).max(0.001);
+                for &(x, y, z, gdop) in tdoa3_voxels {
+                    if gdop.is_finite() && gdop >= min_scale && gdop <= max_scale {
+                        let t = ((gdop - min_scale) / range).clamp(0.0, 1.0);
+                        let idx = ((t * N_GDOP_BUCKETS as f32) as usize).min(N_GDOP_BUCKETS - 1);
+                        buckets[idx].push(x);
+                        buckets[idx].push(y);
+                        buckets[idx].push(z);
+                    }
+                }
+
+                for (i, bucket) in buckets.iter().enumerate() {
+                    if bucket.is_empty() {
+                        continue;
+                    }
+                    let t = (i as f32 + 0.5) / N_GDOP_BUCKETS as f32;
+                    let (r, g, b) = gdop_color(t);
+                    gl.uniform_3_f32(Some(&self.u_color), r, g, b);
+                    gl.uniform_1_f32(Some(&self.u_alpha), 0.08);
+                    upload_and_draw(gl, self.vbo, bucket, glow::POINTS);
+                    gl.draw_arrays(glow::POINTS, 0, bucket.len() as i32 / 3);
+                }
+            }
+
+            gl.uniform_1_f32(Some(&self.u_alpha), 1.0);
+            gl.disable(glow::BLEND);
+            gl.depth_mask(true);
+
+            // --- Gizmo for selected object ---
+            if selected_index >= 0 {
+                gl.disable(glow::DEPTH_TEST);
+
+                // Determine position and what handles to show
+                let sel_pos: Option<[f32; 3]> = match selected_type {
+                    1 if (selected_index as usize) < base_stations.len() => {
+                        Some(base_stations[selected_index as usize].0)
+                    }
+                    2 if (selected_index as usize) < anchors.len() => {
+                        Some(anchors[selected_index as usize])
+                    }
+                    3 => None, // obstacle pos comes from obstacle_triangles center — handled below
+                    _ => None,
+                };
+
+                // For obstacles, compute center from first 3 vertices of triangles
+                let obstacle_pos = if selected_type == 3 {
+                    let oi = selected_index as usize;
+                    if oi < obstacle_triangles.len() && obstacle_triangles[oi].len() >= 3 {
+                        // Average all vertices to find center (not perfect but works)
+                        let tris = &obstacle_triangles[oi];
+                        let n_verts = tris.len() / 3;
+                        if n_verts > 0 {
+                            let (mut sx, mut sy, mut sz) = (0.0f32, 0.0f32, 0.0f32);
+                            for v in 0..n_verts {
+                                sx += tris[v * 3];
+                                sy += tris[v * 3 + 1];
+                                sz += tris[v * 3 + 2];
+                            }
+                            Some([sx / n_verts as f32, sy / n_verts as f32, sz / n_verts as f32])
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+
+                let pos = sel_pos.or(obstacle_pos);
+
+                if let Some(pos) = pos {
+                    // Translation handles (world-axis arrows)
+                    let axes: [([f32; 3], [f32; 3], i32); 3] = [
+                        ([GIZMO_TRANSLATE_LEN, 0.0, 0.0], [0.94, 0.27, 0.27], HANDLE_TRANSLATE_X),
+                        ([0.0, GIZMO_TRANSLATE_LEN, 0.0], [0.29, 0.85, 0.50], HANDLE_TRANSLATE_Y),
+                        ([0.0, 0.0, GIZMO_TRANSLATE_LEN], [0.38, 0.65, 0.98], HANDLE_TRANSLATE_Z),
+                    ];
+
+                    for (dir, color, handle_id) in &axes {
+                        let active = *handle_id == active_handle;
+                        let bright = if active { 1.0 } else { 0.7 };
+                        gl.uniform_3_f32(
+                            Some(&self.u_color),
+                            (color[0] * bright).min(1.0),
+                            (color[1] * bright).min(1.0),
+                            (color[2] * bright).min(1.0),
+                        );
+
+                        let end = [pos[0] + dir[0], pos[1] + dir[1], pos[2] + dir[2]];
+                        let line = [pos[0], pos[1], pos[2], end[0], end[1], end[2]];
+                        upload_and_draw(gl, self.vbo, &line, glow::LINES);
+                        gl.draw_arrays(glow::LINES, 0, 2);
+
+                        gl.uniform_1_f32(
+                            Some(&self.u_point_size),
+                            if active { 14.0 } else { 10.0 },
+                        );
+                        upload_and_draw(gl, self.vbo, &end, glow::POINTS);
+                        gl.draw_arrays(glow::POINTS, 0, 1);
+                    }
+
+                    // Azimuth/elevation arcs for BS
+                    if selected_type == 1 {
+                        let (_, rot) = &base_stations[selected_index as usize];
+                        let azimuth = rot[1][0].atan2(rot[0][0]);
+                        let elevation = (-rot[2][0]).asin();
+
+                        // Azimuth arc
+                        let az_active = active_handle == HANDLE_ROTATE_AZ;
+                        let az_color = if az_active { [1.0, 0.5, 1.0] } else { [0.8, 0.2, 0.8] };
+                        gl.uniform_3_f32(Some(&self.u_color), az_color[0], az_color[1], az_color[2]);
+                        let mut arc = Vec::with_capacity((GIZMO_ARC_STEPS + 1) * 3);
+                        for step in 0..=GIZMO_ARC_STEPS {
+                            let a = azimuth - GIZMO_ARC_SPAN
+                                + 2.0 * GIZMO_ARC_SPAN * step as f32 / GIZMO_ARC_STEPS as f32;
+                            arc.extend_from_slice(&[
+                                pos[0] + GIZMO_ROTATE_RADIUS * a.cos(),
+                                pos[1] + GIZMO_ROTATE_RADIUS * a.sin(),
+                                pos[2],
+                            ]);
+                        }
+                        upload_and_draw(gl, self.vbo, &arc, glow::LINE_STRIP);
+                        gl.draw_arrays(glow::LINE_STRIP, 0, arc.len() as i32 / 3);
+
+                        gl.uniform_1_f32(Some(&self.u_point_size), if az_active { 10.0 } else { 7.0 });
+                        upload_and_draw(gl, self.vbo, &arc[..3], glow::POINTS);
+                        gl.draw_arrays(glow::POINTS, 0, 1);
+                        let last = arc.len() - 3;
+                        upload_and_draw(gl, self.vbo, &arc[last..], glow::POINTS);
+                        gl.draw_arrays(glow::POINTS, 0, 1);
+
+                        // Elevation arc
+                        let el_active = active_handle == HANDLE_ROTATE_EL;
+                        let el_color = if el_active { [1.0, 0.8, 0.3] } else { [0.9, 0.6, 0.1] };
+                        gl.uniform_3_f32(Some(&self.u_color), el_color[0], el_color[1], el_color[2]);
+                        let mut arc = Vec::with_capacity((GIZMO_ARC_STEPS + 1) * 3);
+                        for step in 0..=GIZMO_ARC_STEPS {
+                            let e = elevation - GIZMO_ARC_SPAN
+                                + 2.0 * GIZMO_ARC_SPAN * step as f32 / GIZMO_ARC_STEPS as f32;
+                            arc.extend_from_slice(&[
+                                pos[0] + GIZMO_ROTATE_RADIUS * e.cos() * azimuth.cos(),
+                                pos[1] + GIZMO_ROTATE_RADIUS * e.cos() * azimuth.sin(),
+                                pos[2] - GIZMO_ROTATE_RADIUS * e.sin(),
+                            ]);
+                        }
+                        upload_and_draw(gl, self.vbo, &arc, glow::LINE_STRIP);
+                        gl.draw_arrays(glow::LINE_STRIP, 0, arc.len() as i32 / 3);
+
+                        gl.uniform_1_f32(Some(&self.u_point_size), if el_active { 10.0 } else { 7.0 });
+                        upload_and_draw(gl, self.vbo, &arc[..3], glow::POINTS);
+                        gl.draw_arrays(glow::POINTS, 0, 1);
+                        let last = arc.len() - 3;
+                        upload_and_draw(gl, self.vbo, &arc[last..], glow::POINTS);
+                        gl.draw_arrays(glow::POINTS, 0, 1);
+
+                        // Look direction line
+                        let look_len = 0.8_f32;
+                        let look_end = [
+                            pos[0] + rot[0][0] * look_len,
+                            pos[1] + rot[1][0] * look_len,
+                            pos[2] + rot[2][0] * look_len,
+                        ];
+                        gl.uniform_3_f32(Some(&self.u_color), 1.0, 1.0, 1.0);
+                        let line = [pos[0], pos[1], pos[2], look_end[0], look_end[1], look_end[2]];
+                        upload_and_draw(gl, self.vbo, &line, glow::LINES);
+                        gl.draw_arrays(glow::LINES, 0, 2);
+                    }
+
+                    // Yaw rotation arc for obstacles
+                    if selected_type == 3 {
+                        let yaw_active = active_handle == HANDLE_ROTATE_YAW;
+                        let yaw_color = if yaw_active { [1.0, 0.5, 1.0] } else { [0.8, 0.2, 0.8] };
+                        gl.uniform_3_f32(Some(&self.u_color), yaw_color[0], yaw_color[1], yaw_color[2]);
+                        let mut arc = Vec::with_capacity((GIZMO_ARC_STEPS + 1) * 3);
+                        for step in 0..=GIZMO_ARC_STEPS {
+                            let a = 2.0 * std::f32::consts::PI * step as f32 / GIZMO_ARC_STEPS as f32;
+                            arc.extend_from_slice(&[
+                                pos[0] + GIZMO_ROTATE_RADIUS * a.cos(),
+                                pos[1] + GIZMO_ROTATE_RADIUS * a.sin(),
+                                pos[2],
+                            ]);
+                        }
+                        upload_and_draw(gl, self.vbo, &arc, glow::LINE_STRIP);
+                        gl.draw_arrays(glow::LINE_STRIP, 0, arc.len() as i32 / 3);
+                    }
+                }
+
+                gl.enable(glow::DEPTH_TEST);
+            }
+
+            gl.use_program(None);
+            gl.disable(glow::DEPTH_TEST);
+            gl.viewport(saved_viewport[0], saved_viewport[1], saved_viewport[2], saved_viewport[3]);
+        }
+
+        let result = unsafe {
+            slint::BorrowedOpenGLTextureBuilder::new_gl_2d_rgba_texture(
+                self.next_texture.texture.0,
+                (self.next_texture.width, self.next_texture.height).into(),
+            )
+            .build()
+        };
+
+        std::mem::swap(&mut self.next_texture, &mut self.displayed_texture);
+        result
+    }
 }
 
 /// Map a normalised GDOP ratio `t` ∈ [0, 1] to an RGB colour.
@@ -1492,6 +1975,7 @@ pub const HANDLE_TRANSLATE_Y: i32 = 2;
 pub const HANDLE_TRANSLATE_Z: i32 = 3;
 pub const HANDLE_ROTATE_AZ: i32 = 4;
 pub const HANDLE_ROTATE_EL: i32 = 5;
+pub const HANDLE_ROTATE_YAW: i32 = 6;
 
 pub const GIZMO_TRANSLATE_LEN: f32 = 1.0;
 const GIZMO_ROTATE_RADIUS: f32 = 0.7;

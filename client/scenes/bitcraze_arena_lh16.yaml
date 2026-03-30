@@ -1,0 +1,100 @@
+room_x: 10.0
+room_y: 25.0
+room_z: 3.0
+resolution: 5.0
+center_origin: true
+receiver_fov_enabled: true
+tilt_compensation_enabled: true
+max_tilt_angle: 10.0
+max_bs_distance: 5.0
+show_coverage:
+- false
+- false
+- true
+- true
+- true
+room_offset:
+- 0.0
+- 7.0
+- 0.0
+base_stations:
+- x: -3.91439
+  y: 0.32913116
+  z: 3.088429
+  azimuth_deg: 4.6215343
+  elevation_deg: 48.801777
+- x: -0.5013254
+  y: -3.1855185
+  z: 3.104468
+  azimuth_deg: 86.47554
+  elevation_deg: 57.06454
+- x: 3.0098126
+  y: 0.24016249
+  z: 3.0522902
+  azimuth_deg: -171.40224
+  elevation_deg: 44.80207
+- x: -0.458478
+  y: 3.7606835
+  z: 3.0224693
+  azimuth_deg: -89.703545
+  elevation_deg: 43.74384
+- x: -3.907676
+  y: 3.7081208
+  z: 3.0934799
+  azimuth_deg: 3.5939667
+  elevation_deg: 46.82103
+- x: 2.938188
+  y: 3.7065363
+  z: 3.0603237
+  azimuth_deg: -173.80774
+  elevation_deg: 52.47631
+- x: -0.6147813
+  y: 1.6801915
+  z: 3.0441203
+  azimuth_deg: -26.603867
+  elevation_deg: 88.298195
+- x: -0.56223726
+  y: 5.096071
+  z: 3.1274376
+  azimuth_deg: 149.43123
+  elevation_deg: 88.49363
+- x: -4.33963
+  y: 7.335378
+  z: 3.0623872
+  azimuth_deg: 1.7868495
+  elevation_deg: 43.452026
+- x: 3.7134948
+  y: 7.176972
+  z: 3.1368275
+  azimuth_deg: 179.79446
+  elevation_deg: 42.255024
+- x: 3.7017171
+  y: 11.889486
+  z: 2.958427
+  azimuth_deg: -172.51749
+  elevation_deg: 29.580738
+- x: -5.0074553
+  y: 11.114558
+  z: 2.9409585
+  azimuth_deg: -3.2553804
+  elevation_deg: 32.735153
+- x: -0.075376995
+  y: 10.34397
+  z: 3.2135842
+  azimuth_deg: -166.11725
+  elevation_deg: 85.08777
+- x: -0.6338474
+  y: 13.481771
+  z: 3.2349095
+  azimuth_deg: -128.90352
+  elevation_deg: 88.30684
+- x: -4.7855988
+  y: 15.211821
+  z: 2.9964387
+  azimuth_deg: -21.819801
+  elevation_deg: 32.19504
+- x: 3.2586498
+  y: 14.734719
+  z: 3.0619612
+  azimuth_deg: 176.96236
+  elevation_deg: 40.615013

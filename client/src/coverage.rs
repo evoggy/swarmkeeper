@@ -71,6 +71,10 @@ pub struct CoverageResult {
 }
 
 impl CoverageResult {
+    pub fn new(resolution: f32, voxels: Vec<Vec<Vec<u8>>>) -> Self {
+        Self { resolution, voxels }
+    }
+
     pub fn coverage_ratio(&self, min_bs: u8) -> f32 {
         let mut count = 0u32;
         let mut total = 0u32;
@@ -291,6 +295,8 @@ pub struct Scene {
     #[serde(default = "default_max_dist")]
     pub max_bs_distance: f32,
     pub show_coverage: [bool; 5],
+    #[serde(default)]
+    pub room_offset: [f32; 3],
     base_stations: Vec<SceneBaseStation>,
 }
 
@@ -310,6 +316,7 @@ impl Scene {
         max_tilt_angle: f32,
         max_bs_distance: f32,
         show_coverage: [bool; 5],
+        room_offset: [f32; 3],
         base_stations: &[BaseStation],
     ) -> Self {
         Self {
@@ -323,6 +330,7 @@ impl Scene {
             max_tilt_angle,
             max_bs_distance,
             show_coverage,
+            room_offset,
             base_stations: base_stations
                 .iter()
                 .map(|bs| SceneBaseStation {

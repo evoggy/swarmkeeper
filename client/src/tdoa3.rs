@@ -96,6 +96,40 @@ impl GdopResult {
         }
     }
 
+    /// Statistics over finite voxels inside the convex hull for the given metric: `(min, max, mean)`.
+    pub fn stats_in_hull(&self, metric: usize, offset: [f32; 3], hull: &ConvexHull) -> (f32, f32, f32) {
+        let res = self.resolution;
+        let mut min = f32::INFINITY;
+        let mut max = 0.0f32;
+        let mut sum = 0.0f64;
+        let mut count = 0u32;
+        for (iz, plane) in self.voxels.iter().enumerate() {
+            for (iy, row) in plane.iter().enumerate() {
+                for (ix, v) in row.iter().enumerate() {
+                    let g = v[metric];
+                    if g.is_finite() {
+                        let p = [
+                            ix as f32 / res + offset[0],
+                            iy as f32 / res + offset[1],
+                            iz as f32 / res + offset[2],
+                        ];
+                        if hull.contains(&p) {
+                            min = min.min(g);
+                            max = max.max(g);
+                            sum += g as f64;
+                            count += 1;
+                        }
+                    }
+                }
+            }
+        }
+        if count == 0 {
+            (0.0, 0.0, 0.0)
+        } else {
+            (min, max, (sum / count as f64) as f32)
+        }
+    }
+
     /// Statistics over finite voxels for the given metric: `(min, max, mean)`.
     /// For pair count all voxels are finite.
     pub fn stats(&self, metric: usize) -> (f32, f32, f32) {

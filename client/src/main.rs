@@ -8,6 +8,7 @@ use tokio::sync::Mutex;
 mod coverage;
 mod lh_geo;
 mod lh_wizard;
+mod planning;
 mod renderer;
 mod tdoa3;
 
@@ -1041,16 +1042,12 @@ async fn main() {
 
             tokio::spawn(async move {
                 // Open file dialog
-                let path = tokio::task::spawn_blocking(|| {
-                    rfd::FileDialog::new()
-                        .add_filter("YAML", &["yaml", "yml"])
-                        .pick_file()
-                })
-                .await
-                .ok()
-                .flatten();
-
-                let Some(path) = path else { return };
+                let Some(handle) = rfd::AsyncFileDialog::new()
+                    .add_filter("YAML", &["yaml", "yml"])
+                    .pick_file()
+                    .await
+                else { return };
+                let path = handle.path().to_path_buf();
 
                 // Parse YAML
                 let contents = match std::fs::read_to_string(&path) {
@@ -1270,16 +1267,12 @@ async fn main() {
 
             tokio::spawn(async move {
                 // Open file dialog
-                let path = tokio::task::spawn_blocking(|| {
-                    rfd::FileDialog::new()
-                        .add_filter("YAML", &["yaml", "yml"])
-                        .pick_file()
-                })
-                .await
-                .ok()
-                .flatten();
-
-                let Some(path) = path else { return };
+                let Some(handle) = rfd::AsyncFileDialog::new()
+                    .add_filter("YAML", &["yaml", "yml"])
+                    .pick_file()
+                    .await
+                else { return };
+                let path = handle.path().to_path_buf();
 
                 // Parse trajectory
                 let contents = match std::fs::read_to_string(&path) {
@@ -2239,16 +2232,12 @@ async fn main() {
 
             tokio::spawn(async move {
                 // Open file dialog
-                let path = tokio::task::spawn_blocking(|| {
-                    rfd::FileDialog::new()
-                        .add_filter("YAML", &["yaml", "yml"])
-                        .pick_file()
-                })
-                .await
-                .ok()
-                .flatten();
-
-                let Some(path) = path else { return };
+                let Some(handle) = rfd::AsyncFileDialog::new()
+                    .add_filter("YAML", &["yaml", "yml"])
+                    .pick_file()
+                    .await
+                else { return };
+                let path = handle.path().to_path_buf();
 
                 // Parse trajectory
                 let contents = match std::fs::read_to_string(&path) {
@@ -3547,17 +3536,13 @@ async fn main() {
             let ui_weak = ui_weak.clone();
 
             tokio::spawn(async move {
-                // Open file dialog on blocking thread
-                let path = tokio::task::spawn_blocking(|| {
-                    rfd::FileDialog::new()
-                        .add_filter("YAML", &["yaml", "yml"])
-                        .pick_file()
-                })
-                .await
-                .ok()
-                .flatten();
-
-                let Some(path) = path else { return };
+                // Open file dialog
+                let Some(handle) = rfd::AsyncFileDialog::new()
+                    .add_filter("YAML", &["yaml", "yml"])
+                    .pick_file()
+                    .await
+                else { return };
+                let path = handle.path().to_path_buf();
 
                 // Parse the config
                 let config = match load_swarm_config(&path) {
@@ -3666,26 +3651,53 @@ async fn main() {
         drag_start_pos: [0.0; 3],
     }));
 
-    // Combined Coverage shared state
-    struct CombinedState {
-        lh_base_stations: Vec<coverage::BaseStation>,
+    // Planning shared state
+    struct PlanningState {
+        base_stations: Vec<coverage::BaseStation>,
+        anchors: Vec<tdoa3::Anchor>,
+        obstacles: Vec<planning::Obstacle>,
         lh_voxels: Vec<(f32, f32, f32, u8)>,
-        lh_bs_render_data: Vec<([f32; 3], [[f32; 3]; 3])>,
-        tdoa3_anchors: Vec<tdoa3::Anchor>,
         tdoa3_voxels: Vec<(f32, f32, f32, f32)>,
-        tdoa3_anchor_positions: Vec<[f32; 3]>,
+        tdoa3_gdop_result: Option<tdoa3::GdopResult>,
+        bs_render_data: Vec<([f32; 3], [[f32; 3]; 3])>,
+        anchor_positions: Vec<[f32; 3]>,
+        obstacle_triangles: Vec<Vec<f32>>,
+        obstacle_wireframes: Vec<Vec<f32>>,
+        obstacle_colors: Vec<[f32; 3]>,
         room: [f32; 3],
         room_offset: [f32; 3],
+        undo_stack: Vec<(Vec<coverage::BaseStation>, Vec<tdoa3::Anchor>, Vec<planning::Obstacle>)>,
     }
-    let combined_state = std::sync::Arc::new(std::sync::Mutex::new(CombinedState {
-        lh_base_stations: Vec::new(),
+    let planning_state = std::sync::Arc::new(std::sync::Mutex::new(PlanningState {
+        base_stations: Vec::new(),
+        anchors: Vec::new(),
+        obstacles: Vec::new(),
         lh_voxels: Vec::new(),
-        lh_bs_render_data: Vec::new(),
-        tdoa3_anchors: Vec::new(),
         tdoa3_voxels: Vec::new(),
-        tdoa3_anchor_positions: Vec::new(),
-        room: [10.0, 10.0, 3.0],
+        tdoa3_gdop_result: None,
+        bs_render_data: Vec::new(),
+        anchor_positions: Vec::new(),
+        obstacle_triangles: Vec::new(),
+        obstacle_wireframes: Vec::new(),
+        obstacle_colors: Vec::new(),
+        room: [8.0, 8.0, 3.0],
         room_offset: [0.0; 3],
+        undo_stack: Vec::new(),
+    }));
+
+    struct PlanningGizmoState {
+        drag_start_screen: [f32; 2],
+        drag_start_pos: [f32; 3],
+        drag_start_azimuth: f32,
+        drag_start_elevation: f32,
+        drag_start_yaw: f32,
+    }
+    let planning_gizmo_state = std::sync::Arc::new(std::sync::Mutex::new(PlanningGizmoState {
+        drag_start_screen: [0.0, 0.0],
+        drag_start_pos: [0.0; 3],
+        drag_start_azimuth: 0.0,
+        drag_start_elevation: 0.0,
+        drag_start_yaw: 0.0,
     }));
 
     // LH Wizard shared state
@@ -3698,13 +3710,13 @@ async fn main() {
         let trajectory_data = trajectory_data.clone();
         let coverage_state = coverage_state.clone();
         let tdoa3_state = tdoa3_state.clone();
-        let combined_state_render = combined_state.clone();
         let wizard_state_render = wizard_state.clone();
+        let planning_state_render = planning_state.clone();
         let mut scene_renderer: Option<renderer::Scene3DRenderer> = None;
         let mut coverage_renderer: Option<renderer::Scene3DRenderer> = None;
         let mut tdoa3_renderer: Option<renderer::Scene3DRenderer> = None;
         let mut wizard_renderer: Option<renderer::Scene3DRenderer> = None;
-        let mut combined_renderer: Option<renderer::Scene3DRenderer> = None;
+        let mut planning_renderer: Option<renderer::Scene3DRenderer> = None;
 
         ui.window()
             .set_rendering_notifier(move |state, graphics_api| {
@@ -3734,7 +3746,7 @@ async fn main() {
                             },
                             _ => return,
                         };
-                        let context5 = match graphics_api {
+                        let context6 = match graphics_api {
                             slint::GraphicsAPI::NativeOpenGL { get_proc_address } => unsafe {
                                 glow::Context::from_loader_function_cstr(|s| get_proc_address(s))
                             },
@@ -3744,7 +3756,7 @@ async fn main() {
                         coverage_renderer = Some(renderer::Scene3DRenderer::new(context2));
                         tdoa3_renderer = Some(renderer::Scene3DRenderer::new(context3));
                         wizard_renderer = Some(renderer::Scene3DRenderer::new(context4));
-                        combined_renderer = Some(renderer::Scene3DRenderer::new(context5));
+                        planning_renderer = Some(renderer::Scene3DRenderer::new(context6));
                     }
                     slint::RenderingState::BeforeRendering => {
                         if let (Some(renderer), Some(app)) =
@@ -4217,51 +4229,58 @@ async fn main() {
                                 }
                             }
 
-                            // --- Combined Coverage rendering ---
-                            if let Some(comb_renderer) = combined_renderer.as_mut() {
-                                let cw = app.get_combined_width() as u32;
-                                let ch = app.get_combined_height() as u32;
-                                if cw > 0 && ch > 0 {
-                                    let yaw = app.get_combined_cam_yaw();
-                                    let pitch = app.get_combined_cam_pitch();
-                                    let dist = app.get_combined_cam_distance();
-                                    let pan_x = app.get_combined_cam_pan_x();
-                                    let pan_y = app.get_combined_cam_pan_y();
+                            // --- Planning rendering ---
+                            if let Some(plan_renderer) = planning_renderer.as_mut() {
+                                let pw = app.get_planning_width() as u32;
+                                let ph = app.get_planning_height() as u32;
+                                if pw > 0 && ph > 0 {
+                                    let yaw = app.get_planning_cam_yaw();
+                                    let pitch = app.get_planning_cam_pitch();
+                                    let dist = app.get_planning_cam_distance();
+                                    let pan_x = app.get_planning_cam_pan_x();
+                                    let pan_y = app.get_planning_cam_pan_y();
 
-                                    let (room, room_offset, bs_render, lh_voxels, anchor_positions, tdoa3_voxels) = {
-                                        let cs = combined_state_render.lock().unwrap();
-                                        (cs.room, cs.room_offset, cs.lh_bs_render_data.clone(),
-                                         cs.lh_voxels.clone(), cs.tdoa3_anchor_positions.clone(),
-                                         cs.tdoa3_voxels.clone())
+                                    let (room, room_offset, bs_render, lh_voxels, anchor_positions, tdoa3_voxels, obstacle_tris, obstacle_wires, obstacle_cols) = {
+                                        let ps = planning_state_render.lock().unwrap();
+                                        (ps.room, ps.room_offset, ps.bs_render_data.clone(),
+                                         ps.lh_voxels.clone(), ps.anchor_positions.clone(),
+                                         ps.tdoa3_voxels.clone(),
+                                         ps.obstacle_triangles.clone(),
+                                         ps.obstacle_wireframes.clone(),
+                                         ps.obstacle_colors.clone())
                                     };
 
                                     let show_lh_coverage = [
-                                        app.get_combined_show_lh_coverage_0(),
-                                        app.get_combined_show_lh_coverage_1(),
-                                        app.get_combined_show_lh_coverage_2(),
-                                        app.get_combined_show_lh_coverage_3(),
-                                        app.get_combined_show_lh_coverage_4(),
+                                        app.get_planning_show_coverage_0(),
+                                        app.get_planning_show_coverage_1(),
+                                        app.get_planning_show_coverage_2(),
+                                        app.get_planning_show_coverage_3(),
+                                        app.get_planning_show_coverage_4(),
                                     ];
 
-                                    let tex = comb_renderer.render_combined(
-                                        cw, ch,
+                                    let tex = plan_renderer.render_planning(
+                                        pw, ph,
                                         yaw, pitch, dist, pan_x, pan_y,
                                         room, room_offset,
-                                        &bs_render, &lh_voxels, 160.0, 115.0,
+                                        &bs_render, &lh_voxels,
                                         &show_lh_coverage,
-                                        app.get_combined_show_lh_voxels(),
                                         &anchor_positions, &tdoa3_voxels,
-                                        app.get_combined_tdoa3_scale_min(),
-                                        app.get_combined_tdoa3_scale_max(),
-                                        app.get_combined_show_tdoa3_voxels(),
-                                        app.get_combined_show_tdoa3_uncovered(),
+                                        app.get_planning_tdoa3_scale_min(),
+                                        app.get_planning_tdoa3_scale_max(),
+                                        app.get_planning_show_tdoa3_voxels(),
+                                        &obstacle_tris,
+                                        &obstacle_wires,
+                                        &obstacle_cols,
+                                        app.get_planning_selected_type(),
+                                        app.get_planning_selected_index(),
+                                        app.get_planning_active_handle(),
                                     );
-                                    app.set_combined_texture(tex);
+                                    app.set_planning_texture(tex);
 
                                     // Grid labels
                                     let mvp = renderer::compute_mvp(
                                         yaw, pitch, dist, pan_x, pan_y,
-                                        cw as f32 / ch as f32,
+                                        pw as f32 / ph as f32,
                                     );
                                     let mut labels = Vec::new();
                                     let gx = room[0].ceil() as i32;
@@ -4272,7 +4291,7 @@ async fn main() {
                                     for i in 0..=gx {
                                         let wx = i as f32 + ox;
                                         if let Some((sx, sy)) = renderer::project_to_screen(
-                                            [wx, oy, oz], &mvp, cw, ch,
+                                            [wx, oy, oz], &mvp, pw, ph,
                                         ) {
                                             labels.push(VizLabel {
                                                 text: format!("{}", wx as i32).into(),
@@ -4284,7 +4303,7 @@ async fn main() {
                                     for i in 1..=gy {
                                         let wy = i as f32 + oy;
                                         if let Some((sx, sy)) = renderer::project_to_screen(
-                                            [ox, wy, oz], &mvp, cw, ch,
+                                            [ox, wy, oz], &mvp, pw, ph,
                                         ) {
                                             labels.push(VizLabel {
                                                 text: format!("{}", wy as i32).into(),
@@ -4293,7 +4312,7 @@ async fn main() {
                                             });
                                         }
                                     }
-                                    app.set_combined_grid_labels(
+                                    app.set_planning_grid_labels(
                                         slint::ModelRc::new(slint::VecModel::from(labels)),
                                     );
                                 }
@@ -4307,7 +4326,7 @@ async fn main() {
                         drop(coverage_renderer.take());
                         drop(tdoa3_renderer.take());
                         drop(wizard_renderer.take());
-                        drop(combined_renderer.take());
+                        drop(planning_renderer.take());
                     }
                     _ => {}
                 }
@@ -4768,47 +4787,51 @@ async fn main() {
         let uw = ui_weak.clone();
         ui.on_lh_cov_load_geometry(move || {
             let Some(ui) = uw.upgrade() else { return };
-            let Some(path) = rfd::FileDialog::new()
-                .add_filter("YAML", &["yaml", "yml"])
-                .pick_file()
-            else {
-                return;
-            };
+            let uw2 = ui.as_weak();
+            let cs = cs.clone();
+            slint::spawn_local(async move {
+                let Some(handle) = rfd::AsyncFileDialog::new()
+                    .add_filter("YAML", &["yaml", "yml"])
+                    .pick_file().await
+                else { return };
+                let path = handle.path().to_path_buf();
+                let Some(ui) = uw2.upgrade() else { return };
 
-            match coverage::load_geometry_yaml(&path) {
-                Ok(stations) => {
-                    let mut cs = cs.lock().unwrap();
-                    cs.base_stations = stations;
-                    cs.bs_render_data = cs
-                        .base_stations
-                        .iter()
-                        .map(|bs| (bs.pos, bs.rotation_matrix()))
-                        .collect();
-                    // Clear previous coverage
-                    cs.voxels.clear();
+                match coverage::load_geometry_yaml(&path) {
+                    Ok(stations) => {
+                        let mut cs = cs.lock().unwrap();
+                        cs.base_stations = stations;
+                        cs.bs_render_data = cs
+                            .base_stations
+                            .iter()
+                            .map(|bs| (bs.pos, bs.rotation_matrix()))
+                            .collect();
+                        // Clear previous coverage
+                        cs.voxels.clear();
 
-                    let model: Vec<LhBaseStationData> = cs
-                        .base_stations
-                        .iter()
-                        .map(|bs| LhBaseStationData {
-                            x: format!("{:.2}", bs.pos[0]).into(),
-                            y: format!("{:.2}", bs.pos[1]).into(),
-                            z: format!("{:.2}", bs.pos[2]).into(),
-                            azimuth: format!("{:.1}", bs.azimuth_deg).into(),
-                            elevation: format!("{:.1}", bs.elevation_deg).into(),
-                        })
-                        .collect();
-                    ui.set_lh_cov_base_stations(slint::ModelRc::new(slint::VecModel::from(
-                        model,
-                    )));
-                    ui.set_lh_cov_coverage_1_text("".into());
-                    ui.set_lh_cov_coverage_2_text("".into());
-                    ui.set_lh_cov_selected_bs(-1);
+                        let model: Vec<LhBaseStationData> = cs
+                            .base_stations
+                            .iter()
+                            .map(|bs| LhBaseStationData {
+                                x: format!("{:.2}", bs.pos[0]).into(),
+                                y: format!("{:.2}", bs.pos[1]).into(),
+                                z: format!("{:.2}", bs.pos[2]).into(),
+                                azimuth: format!("{:.1}", bs.azimuth_deg).into(),
+                                elevation: format!("{:.1}", bs.elevation_deg).into(),
+                            })
+                            .collect();
+                        ui.set_lh_cov_base_stations(slint::ModelRc::new(slint::VecModel::from(
+                            model,
+                        )));
+                        ui.set_lh_cov_coverage_1_text("".into());
+                        ui.set_lh_cov_coverage_2_text("".into());
+                        ui.set_lh_cov_selected_bs(-1);
+                    }
+                    Err(e) => {
+                        eprintln!("Failed to load geometry: {}", e);
+                    }
                 }
-                Err(e) => {
-                    eprintln!("Failed to load geometry: {}", e);
-                }
-            }
+            }).unwrap();
         });
 
         // Save scene
@@ -4816,36 +4839,46 @@ async fn main() {
         let uw = ui_weak.clone();
         ui.on_lh_cov_save_scene(move || {
             let Some(ui) = uw.upgrade() else { return };
-            let Some(path) = rfd::FileDialog::new()
-                .add_filter("YAML", &["yaml", "yml"])
-                .set_file_name("lh_coverage.yaml")
-                .save_file()
-            else {
-                return;
-            };
-            let cs = cs.lock().unwrap();
-            let scene = coverage::Scene::new(
-                ui.get_lh_cov_room_x().parse().unwrap_or(8.0),
-                ui.get_lh_cov_room_y().parse().unwrap_or(8.0),
-                ui.get_lh_cov_room_z().parse().unwrap_or(3.0),
-                ui.get_lh_cov_resolution().parse().unwrap_or(5.0),
-                ui.get_lh_cov_center_origin(),
-                ui.get_lh_cov_receiver_fov_enabled(),
-                ui.get_lh_cov_tilt_compensation_enabled(),
-                ui.get_lh_cov_max_tilt_angle().parse().unwrap_or(10.0),
-                ui.get_lh_cov_max_bs_distance().parse().unwrap_or(5.0),
-                [
-                    ui.get_lh_cov_show_coverage_0(),
-                    ui.get_lh_cov_show_coverage_1(),
-                    ui.get_lh_cov_show_coverage_2(),
-                    ui.get_lh_cov_show_coverage_3(),
-                    ui.get_lh_cov_show_coverage_4(),
-                ],
-                &cs.base_stations,
-            );
-            if let Err(e) = coverage::save_scene(&path, &scene) {
-                eprintln!("Failed to save scene: {}", e);
-            }
+            let uw2 = ui.as_weak();
+            let cs = cs.clone();
+            slint::spawn_local(async move {
+                let Some(handle) = rfd::AsyncFileDialog::new()
+                    .add_filter("YAML", &["yaml", "yml"])
+                    .set_file_name("lh_coverage.yaml")
+                    .save_file().await
+                else { return };
+                let path = handle.path().to_path_buf();
+                let Some(ui) = uw2.upgrade() else { return };
+
+                let cs = cs.lock().unwrap();
+                let scene = coverage::Scene::new(
+                    ui.get_lh_cov_room_x().parse().unwrap_or(8.0),
+                    ui.get_lh_cov_room_y().parse().unwrap_or(8.0),
+                    ui.get_lh_cov_room_z().parse().unwrap_or(3.0),
+                    ui.get_lh_cov_resolution().parse().unwrap_or(5.0),
+                    ui.get_lh_cov_center_origin(),
+                    ui.get_lh_cov_receiver_fov_enabled(),
+                    ui.get_lh_cov_tilt_compensation_enabled(),
+                    ui.get_lh_cov_max_tilt_angle().parse().unwrap_or(10.0),
+                    ui.get_lh_cov_max_bs_distance().parse().unwrap_or(5.0),
+                    [
+                        ui.get_lh_cov_show_coverage_0(),
+                        ui.get_lh_cov_show_coverage_1(),
+                        ui.get_lh_cov_show_coverage_2(),
+                        ui.get_lh_cov_show_coverage_3(),
+                        ui.get_lh_cov_show_coverage_4(),
+                    ],
+                    [
+                        ui.get_lh_cov_room_offset_x().parse().unwrap_or(0.0),
+                        ui.get_lh_cov_room_offset_y().parse().unwrap_or(0.0),
+                        ui.get_lh_cov_room_offset_z().parse().unwrap_or(0.0),
+                    ],
+                    &cs.base_stations,
+                );
+                if let Err(e) = coverage::save_scene(&path, &scene) {
+                    eprintln!("Failed to save scene: {}", e);
+                }
+            }).unwrap();
         });
 
         // Load scene
@@ -4853,61 +4886,72 @@ async fn main() {
         let uw = ui_weak.clone();
         ui.on_lh_cov_load_scene(move || {
             let Some(ui) = uw.upgrade() else { return };
-            let Some(path) = rfd::FileDialog::new()
-                .add_filter("YAML", &["yaml", "yml"])
-                .pick_file()
-            else {
-                return;
-            };
-            match coverage::load_scene(&path) {
-                Ok(scene) => {
-                    let mut cs = cs.lock().unwrap();
-                    cs.base_stations = scene.base_stations();
-                    cs.bs_render_data = cs
-                        .base_stations
-                        .iter()
-                        .map(|bs| (bs.pos, bs.rotation_matrix()))
-                        .collect();
-                    cs.voxels.clear();
-                    cs.undo_stack.clear();
+            let uw2 = ui.as_weak();
+            let cs = cs.clone();
+            slint::spawn_local(async move {
+                let Some(handle) = rfd::AsyncFileDialog::new()
+                    .add_filter("YAML", &["yaml", "yml"])
+                    .pick_file().await
+                else { return };
+                let path = handle.path().to_path_buf();
+                let Some(ui) = uw2.upgrade() else { return };
 
-                    ui.set_lh_cov_room_x(format!("{}", scene.room_x).into());
-                    ui.set_lh_cov_room_y(format!("{}", scene.room_y).into());
-                    ui.set_lh_cov_room_z(format!("{}", scene.room_z).into());
-                    ui.set_lh_cov_resolution(format!("{}", scene.resolution).into());
-                    ui.set_lh_cov_center_origin(scene.center_origin);
-                    ui.set_lh_cov_receiver_fov_enabled(scene.receiver_fov_enabled);
-                    ui.set_lh_cov_tilt_compensation_enabled(scene.tilt_compensation_enabled);
-                    ui.set_lh_cov_max_tilt_angle(format!("{}", scene.max_tilt_angle).into());
-                    ui.set_lh_cov_max_bs_distance(format!("{}", scene.max_bs_distance).into());
-                    ui.set_lh_cov_show_coverage_0(scene.show_coverage[0]);
-                    ui.set_lh_cov_show_coverage_1(scene.show_coverage[1]);
-                    ui.set_lh_cov_show_coverage_2(scene.show_coverage[2]);
-                    ui.set_lh_cov_show_coverage_3(scene.show_coverage[3]);
-                    ui.set_lh_cov_show_coverage_4(scene.show_coverage[4]);
+                match coverage::load_scene(&path) {
+                    Ok(scene) => {
+                        let mut cs = cs.lock().unwrap();
+                        cs.base_stations = scene.base_stations();
+                        cs.bs_render_data = cs
+                            .base_stations
+                            .iter()
+                            .map(|bs| (bs.pos, bs.rotation_matrix()))
+                            .collect();
+                        cs.voxels.clear();
+                        cs.undo_stack.clear();
 
-                    let model: Vec<LhBaseStationData> = cs
-                        .base_stations
-                        .iter()
-                        .map(|bs| LhBaseStationData {
-                            x: format!("{:.2}", bs.pos[0]).into(),
-                            y: format!("{:.2}", bs.pos[1]).into(),
-                            z: format!("{:.2}", bs.pos[2]).into(),
-                            azimuth: format!("{:.1}", bs.azimuth_deg).into(),
-                            elevation: format!("{:.1}", bs.elevation_deg).into(),
-                        })
-                        .collect();
-                    ui.set_lh_cov_base_stations(slint::ModelRc::new(slint::VecModel::from(
-                        model,
-                    )));
-                    ui.set_lh_cov_coverage_1_text("".into());
-                    ui.set_lh_cov_coverage_2_text("".into());
-                    ui.set_lh_cov_selected_bs(-1);
+                        ui.set_lh_cov_room_x(format!("{}", scene.room_x).into());
+                        ui.set_lh_cov_room_y(format!("{}", scene.room_y).into());
+                        ui.set_lh_cov_room_z(format!("{}", scene.room_z).into());
+                        ui.set_lh_cov_resolution(format!("{}", scene.resolution).into());
+                        ui.set_lh_cov_center_origin(scene.center_origin);
+                        ui.set_lh_cov_receiver_fov_enabled(scene.receiver_fov_enabled);
+                        ui.set_lh_cov_tilt_compensation_enabled(scene.tilt_compensation_enabled);
+                        ui.set_lh_cov_max_tilt_angle(format!("{}", scene.max_tilt_angle).into());
+                        ui.set_lh_cov_max_bs_distance(format!("{}", scene.max_bs_distance).into());
+                        ui.set_lh_cov_show_coverage_0(scene.show_coverage[0]);
+                        ui.set_lh_cov_show_coverage_1(scene.show_coverage[1]);
+                        ui.set_lh_cov_show_coverage_2(scene.show_coverage[2]);
+                        ui.set_lh_cov_show_coverage_3(scene.show_coverage[3]);
+                        ui.set_lh_cov_show_coverage_4(scene.show_coverage[4]);
+                        ui.set_lh_cov_room_offset_x(format!("{}", scene.room_offset[0]).into());
+                        ui.set_lh_cov_room_offset_y(format!("{}", scene.room_offset[1]).into());
+                        ui.set_lh_cov_room_offset_z(format!("{}", scene.room_offset[2]).into());
+
+                        let model: Vec<LhBaseStationData> = cs
+                            .base_stations
+                            .iter()
+                            .map(|bs| LhBaseStationData {
+                                x: format!("{:.2}", bs.pos[0]).into(),
+                                y: format!("{:.2}", bs.pos[1]).into(),
+                                z: format!("{:.2}", bs.pos[2]).into(),
+                                azimuth: format!("{:.1}", bs.azimuth_deg).into(),
+                                elevation: format!("{:.1}", bs.elevation_deg).into(),
+                            })
+                            .collect();
+                        ui.set_lh_cov_base_stations(slint::ModelRc::new(slint::VecModel::from(
+                            model,
+                        )));
+                        ui.set_lh_cov_coverage_1_text("".into());
+                        ui.set_lh_cov_coverage_2_text("".into());
+                        ui.set_lh_cov_selected_bs(-1);
+
+                        drop(cs);
+                        ui.invoke_lh_cov_recompute();
+                    }
+                    Err(e) => {
+                        eprintln!("Failed to load scene: {}", e);
+                    }
                 }
-                Err(e) => {
-                    eprintln!("Failed to load scene: {}", e);
-                }
-            }
+            }).unwrap();
         });
 
         // Undo last BS movement
@@ -5016,10 +5060,13 @@ async fn main() {
             let resolution: f32 = ui.get_lh_cov_resolution().parse().unwrap_or(2.0);
             let center = ui.get_lh_cov_center_origin();
 
+            let user_offset_x: f32 = ui.get_lh_cov_room_offset_x().parse().unwrap_or(0.0);
+            let user_offset_y: f32 = ui.get_lh_cov_room_offset_y().parse().unwrap_or(0.0);
+            let user_offset_z: f32 = ui.get_lh_cov_room_offset_z().parse().unwrap_or(0.0);
             let offset = if center {
-                [-room_x / 2.0, -room_y / 2.0, 0.0]
+                [-room_x / 2.0 + user_offset_x, -room_y / 2.0 + user_offset_y, user_offset_z]
             } else {
-                [0.0, 0.0, 0.0]
+                [user_offset_x, user_offset_y, user_offset_z]
             };
 
             let mut cs = cs.lock().unwrap();
@@ -5072,10 +5119,17 @@ async fn main() {
         let uw = ui_weak.clone();
         ui.on_lh_cov_load_trajectories(move || {
             let Some(ui) = uw.upgrade() else { return };
-            let dialog = rfd::FileDialog::new()
-                .add_filter("CSV files", &["csv"])
-                .set_title("Load Trajectories CSV");
-            if let Some(path) = dialog.pick_file() {
+            let uw2 = ui.as_weak();
+            let cs = cs.clone();
+            slint::spawn_local(async move {
+                let Some(handle) = rfd::AsyncFileDialog::new()
+                    .add_filter("CSV files", &["csv"])
+                    .set_title("Load Trajectories CSV")
+                    .pick_file().await
+                else { return };
+                let path = handle.path().to_path_buf();
+                let Some(ui) = uw2.upgrade() else { return };
+
                 match coverage::load_trajectories_csv(&path) {
                     Ok(trajectories) => {
                         let n_cfs = trajectories.len();
@@ -5091,7 +5145,7 @@ async fn main() {
                         );
                     }
                 }
-            }
+            }).unwrap();
         });
 
         // --- Gizmo mouse interaction callbacks ---
@@ -5293,7 +5347,7 @@ async fn main() {
         let uw = ui_weak.clone();
         ui.on_tdoa3_save_scene(move || {
             let Some(ui) = uw.upgrade() else { return };
-            let ts = ts.lock().unwrap();
+            let ts_lock = ts.lock().unwrap();
             let scene = tdoa3::Tdoa3Scene::new(
                 ui.get_tdoa3_room_x().parse().unwrap_or(10.0),
                 ui.get_tdoa3_room_y().parse().unwrap_or(10.0),
@@ -5303,18 +5357,21 @@ async fn main() {
                 ui.get_tdoa3_max_range().parse().unwrap_or(15.0),
                 ui.get_tdoa3_scale_max_value(),
                 ui.get_tdoa3_show_outside_hull(),
-                &ts.anchors,
+                &ts_lock.anchors,
             );
-            drop(ts);
-            if let Some(path) = rfd::FileDialog::new()
-                .set_title("Save TDoA3 Scene")
-                .add_filter("YAML", &["yaml", "yml"])
-                .save_file()
-            {
+            drop(ts_lock);
+            slint::spawn_local(async move {
+                let Some(handle) = rfd::AsyncFileDialog::new()
+                    .set_title("Save TDoA3 Scene")
+                    .add_filter("YAML", &["yaml", "yml"])
+                    .save_file().await
+                else { return };
+                let path = handle.path().to_path_buf();
+
                 if let Err(e) = tdoa3::save_scene(&path, &scene) {
                     eprintln!("Save error: {}", e);
                 }
-            }
+            }).unwrap();
         });
 
         // Load scene
@@ -5322,34 +5379,39 @@ async fn main() {
         let uw = ui_weak.clone();
         ui.on_tdoa3_load_scene(move || {
             let Some(ui) = uw.upgrade() else { return };
-            let Some(path) = rfd::FileDialog::new()
-                .set_title("Open TDoA3 Scene")
-                .add_filter("YAML", &["yaml", "yml"])
-                .pick_file()
-            else {
-                return;
-            };
-            match tdoa3::load_scene(&path) {
-                Ok(scene) => {
-                    let mut ts = ts.lock().unwrap();
-                    ts.anchors = scene.anchors();
-                    update_anchor_ui_model(&ui, &ts.anchors);
-                    ui.set_tdoa3_room_x(format!("{}", scene.room_x).into());
-                    ui.set_tdoa3_room_y(format!("{}", scene.room_y).into());
-                    ui.set_tdoa3_room_z(format!("{}", scene.room_z).into());
-                    ui.set_tdoa3_resolution(format!("{}", scene.resolution).into());
-                    ui.set_tdoa3_center_origin(scene.center_origin);
-                    ui.set_tdoa3_max_range(format!("{}", scene.max_range).into());
-                    ui.set_tdoa3_metric_index(DISP_GDOP as i32);
-                    ui.set_tdoa3_scale_limit(2.0);
-                    ui.set_tdoa3_scale_min_value(0.0);
-                    ui.set_tdoa3_scale_max_value(0.5);
-                    ui.set_tdoa3_show_outside_hull(scene.show_uncovered);
-                    drop(ts);
-                    ui.invoke_tdoa3_recompute();
+            let uw2 = ui.as_weak();
+            let ts = ts.clone();
+            slint::spawn_local(async move {
+                let Some(handle) = rfd::AsyncFileDialog::new()
+                    .set_title("Open TDoA3 Scene")
+                    .add_filter("YAML", &["yaml", "yml"])
+                    .pick_file().await
+                else { return };
+                let path = handle.path().to_path_buf();
+                let Some(ui) = uw2.upgrade() else { return };
+
+                match tdoa3::load_scene(&path) {
+                    Ok(scene) => {
+                        let mut ts = ts.lock().unwrap();
+                        ts.anchors = scene.anchors();
+                        update_anchor_ui_model(&ui, &ts.anchors);
+                        ui.set_tdoa3_room_x(format!("{}", scene.room_x).into());
+                        ui.set_tdoa3_room_y(format!("{}", scene.room_y).into());
+                        ui.set_tdoa3_room_z(format!("{}", scene.room_z).into());
+                        ui.set_tdoa3_resolution(format!("{}", scene.resolution).into());
+                        ui.set_tdoa3_center_origin(scene.center_origin);
+                        ui.set_tdoa3_max_range(format!("{}", scene.max_range).into());
+                        ui.set_tdoa3_metric_index(DISP_GDOP as i32);
+                        ui.set_tdoa3_scale_limit(2.0);
+                        ui.set_tdoa3_scale_min_value(0.0);
+                        ui.set_tdoa3_scale_max_value(0.5);
+                        ui.set_tdoa3_show_outside_hull(scene.show_uncovered);
+                        drop(ts);
+                        ui.invoke_tdoa3_recompute();
+                    }
+                    Err(e) => eprintln!("Load error: {}", e),
                 }
-                Err(e) => eprintln!("Load error: {}", e),
-            }
+            }).unwrap();
         });
 
         // Add anchor
@@ -5465,7 +5527,7 @@ async fn main() {
             let Some(result) = &ts.gdop_result else { return };
 
             // Map display metric to storage metric + optional σ multiplier
-            let sigma: f32 = ui.get_tdoa3_measurement_noise().parse().unwrap_or(0.10);
+            let sigma: f32 = ui.get_tdoa3_measurement_noise().parse().unwrap_or(0.15);
             let (storage_metric, metric_name, sigma_mult) = match display_metric {
                 DISP_GDOP => (tdoa3::METRIC_GDOP, "GDOP", 1.0),
                 DISP_HDOP => (tdoa3::METRIC_HDOP, "HDOP", 1.0),
@@ -5951,152 +6013,1118 @@ async fn main() {
         });
     }
 
-    // Combined Coverage callbacks
+    // Planning callbacks
     {
         let ui_weak = ui.as_weak();
-        let cs = combined_state.clone();
+
+        // Load LH Scene into planning (imports base stations)
+        let ps = planning_state.clone();
         let uw = ui_weak.clone();
-        ui.on_combined_load_lh_scene(move || {
+        ui.on_planning_load_lh_scene(move || {
             let Some(ui) = uw.upgrade() else { return };
-            let Some(path) = rfd::FileDialog::new()
-                .set_title("Open LH Scene for Combined View")
-                .add_filter("YAML", &["yaml", "yml"])
-                .pick_file()
-            else {
-                return;
-            };
-            match coverage::load_scene(&path) {
-                Ok(scene) => {
-                    let mut cs = cs.lock().unwrap();
-                    cs.lh_base_stations = scene.base_stations();
+            let uw2 = ui.as_weak();
+            let ps = ps.clone();
+            slint::spawn_local(async move {
+                let Some(handle) = rfd::AsyncFileDialog::new()
+                    .set_title("Import LH Scene")
+                    .add_filter("YAML", &["yaml", "yml"])
+                    .set_directory(std::env::current_dir().unwrap_or_default())
+                    .pick_file().await
+                else { return };
+                let path = handle.path().to_path_buf();
+                let Some(ui) = uw2.upgrade() else { return };
 
-                    // Use the LH scene room dimensions (take max with existing if TDoA3 already loaded)
-                    let lh_room = [scene.room_x, scene.room_y, scene.room_z];
-                    cs.room = [
-                        cs.room[0].max(lh_room[0]),
-                        cs.room[1].max(lh_room[1]),
-                        cs.room[2].max(lh_room[2]),
-                    ];
-                    let center = scene.center_origin;
-                    cs.room_offset = if center {
-                        [-cs.room[0] / 2.0, -cs.room[1] / 2.0, 0.0]
-                    } else {
-                        [0.0, 0.0, 0.0]
-                    };
+                match coverage::load_scene(&path) {
+                    Ok(scene) => {
+                        let mut pstate = ps.lock().unwrap();
+                        pstate.base_stations = scene.base_stations();
+                        rebuild_bs_render_data(&mut pstate);
 
-                    // Compute LH coverage
-                    let receiver_fov = if scene.receiver_fov_enabled { Some(170.0_f32) } else { None };
-                    let tilt_reduction = if scene.tilt_compensation_enabled { Some(scene.max_tilt_angle) } else { None };
-                    let result = coverage::compute_coverage(
-                        cs.room[0], cs.room[1], cs.room[2],
-                        scene.resolution,
-                        &cs.lh_base_stations,
-                        160.0, 115.0,
-                        receiver_fov,
-                        tilt_reduction,
-                        scene.max_bs_distance,
-                        cs.room_offset,
-                    );
-                    cs.lh_voxels = result.iter_voxels(cs.room_offset).collect();
+                        // Update room dimensions to match
+                        ui.set_planning_room_x(format!("{}", scene.room_x).into());
+                        ui.set_planning_room_y(format!("{}", scene.room_y).into());
+                        ui.set_planning_room_z(format!("{}", scene.room_z).into());
+                        ui.set_planning_center_origin(scene.center_origin);
+                        ui.set_planning_receiver_fov_enabled(scene.receiver_fov_enabled);
+                        ui.set_planning_max_bs_distance(format!("{}", scene.max_bs_distance).into());
 
-                    // Build render data
-                    cs.lh_bs_render_data = cs.lh_base_stations
-                        .iter()
-                        .map(|bs| (bs.pos, bs.rotation_matrix()))
-                        .collect();
+                        let bs_model: Vec<LhBaseStationData> = pstate.base_stations.iter().map(|bs| LhBaseStationData {
+                            x: format!("{:.2}", bs.pos[0]).into(),
+                            y: format!("{:.2}", bs.pos[1]).into(),
+                            z: format!("{:.2}", bs.pos[2]).into(),
+                            azimuth: format!("{:.1}", bs.azimuth_deg).into(),
+                            elevation: format!("{:.1}", bs.elevation_deg).into(),
+                        }).collect();
+                        ui.set_planning_base_stations(slint::ModelRc::new(slint::VecModel::from(bs_model)));
+                    }
+                    Err(e) => eprintln!("Load LH scene error: {}", e),
+                }
+            }).unwrap();
+        });
 
-                    ui.set_combined_lh_bs_count(cs.lh_base_stations.len() as i32);
+        // Load TDoA3 Scene into planning (imports anchors)
+        let ps = planning_state.clone();
+        let uw = ui_weak.clone();
+        ui.on_planning_load_tdoa3_scene(move || {
+            let Some(ui) = uw.upgrade() else { return };
+            let uw2 = ui.as_weak();
+            let ps = ps.clone();
+            slint::spawn_local(async move {
+                let Some(handle) = rfd::AsyncFileDialog::new()
+                    .set_title("Import TDoA3 Scene")
+                    .add_filter("YAML", &["yaml", "yml"])
+                    .set_directory(std::env::current_dir().unwrap_or_default())
+                    .pick_file().await
+                else { return };
+                let path = handle.path().to_path_buf();
+                let Some(ui) = uw2.upgrade() else { return };
 
-                    // Update stats
-                    let total = cs.lh_voxels.len() as f32;
-                    if total > 0.0 {
-                        let covered_1 = cs.lh_voxels.iter().filter(|v| v.3 >= 1).count() as f32;
-                        let covered_2 = cs.lh_voxels.iter().filter(|v| v.3 >= 2).count() as f32;
-                        ui.set_combined_stats_text_1(
-                            format!(
-                                "LH: ≥1 BS {:.1}%  ≥2 BS {:.1}%",
-                                covered_1 / total * 100.0,
-                                covered_2 / total * 100.0,
-                            ).into(),
-                        );
+                match tdoa3::load_scene(&path) {
+                    Ok(scene) => {
+                        let mut pstate = ps.lock().unwrap();
+                        pstate.anchors = scene.anchors();
+                        rebuild_anchor_positions(&mut pstate);
+
+                        // Update room dimensions and range
+                        ui.set_planning_room_x(format!("{}", scene.room_x).into());
+                        ui.set_planning_room_y(format!("{}", scene.room_y).into());
+                        ui.set_planning_room_z(format!("{}", scene.room_z).into());
+                        ui.set_planning_center_origin(scene.center_origin);
+                        ui.set_planning_max_range(format!("{}", scene.max_range).into());
+
+                        let anchor_model: Vec<Tdoa3AnchorData> = pstate.anchors.iter().map(|a| Tdoa3AnchorData {
+                            x: format!("{:.2}", a.pos[0]).into(),
+                            y: format!("{:.2}", a.pos[1]).into(),
+                            z: format!("{:.2}", a.pos[2]).into(),
+                        }).collect();
+                        ui.set_planning_anchors(slint::ModelRc::new(slint::VecModel::from(anchor_model)));
+                    }
+                    Err(e) => eprintln!("Load TDoA3 scene error: {}", e),
+                }
+            }).unwrap();
+        });
+
+        // Helper: rebuild obstacle meshes in state
+        fn rebuild_obstacle_meshes(ps: &mut PlanningState) {
+            ps.obstacle_triangles = ps.obstacles.iter().map(|o| o.triangulate()).collect();
+            ps.obstacle_wireframes = ps.obstacles.iter().map(|o| o.wireframe()).collect();
+            ps.obstacle_colors = ps.obstacles.iter().map(|o| o.color).collect();
+        }
+
+        // Map error metric index to DOP metric and name
+        fn error_metric_to_dop(idx: i32) -> (usize, &'static str) {
+            match idx {
+                1 => (tdoa3::METRIC_HDOP, "HERR"),
+                2 => (tdoa3::METRIC_VDOP, "VERR"),
+                _ => (tdoa3::METRIC_GDOP, "GERR"),
+            }
+        }
+
+        // Extract tdoa3 voxels for the selected error metric, scaled by sigma
+        fn extract_tdoa3_voxels(ps: &mut PlanningState, metric_idx: i32, sigma: f32) {
+            if let Some(ref result) = ps.tdoa3_gdop_result {
+                let (dop_metric, _) = error_metric_to_dop(metric_idx);
+                ps.tdoa3_voxels = result.iter_voxels(ps.room_offset, dop_metric).collect();
+                for v in &mut ps.tdoa3_voxels {
+                    v.3 *= sigma;
+                }
+            }
+        }
+
+        fn rebuild_bs_render_data(ps: &mut PlanningState) {
+            ps.bs_render_data = ps
+                .base_stations
+                .iter()
+                .map(|bs| (bs.pos, bs.rotation_matrix()))
+                .collect();
+        }
+
+        fn rebuild_anchor_positions(ps: &mut PlanningState) {
+            ps.anchor_positions = ps.anchors.iter().map(|a| a.pos).collect();
+        }
+
+        // Save scene
+        let ps = planning_state.clone();
+        let uw = ui_weak.clone();
+        ui.on_planning_save_scene(move || {
+            let Some(ui) = uw.upgrade() else { return };
+            let uw2 = ui.as_weak();
+            let ps = ps.clone();
+            slint::spawn_local(async move {
+                let Some(handle) = rfd::AsyncFileDialog::new()
+                    .add_filter("YAML", &["yaml", "yml"])
+                    .set_file_name("planning.yaml")
+                    .set_directory(std::env::current_dir().unwrap_or_default())
+                    .save_file().await
+                else { return };
+                let path = handle.path().to_path_buf();
+                let Some(ui) = uw2.upgrade() else { return };
+
+                let pstate = ps.lock().unwrap();
+                let scene = planning::PlanningScene::new(
+                    ui.get_planning_room_x().parse().unwrap_or(8.0),
+                    ui.get_planning_room_y().parse().unwrap_or(8.0),
+                    ui.get_planning_room_z().parse().unwrap_or(3.0),
+                    ui.get_planning_resolution().parse().unwrap_or(5.0),
+                    ui.get_planning_center_origin(),
+                    &pstate.base_stations,
+                    &pstate.anchors,
+                    &pstate.obstacles,
+                    ui.get_planning_receiver_fov_enabled(),
+                    ui.get_planning_max_bs_distance().parse().unwrap_or(5.0),
+                    [
+                        ui.get_planning_show_coverage_0(),
+                        ui.get_planning_show_coverage_1(),
+                        ui.get_planning_show_coverage_2(),
+                        ui.get_planning_show_coverage_3(),
+                        ui.get_planning_show_coverage_4(),
+                    ],
+                    ui.get_planning_max_range().parse().unwrap_or(15.0),
+                    ui.get_planning_tdoa3_scale_min(),
+                    ui.get_planning_tdoa3_scale_max(),
+                );
+                if let Err(e) = planning::save_scene(&path, &scene) {
+                    eprintln!("Failed to save planning scene: {}", e);
+                }
+            }).unwrap();
+        });
+
+        // Load scene
+        let ps = planning_state.clone();
+        let uw = ui_weak.clone();
+        ui.on_planning_load_scene(move || {
+            let Some(ui) = uw.upgrade() else { return };
+            let uw2 = ui.as_weak();
+            let ps = ps.clone();
+            slint::spawn_local(async move {
+                let Some(handle) = rfd::AsyncFileDialog::new()
+                    .add_filter("YAML", &["yaml", "yml"])
+                    .set_directory(std::env::current_dir().unwrap_or_default())
+                    .pick_file().await
+                else { return };
+                let path = handle.path().to_path_buf();
+                let Some(ui) = uw2.upgrade() else { return };
+
+                match planning::load_scene(&path) {
+                    Ok(scene) => {
+                        let mut ps = ps.lock().unwrap();
+                        ps.base_stations = scene.base_stations();
+                        ps.anchors = scene.anchors();
+                        ps.obstacles = scene.obstacles();
+                        rebuild_bs_render_data(&mut ps);
+                        rebuild_anchor_positions(&mut ps);
+                        rebuild_obstacle_meshes(&mut ps);
+                        ps.undo_stack.clear();
+
+                        ui.set_planning_room_x(format!("{}", scene.room_x).into());
+                        ui.set_planning_room_y(format!("{}", scene.room_y).into());
+                        ui.set_planning_room_z(format!("{}", scene.room_z).into());
+                        ui.set_planning_resolution(format!("{}", scene.resolution).into());
+                        ui.set_planning_center_origin(scene.center_origin);
+                        ui.set_planning_receiver_fov_enabled(scene.receiver_fov_enabled);
+                        ui.set_planning_max_bs_distance(format!("{}", scene.max_bs_distance).into());
+                        ui.set_planning_show_coverage_0(scene.show_coverage[0]);
+                        ui.set_planning_show_coverage_1(scene.show_coverage[1]);
+                        ui.set_planning_show_coverage_2(scene.show_coverage[2]);
+                        ui.set_planning_show_coverage_3(scene.show_coverage[3]);
+                        ui.set_planning_show_coverage_4(scene.show_coverage[4]);
+                        ui.set_planning_max_range(format!("{}", scene.max_range).into());
+
+                        // Compute coverage
+                        let offset = if scene.center_origin {
+                            [-scene.room_x / 2.0, -scene.room_y / 2.0, 0.0]
+                        } else {
+                            [0.0, 0.0, 0.0]
+                        };
+                        ps.room = [scene.room_x, scene.room_y, scene.room_z];
+                        ps.room_offset = offset;
+                        ps.lh_voxels.clear();
+                        ps.tdoa3_voxels.clear();
+                        ps.tdoa3_gdop_result = None;
+
+                        ui.set_planning_tdoa3_scale_min(scene.tdoa3_scale_min);
+                        ui.set_planning_tdoa3_scale_max(scene.tdoa3_scale_max);
+
+                        let bs_model: Vec<LhBaseStationData> = ps.base_stations.iter().map(|bs| LhBaseStationData {
+                            x: format!("{:.2}", bs.pos[0]).into(),
+                            y: format!("{:.2}", bs.pos[1]).into(),
+                            z: format!("{:.2}", bs.pos[2]).into(),
+                            azimuth: format!("{:.1}", bs.azimuth_deg).into(),
+                            elevation: format!("{:.1}", bs.elevation_deg).into(),
+                        }).collect();
+                        ui.set_planning_base_stations(slint::ModelRc::new(slint::VecModel::from(bs_model)));
+
+                        let anchor_model: Vec<Tdoa3AnchorData> = ps.anchors.iter().map(|a| Tdoa3AnchorData {
+                            x: format!("{:.2}", a.pos[0]).into(),
+                            y: format!("{:.2}", a.pos[1]).into(),
+                            z: format!("{:.2}", a.pos[2]).into(),
+                        }).collect();
+                        ui.set_planning_anchors(slint::ModelRc::new(slint::VecModel::from(anchor_model)));
+
+                        let obs_model: Vec<PlanObstacleData> = ps.obstacles.iter().map(|o| PlanObstacleData {
+                            kind: match o.kind { planning::ObstacleKind::Box => "Box", planning::ObstacleKind::Cylinder => "Cylinder" }.into(),
+                            x: format!("{:.2}", o.pos[0]).into(),
+                            y: format!("{:.2}", o.pos[1]).into(),
+                            z: format!("{:.2}", o.pos[2]).into(),
+                            yaw: format!("{:.1}", o.yaw_deg).into(),
+                            width: format!("{:.2}", o.width).into(),
+                            depth: format!("{:.2}", o.depth).into(),
+                            height: format!("{:.2}", o.height).into(),
+                            radius: format!("{:.2}", o.radius).into(),
+                            color_r: o.color[0], color_g: o.color[1], color_b: o.color[2],
+                            on_floor: o.on_floor,
+                        }).collect();
+                        ui.set_planning_obstacles(slint::ModelRc::new(slint::VecModel::from(obs_model)));
+
+                        ui.set_planning_selected_type(0);
+                        ui.set_planning_selected_index(-1);
+                        ui.set_planning_stats_text_1("".into());
+                        ui.set_planning_stats_text_2("".into());
+                        ui.set_planning_stats_text_3("".into());
+
+                        // Drop the lock before triggering recompute (which also locks)
+                        drop(ps);
+                        ui.invoke_planning_recompute();
+                    }
+                    Err(e) => {
+                        eprintln!("Failed to load planning scene: {}", e);
                     }
                 }
-                Err(e) => eprintln!("Load LH scene error: {}", e),
-            }
+            }).unwrap();
         });
 
-        let cs = combined_state.clone();
+        // Add base station
+        let ps = planning_state.clone();
         let uw = ui_weak.clone();
-        ui.on_combined_load_tdoa3_scene(move || {
+        ui.on_planning_add_bs(move || {
             let Some(ui) = uw.upgrade() else { return };
-            let Some(path) = rfd::FileDialog::new()
-                .set_title("Open TDoA3 Scene for Combined View")
-                .add_filter("YAML", &["yaml", "yml"])
-                .pick_file()
-            else {
-                return;
+            let mut model: Vec<LhBaseStationData> = {
+                let m = ui.get_planning_base_stations();
+                (0..m.row_count()).filter_map(|i| m.row_data(i)).collect()
             };
-            match tdoa3::load_scene(&path) {
-                Ok(scene) => {
-                    let mut cs = cs.lock().unwrap();
-                    cs.tdoa3_anchors = scene.anchors();
+            model.push(LhBaseStationData {
+                x: "4.0".into(), y: "4.0".into(), z: "3.0".into(),
+                azimuth: "0.0".into(), elevation: "45.0".into(),
+            });
+            ui.set_planning_base_stations(slint::ModelRc::new(slint::VecModel::from(model)));
+            let mut ps = ps.lock().unwrap();
+            ps.base_stations.push(coverage::BaseStation {
+                pos: [4.0, 4.0, 3.0], azimuth_deg: 0.0, elevation_deg: 45.0,
+            });
+            rebuild_bs_render_data(&mut ps);
+        });
 
-                    // Use the TDoA3 scene room dimensions (take max with existing)
-                    let tdoa_room = [scene.room_x, scene.room_y, scene.room_z];
-                    cs.room = [
-                        cs.room[0].max(tdoa_room[0]),
-                        cs.room[1].max(tdoa_room[1]),
-                        cs.room[2].max(tdoa_room[2]),
-                    ];
-                    let center = scene.center_origin;
-                    cs.room_offset = if center {
-                        [-cs.room[0] / 2.0, -cs.room[1] / 2.0, 0.0]
-                    } else {
-                        [0.0, 0.0, 0.0]
-                    };
+        // Remove base station
+        let ps = planning_state.clone();
+        let uw = ui_weak.clone();
+        ui.on_planning_remove_bs(move |idx| {
+            let Some(ui) = uw.upgrade() else { return };
+            let idx = idx as usize;
+            let mut model: Vec<LhBaseStationData> = {
+                let m = ui.get_planning_base_stations();
+                (0..m.row_count()).filter_map(|i| m.row_data(i)).collect()
+            };
+            if idx < model.len() { model.remove(idx); }
+            ui.set_planning_base_stations(slint::ModelRc::new(slint::VecModel::from(model)));
+            let mut ps = ps.lock().unwrap();
+            if idx < ps.base_stations.len() { ps.base_stations.remove(idx); }
+            rebuild_bs_render_data(&mut ps);
+        });
 
-                    // Compute GDOP
-                    let result = tdoa3::compute_gdop(
-                        cs.room[0], cs.room[1], cs.room[2],
-                        scene.resolution,
-                        &cs.tdoa3_anchors,
-                        scene.max_range,
-                        cs.room_offset,
-                    );
+        // Duplicate base station
+        let ps = planning_state.clone();
+        let uw = ui_weak.clone();
+        ui.on_planning_duplicate_bs(move |idx| {
+            let Some(ui) = uw.upgrade() else { return };
+            let idx = idx as usize;
+            let mut ps = ps.lock().unwrap();
+            if idx < ps.base_stations.len() {
+                let mut bs = ps.base_stations[idx].clone();
+                bs.pos[0] += 0.5; // offset so it's visible
+                ps.base_stations.push(bs);
+                rebuild_bs_render_data(&mut ps);
 
-                    // Extract GDOP voxels
-                    cs.tdoa3_voxels = result.iter_voxels(cs.room_offset, tdoa3::METRIC_GDOP).collect();
-
-                    cs.tdoa3_anchor_positions = cs.tdoa3_anchors.iter().map(|a| a.pos).collect();
-
-                    ui.set_combined_tdoa3_anchor_count(cs.tdoa3_anchors.len() as i32);
-
-                    // Update stats
-                    let (min_v, max_v, avg_v) = result.stats(tdoa3::METRIC_GDOP);
-                    ui.set_combined_stats_text_2(
-                        format!(
-                            "TDoA3 GDOP: min {:.2}  max {:.2}  avg {:.2}",
-                            min_v, max_v, avg_v,
-                        ).into(),
-                    );
-                }
-                Err(e) => eprintln!("Load TDoA3 scene error: {}", e),
+                let mut model: Vec<LhBaseStationData> = {
+                    let m = ui.get_planning_base_stations();
+                    (0..m.row_count()).filter_map(|i| m.row_data(i)).collect()
+                };
+                let new_bs = ps.base_stations.last().unwrap();
+                model.push(LhBaseStationData {
+                    x: format!("{:.2}", new_bs.pos[0]).into(),
+                    y: format!("{:.2}", new_bs.pos[1]).into(),
+                    z: format!("{:.2}", new_bs.pos[2]).into(),
+                    azimuth: format!("{:.1}", new_bs.azimuth_deg).into(),
+                    elevation: format!("{:.1}", new_bs.elevation_deg).into(),
+                });
+                ui.set_planning_base_stations(slint::ModelRc::new(slint::VecModel::from(model)));
             }
         });
 
+        // Update base station
+        let ps = planning_state.clone();
+        ui.on_planning_update_bs(move |idx, data| {
+            let idx = idx as usize;
+            let mut ps = ps.lock().unwrap();
+            if idx < ps.base_stations.len() {
+                ps.base_stations[idx] = coverage::BaseStation {
+                    pos: [
+                        data.x.parse().unwrap_or(0.0),
+                        data.y.parse().unwrap_or(0.0),
+                        data.z.parse().unwrap_or(0.0),
+                    ],
+                    azimuth_deg: data.azimuth.parse().unwrap_or(0.0),
+                    elevation_deg: data.elevation.parse().unwrap_or(0.0),
+                };
+                rebuild_bs_render_data(&mut ps);
+            }
+        });
+
+        // Add anchor
+        let ps = planning_state.clone();
         let uw = ui_weak.clone();
-        ui.on_combined_view_pan(move |dx_px, dy_px| {
+        ui.on_planning_add_anchor(move || {
             let Some(ui) = uw.upgrade() else { return };
-            let yaw = ui.get_combined_cam_yaw();
+            let mut model: Vec<Tdoa3AnchorData> = {
+                let m = ui.get_planning_anchors();
+                (0..m.row_count()).filter_map(|i| m.row_data(i)).collect()
+            };
+            model.push(Tdoa3AnchorData {
+                x: "0.0".into(), y: "0.0".into(), z: "2.5".into(),
+            });
+            ui.set_planning_anchors(slint::ModelRc::new(slint::VecModel::from(model)));
+            let mut ps = ps.lock().unwrap();
+            ps.anchors.push(tdoa3::Anchor { pos: [0.0, 0.0, 2.5] });
+            rebuild_anchor_positions(&mut ps);
+        });
+
+        // Remove anchor
+        let ps = planning_state.clone();
+        let uw = ui_weak.clone();
+        ui.on_planning_remove_anchor(move |idx| {
+            let Some(ui) = uw.upgrade() else { return };
+            let idx = idx as usize;
+            let mut model: Vec<Tdoa3AnchorData> = {
+                let m = ui.get_planning_anchors();
+                (0..m.row_count()).filter_map(|i| m.row_data(i)).collect()
+            };
+            if idx < model.len() { model.remove(idx); }
+            ui.set_planning_anchors(slint::ModelRc::new(slint::VecModel::from(model)));
+            let mut ps = ps.lock().unwrap();
+            if idx < ps.anchors.len() { ps.anchors.remove(idx); }
+            rebuild_anchor_positions(&mut ps);
+        });
+
+        // Duplicate anchor
+        let ps = planning_state.clone();
+        let uw = ui_weak.clone();
+        ui.on_planning_duplicate_anchor(move |idx| {
+            let Some(ui) = uw.upgrade() else { return };
+            let idx = idx as usize;
+            let mut ps = ps.lock().unwrap();
+            if idx < ps.anchors.len() {
+                let mut a = ps.anchors[idx].clone();
+                a.pos[0] += 0.5;
+                ps.anchors.push(a);
+                rebuild_anchor_positions(&mut ps);
+
+                let mut model: Vec<Tdoa3AnchorData> = {
+                    let m = ui.get_planning_anchors();
+                    (0..m.row_count()).filter_map(|i| m.row_data(i)).collect()
+                };
+                let new_a = ps.anchors.last().unwrap();
+                model.push(Tdoa3AnchorData {
+                    x: format!("{:.2}", new_a.pos[0]).into(),
+                    y: format!("{:.2}", new_a.pos[1]).into(),
+                    z: format!("{:.2}", new_a.pos[2]).into(),
+                });
+                ui.set_planning_anchors(slint::ModelRc::new(slint::VecModel::from(model)));
+            }
+        });
+
+        // Update anchor
+        let ps = planning_state.clone();
+        ui.on_planning_update_anchor(move |idx, data| {
+            let idx = idx as usize;
+            let mut ps = ps.lock().unwrap();
+            if idx < ps.anchors.len() {
+                ps.anchors[idx] = tdoa3::Anchor {
+                    pos: [
+                        data.x.parse().unwrap_or(0.0),
+                        data.y.parse().unwrap_or(0.0),
+                        data.z.parse().unwrap_or(0.0),
+                    ],
+                };
+                rebuild_anchor_positions(&mut ps);
+            }
+        });
+
+        // Add box obstacle
+        let ps = planning_state.clone();
+        let uw = ui_weak.clone();
+        ui.on_planning_add_box(move || {
+            let Some(ui) = uw.upgrade() else { return };
+            let mut obs = planning::Obstacle::new_box([2.0, 2.0, 0.5]);
+            // on_floor defaults to true, so place on floor
+            obs.pos[2] = obs.height / 2.0;
+            let mut model: Vec<PlanObstacleData> = {
+                let m = ui.get_planning_obstacles();
+                (0..m.row_count()).filter_map(|i| m.row_data(i)).collect()
+            };
+            model.push(PlanObstacleData {
+                kind: "Box".into(),
+                x: format!("{:.2}", obs.pos[0]).into(),
+                y: format!("{:.2}", obs.pos[1]).into(),
+                z: format!("{:.2}", obs.pos[2]).into(),
+                yaw: "0.0".into(),
+                width: format!("{:.2}", obs.width).into(),
+                depth: format!("{:.2}", obs.depth).into(),
+                height: format!("{:.2}", obs.height).into(),
+                radius: "0.00".into(),
+                color_r: obs.color[0], color_g: obs.color[1], color_b: obs.color[2],
+                on_floor: obs.on_floor,
+            });
+            ui.set_planning_obstacles(slint::ModelRc::new(slint::VecModel::from(model)));
+            let mut ps = ps.lock().unwrap();
+            ps.obstacles.push(obs);
+            rebuild_obstacle_meshes(&mut ps);
+        });
+
+        // Add cylinder obstacle
+        let ps = planning_state.clone();
+        let uw = ui_weak.clone();
+        ui.on_planning_add_cylinder(move || {
+            let Some(ui) = uw.upgrade() else { return };
+            let mut obs = planning::Obstacle::new_cylinder([2.0, 2.0, 0.5]);
+            obs.pos[2] = obs.height / 2.0;
+            let mut model: Vec<PlanObstacleData> = {
+                let m = ui.get_planning_obstacles();
+                (0..m.row_count()).filter_map(|i| m.row_data(i)).collect()
+            };
+            model.push(PlanObstacleData {
+                kind: "Cylinder".into(),
+                x: format!("{:.2}", obs.pos[0]).into(),
+                y: format!("{:.2}", obs.pos[1]).into(),
+                z: format!("{:.2}", obs.pos[2]).into(),
+                yaw: "0.0".into(),
+                width: "0.00".into(),
+                depth: "0.00".into(),
+                height: format!("{:.2}", obs.height).into(),
+                radius: format!("{:.2}", obs.radius).into(),
+                color_r: obs.color[0], color_g: obs.color[1], color_b: obs.color[2],
+                on_floor: obs.on_floor,
+            });
+            ui.set_planning_obstacles(slint::ModelRc::new(slint::VecModel::from(model)));
+            let mut ps = ps.lock().unwrap();
+            ps.obstacles.push(obs);
+            rebuild_obstacle_meshes(&mut ps);
+        });
+
+        // Remove obstacle
+        let ps = planning_state.clone();
+        let uw = ui_weak.clone();
+        ui.on_planning_remove_obstacle(move |idx| {
+            let Some(ui) = uw.upgrade() else { return };
+            let idx = idx as usize;
+            let mut model: Vec<PlanObstacleData> = {
+                let m = ui.get_planning_obstacles();
+                (0..m.row_count()).filter_map(|i| m.row_data(i)).collect()
+            };
+            if idx < model.len() { model.remove(idx); }
+            ui.set_planning_obstacles(slint::ModelRc::new(slint::VecModel::from(model)));
+            let mut ps = ps.lock().unwrap();
+            if idx < ps.obstacles.len() { ps.obstacles.remove(idx); }
+            rebuild_obstacle_meshes(&mut ps);
+        });
+
+        // Duplicate obstacle
+        let ps = planning_state.clone();
+        let uw = ui_weak.clone();
+        ui.on_planning_duplicate_obstacle(move |idx| {
+            let Some(ui) = uw.upgrade() else { return };
+            let idx = idx as usize;
+            let mut ps = ps.lock().unwrap();
+            if idx < ps.obstacles.len() {
+                let mut o = ps.obstacles[idx].clone();
+                o.pos[0] += 0.5;
+                ps.obstacles.push(o);
+                rebuild_obstacle_meshes(&mut ps);
+
+                let mut model: Vec<PlanObstacleData> = {
+                    let m = ui.get_planning_obstacles();
+                    (0..m.row_count()).filter_map(|i| m.row_data(i)).collect()
+                };
+                let o = ps.obstacles.last().unwrap();
+                model.push(PlanObstacleData {
+                    kind: match o.kind { planning::ObstacleKind::Box => "Box", planning::ObstacleKind::Cylinder => "Cylinder" }.into(),
+                    x: format!("{:.2}", o.pos[0]).into(),
+                    y: format!("{:.2}", o.pos[1]).into(),
+                    z: format!("{:.2}", o.pos[2]).into(),
+                    yaw: format!("{:.1}", o.yaw_deg).into(),
+                    width: format!("{:.2}", o.width).into(),
+                    depth: format!("{:.2}", o.depth).into(),
+                    height: format!("{:.2}", o.height).into(),
+                    radius: format!("{:.2}", o.radius).into(),
+                    color_r: o.color[0], color_g: o.color[1], color_b: o.color[2],
+                    on_floor: o.on_floor,
+                });
+                ui.set_planning_obstacles(slint::ModelRc::new(slint::VecModel::from(model)));
+            }
+        });
+
+        // Update obstacle
+        let ps = planning_state.clone();
+        let uw = ui_weak.clone();
+        ui.on_planning_update_obstacle(move |idx, data| {
+            let idx = idx as usize;
+            let mut ps = ps.lock().unwrap();
+            if idx < ps.obstacles.len() {
+                let kind = if data.kind.as_str() == "Cylinder" {
+                    planning::ObstacleKind::Cylinder
+                } else {
+                    planning::ObstacleKind::Box
+                };
+                let height: f32 = data.height.parse().unwrap_or(1.0);
+                let mut z: f32 = data.z.parse().unwrap_or(0.0);
+
+                // Per-obstacle on_floor: keep bottom at Z=0
+                if data.on_floor {
+                    z = height / 2.0;
+                }
+
+                ps.obstacles[idx] = planning::Obstacle {
+                    kind,
+                    pos: [
+                        data.x.parse().unwrap_or(0.0),
+                        data.y.parse().unwrap_or(0.0),
+                        z,
+                    ],
+                    yaw_deg: data.yaw.parse().unwrap_or(0.0),
+                    width: data.width.parse().unwrap_or(1.0),
+                    depth: data.depth.parse().unwrap_or(1.0),
+                    height,
+                    radius: data.radius.parse().unwrap_or(0.5),
+                    color: [data.color_r, data.color_g, data.color_b],
+                    on_floor: data.on_floor,
+                };
+                rebuild_obstacle_meshes(&mut ps);
+            }
+        });
+
+        // Undo
+        let ps = planning_state.clone();
+        let uw = ui_weak.clone();
+        ui.on_planning_undo(move || {
+            let Some(ui) = uw.upgrade() else { return };
+            let mut ps = ps.lock().unwrap();
+            if let Some((prev_bs, prev_anchors, prev_obs)) = ps.undo_stack.pop() {
+                ps.base_stations = prev_bs;
+                ps.anchors = prev_anchors;
+                ps.obstacles = prev_obs;
+                rebuild_bs_render_data(&mut ps);
+                rebuild_anchor_positions(&mut ps);
+                rebuild_obstacle_meshes(&mut ps);
+
+                let bs_model: Vec<LhBaseStationData> = ps.base_stations.iter().map(|bs| LhBaseStationData {
+                    x: format!("{:.2}", bs.pos[0]).into(),
+                    y: format!("{:.2}", bs.pos[1]).into(),
+                    z: format!("{:.2}", bs.pos[2]).into(),
+                    azimuth: format!("{:.1}", bs.azimuth_deg).into(),
+                    elevation: format!("{:.1}", bs.elevation_deg).into(),
+                }).collect();
+                ui.set_planning_base_stations(slint::ModelRc::new(slint::VecModel::from(bs_model)));
+
+                let anchor_model: Vec<Tdoa3AnchorData> = ps.anchors.iter().map(|a| Tdoa3AnchorData {
+                    x: format!("{:.2}", a.pos[0]).into(),
+                    y: format!("{:.2}", a.pos[1]).into(),
+                    z: format!("{:.2}", a.pos[2]).into(),
+                }).collect();
+                ui.set_planning_anchors(slint::ModelRc::new(slint::VecModel::from(anchor_model)));
+
+                let obs_model: Vec<PlanObstacleData> = ps.obstacles.iter().map(|o| PlanObstacleData {
+                    kind: match o.kind { planning::ObstacleKind::Box => "Box", planning::ObstacleKind::Cylinder => "Cylinder" }.into(),
+                    x: format!("{:.2}", o.pos[0]).into(),
+                    y: format!("{:.2}", o.pos[1]).into(),
+                    z: format!("{:.2}", o.pos[2]).into(),
+                    yaw: format!("{:.1}", o.yaw_deg).into(),
+                    width: format!("{:.2}", o.width).into(),
+                    depth: format!("{:.2}", o.depth).into(),
+                    height: format!("{:.2}", o.height).into(),
+                    radius: format!("{:.2}", o.radius).into(),
+                    color_r: o.color[0], color_g: o.color[1], color_b: o.color[2],
+                    on_floor: o.on_floor,
+                }).collect();
+                ui.set_planning_obstacles(slint::ModelRc::new(slint::VecModel::from(obs_model)));
+            }
+        });
+
+        // Recompute coverage (background thread with timer polling)
+        type CoverageComputeResult = (
+            Vec<(f32, f32, f32, u8)>,   // lh_voxels
+            f32, f32,                    // lh_ratio_1, lh_ratio_2
+            tdoa3::GdopResult,           // tdoa3_result
+            f32, f32, f32,              // gdop_mean, hdop_mean, vdop_mean
+            Option<(f32, f32, f32)>,    // hull_stats
+            [f32; 3], [f32; 3],         // offset, room
+        );
+
+        let ps = planning_state.clone();
+        let uw = ui_weak.clone();
+        // Shared receiver for background computation results
+        let compute_rx: std::rc::Rc<std::cell::RefCell<Option<std::sync::mpsc::Receiver<CoverageComputeResult>>>> =
+            std::rc::Rc::new(std::cell::RefCell::new(None));
+        let compute_rx_timer = compute_rx.clone();
+        let compute_timer = slint::Timer::default();
+        let ps_timer = planning_state.clone();
+        let uw_timer = ui_weak.clone();
+
+        // Timer polls for computation results every 50ms
+        compute_timer.start(slint::TimerMode::Repeated, std::time::Duration::from_millis(50), move || {
+            let mut rx_opt = compute_rx_timer.borrow_mut();
+            let Some(ref rx) = *rx_opt else { return };
+            let Ok(result) = rx.try_recv() else { return };
+
+            // Result received — update state and UI
+            let (lh_voxels, lh_ratio_1, lh_ratio_2, tdoa3_result, gdop_mean, hdop_mean, vdop_mean, hull_stats, offset, room) = result;
+
+            let Some(ui) = uw_timer.upgrade() else { return };
+            let sigma: f32 = ui.get_planning_measurement_noise().parse().unwrap_or(0.15);
+            let metric_idx = ui.get_planning_error_metric_index();
+
+            let mut pstate = ps_timer.lock().unwrap();
+            pstate.room = room;
+            pstate.room_offset = offset;
+            pstate.lh_voxels = lh_voxels;
+            pstate.tdoa3_gdop_result = Some(tdoa3_result);
+            extract_tdoa3_voxels(&mut pstate, metric_idx, sigma);
+            drop(pstate);
+
+            ui.set_planning_stats_text_1(
+                format!("LH: {:.0}% ≥1 BS, {:.0}% ≥2 BS", lh_ratio_1 * 100.0, lh_ratio_2 * 100.0).into()
+            );
+            ui.set_planning_stats_text_2(
+                format!("Room  GERR={:.1} HERR={:.1} VERR={:.1} cm",
+                    gdop_mean * sigma * 100.0, hdop_mean * sigma * 100.0, vdop_mean * sigma * 100.0).into()
+            );
+            if let Some((g, h, v)) = hull_stats {
+                ui.set_planning_stats_text_3(
+                    format!("Hull  GERR={:.1} HERR={:.1} VERR={:.1} cm",
+                        g * sigma * 100.0, h * sigma * 100.0, v * sigma * 100.0).into()
+                );
+            } else {
+                ui.set_planning_stats_text_3("".into());
+            }
+
+            ui.set_planning_computing(false);
+            *rx_opt = None; // clear receiver
+        });
+
+        ui.on_planning_recompute(move || {
+            let Some(ui) = uw.upgrade() else { return };
+            if ui.get_planning_computing() { return; }
+            ui.set_planning_computing(true);
+
+            let room_x: f32 = ui.get_planning_room_x().parse().unwrap_or(8.0);
+            let room_y: f32 = ui.get_planning_room_y().parse().unwrap_or(8.0);
+            let room_z: f32 = ui.get_planning_room_z().parse().unwrap_or(3.0);
+            let resolution: f32 = ui.get_planning_resolution().parse().unwrap_or(5.0);
+            let center = ui.get_planning_center_origin();
+            let max_bs_dist: f32 = ui.get_planning_max_bs_distance().parse().unwrap_or(5.0);
+            let max_range: f32 = ui.get_planning_max_range().parse().unwrap_or(15.0);
+            let receiver_fov = if ui.get_planning_receiver_fov_enabled() { Some(170.0) } else { None };
+
+            let offset = if center {
+                [-room_x / 2.0, -room_y / 2.0, 0.0]
+            } else {
+                [0.0, 0.0, 0.0]
+            };
+
+            let (base_stations, anchors, obstacles) = {
+                let pstate = ps.lock().unwrap();
+                (pstate.base_stations.clone(), pstate.anchors.clone(), pstate.obstacles.clone())
+            };
+
+            let (tx, rx) = std::sync::mpsc::channel();
+            *compute_rx.borrow_mut() = Some(rx);
+
+            std::thread::spawn(move || {
+                let lh_result = planning::compute_coverage_with_obstacles(
+                    room_x, room_y, room_z, resolution,
+                    &base_stations, 160.0, 115.0,
+                    receiver_fov, None, max_bs_dist, offset,
+                    &obstacles,
+                );
+                let lh_ratio_1 = lh_result.coverage_ratio(1);
+                let lh_ratio_2 = lh_result.coverage_ratio(2);
+                let lh_voxels: Vec<(f32, f32, f32, u8)> = lh_result.iter_voxels(offset).collect();
+
+                let tdoa3_result = tdoa3::compute_gdop(
+                    room_x, room_y, room_z, resolution,
+                    &anchors, max_range, offset,
+                );
+                let (_, _, gdop_mean) = tdoa3_result.stats(tdoa3::METRIC_GDOP);
+                let (_, _, hdop_mean) = tdoa3_result.stats(tdoa3::METRIC_HDOP);
+                let (_, _, vdop_mean) = tdoa3_result.stats(tdoa3::METRIC_VDOP);
+
+                let anchor_positions: Vec<[f32; 3]> = anchors.iter().map(|a| a.pos).collect();
+                let hull = tdoa3::ConvexHull::build(&anchor_positions);
+                let hull_stats = hull.as_ref().map(|h| {
+                    let (_, _, g) = tdoa3_result.stats_in_hull(tdoa3::METRIC_GDOP, offset, h);
+                    let (_, _, hh) = tdoa3_result.stats_in_hull(tdoa3::METRIC_HDOP, offset, h);
+                    let (_, _, v) = tdoa3_result.stats_in_hull(tdoa3::METRIC_VDOP, offset, h);
+                    (g, hh, v)
+                });
+
+                let _ = tx.send((lh_voxels, lh_ratio_1, lh_ratio_2, tdoa3_result,
+                    gdop_mean, hdop_mean, vdop_mean, hull_stats,
+                    offset, [room_x, room_y, room_z]));
+            });
+        });
+
+        // Keep the timer alive — it runs forever, polling for results
+        std::mem::forget(compute_timer);
+
+        // Error metric changed (switch GERR/HERR/VERR without recomputing)
+        let ps = planning_state.clone();
+        let uw = ui_weak.clone();
+        ui.on_planning_error_metric_changed(move |idx| {
+            let Some(ui) = uw.upgrade() else { return };
+            let sigma: f32 = ui.get_planning_measurement_noise().parse().unwrap_or(0.15);
+            let mut ps = ps.lock().unwrap();
+            extract_tdoa3_voxels(&mut ps, idx, sigma);
+        });
+
+        // Mouse interaction: press
+        let ps = planning_state.clone();
+        let gs = planning_gizmo_state.clone();
+        let uw = ui_weak.clone();
+        ui.on_planning_view_mouse_pressed(move |mx, my| {
+            let Some(ui) = uw.upgrade() else { return };
+            let pw = ui.get_planning_width() as u32;
+            let ph = ui.get_planning_height() as u32;
+            if pw == 0 || ph == 0 { return; }
+            let yaw = ui.get_planning_cam_yaw();
+            let pitch = ui.get_planning_cam_pitch();
+            let dist = ui.get_planning_cam_distance();
+            let pan_x = ui.get_planning_cam_pan_x();
+            let pan_y = ui.get_planning_cam_pan_y();
+            let mvp = renderer::compute_mvp(yaw, pitch, dist, pan_x, pan_y, pw as f32 / ph as f32);
+
+            let ps_lock = ps.lock().unwrap();
+            let sel_type = ui.get_planning_selected_type();
+            let sel_idx = ui.get_planning_selected_index();
+
+            // If something is selected, check gizmo handles first
+            if sel_idx >= 0 {
+                let handle = match sel_type {
+                    1 if (sel_idx as usize) < ps_lock.bs_render_data.len() => {
+                        let (pos, rot) = &ps_lock.bs_render_data[sel_idx as usize];
+                        let h = renderer::hit_test_anchor_gizmo(mx, my, *pos, &mvp, pw, ph);
+                        if h != renderer::HANDLE_NONE {
+                            h
+                        } else {
+                            // Also check rotation arcs for BS
+                            let azimuth = rot[1][0].atan2(rot[0][0]);
+                            let elevation = (-rot[2][0]).asin();
+                            // Check azimuth arc
+                            let az_end = [
+                                pos[0] + 0.7 * (azimuth + std::f32::consts::PI / 3.0).cos(),
+                                pos[1] + 0.7 * (azimuth + std::f32::consts::PI / 3.0).sin(),
+                                pos[2],
+                            ];
+                            if let Some((sx, sy)) = renderer::project_to_screen(az_end, &mvp, pw, ph) {
+                                if ((mx - sx).powi(2) + (my - sy).powi(2)).sqrt() < 15.0 {
+                                    renderer::HANDLE_ROTATE_AZ
+                                } else {
+                                    let az_end2 = [
+                                        pos[0] + 0.7 * (azimuth - std::f32::consts::PI / 3.0).cos(),
+                                        pos[1] + 0.7 * (azimuth - std::f32::consts::PI / 3.0).sin(),
+                                        pos[2],
+                                    ];
+                                    if let Some((sx2, sy2)) = renderer::project_to_screen(az_end2, &mvp, pw, ph) {
+                                        if ((mx - sx2).powi(2) + (my - sy2).powi(2)).sqrt() < 15.0 {
+                                            renderer::HANDLE_ROTATE_AZ
+                                        } else {
+                                            // Check elevation arc endpoints
+                                            let el_end = [
+                                                pos[0] + 0.7 * (elevation + std::f32::consts::PI / 3.0).cos() * azimuth.cos(),
+                                                pos[1] + 0.7 * (elevation + std::f32::consts::PI / 3.0).cos() * azimuth.sin(),
+                                                pos[2] - 0.7 * (elevation + std::f32::consts::PI / 3.0).sin(),
+                                            ];
+                                            if let Some((sx3, sy3)) = renderer::project_to_screen(el_end, &mvp, pw, ph) {
+                                                if ((mx - sx3).powi(2) + (my - sy3).powi(2)).sqrt() < 15.0 {
+                                                    renderer::HANDLE_ROTATE_EL
+                                                } else {
+                                                    renderer::HANDLE_NONE
+                                                }
+                                            } else {
+                                                renderer::HANDLE_NONE
+                                            }
+                                        }
+                                    } else {
+                                        renderer::HANDLE_NONE
+                                    }
+                                }
+                            } else {
+                                renderer::HANDLE_NONE
+                            }
+                        }
+                    }
+                    2 if (sel_idx as usize) < ps_lock.anchor_positions.len() => {
+                        renderer::hit_test_anchor_gizmo(mx, my, ps_lock.anchor_positions[sel_idx as usize], &mvp, pw, ph)
+                    }
+                    3 if (sel_idx as usize) < ps_lock.obstacles.len() => {
+                        let pos = ps_lock.obstacles[sel_idx as usize].pos;
+                        renderer::hit_test_anchor_gizmo(mx, my, pos, &mvp, pw, ph)
+                    }
+                    _ => renderer::HANDLE_NONE,
+                };
+
+                if handle != renderer::HANDLE_NONE {
+                    ui.set_planning_active_handle(handle);
+                    ui.set_planning_handle_active(true);
+                    let mut gs = gs.lock().unwrap();
+                    gs.drag_start_screen = [mx, my];
+                    match sel_type {
+                        1 => {
+                            gs.drag_start_pos = ps_lock.bs_render_data[sel_idx as usize].0;
+                            let bs = &ps_lock.base_stations[sel_idx as usize];
+                            gs.drag_start_azimuth = bs.azimuth_deg;
+                            gs.drag_start_elevation = bs.elevation_deg;
+                        }
+                        2 => {
+                            gs.drag_start_pos = ps_lock.anchor_positions[sel_idx as usize];
+                        }
+                        3 => {
+                            let obs = &ps_lock.obstacles[sel_idx as usize];
+                            gs.drag_start_pos = obs.pos;
+                            gs.drag_start_yaw = obs.yaw_deg;
+                        }
+                        _ => {}
+                    }
+                    return;
+                }
+            }
+
+            // Hit test all objects
+            // Check BS
+            let bs_hit = renderer::hit_test_anchor(
+                mx, my,
+                &ps_lock.bs_render_data.iter().map(|(p, _)| *p).collect::<Vec<_>>(),
+                &mvp, pw, ph, 15.0,
+            );
+            if bs_hit >= 0 {
+                ui.set_planning_selected_type(1);
+                ui.set_planning_selected_index(bs_hit);
+                return;
+            }
+
+            // Check anchors
+            let anc_hit = renderer::hit_test_anchor(
+                mx, my, &ps_lock.anchor_positions, &mvp, pw, ph, 15.0,
+            );
+            if anc_hit >= 0 {
+                ui.set_planning_selected_type(2);
+                ui.set_planning_selected_index(anc_hit);
+                return;
+            }
+
+            // Check obstacles
+            let obs_positions: Vec<[f32; 3]> = ps_lock.obstacles.iter().map(|o| o.pos).collect();
+            let obs_hit = renderer::hit_test_anchor(
+                mx, my, &obs_positions, &mvp, pw, ph, 20.0,
+            );
+            if obs_hit >= 0 {
+                ui.set_planning_selected_type(3);
+                ui.set_planning_selected_index(obs_hit);
+                return;
+            }
+
+            // Deselect
+            ui.set_planning_selected_type(0);
+            ui.set_planning_selected_index(-1);
+        });
+
+        // Mouse move (dragging gizmo)
+        let ps = planning_state.clone();
+        let gs = planning_gizmo_state.clone();
+        let uw = ui_weak.clone();
+        ui.on_planning_view_mouse_moved(move |mx, my| {
+            let Some(ui) = uw.upgrade() else { return };
+            if !ui.get_planning_handle_active() { return; }
+
+            let sel_type = ui.get_planning_selected_type();
+            let sel_idx = ui.get_planning_selected_index() as usize;
+            let handle = ui.get_planning_active_handle();
+
+            let pw = ui.get_planning_width() as u32;
+            let ph = ui.get_planning_height() as u32;
+            let yaw_cam = ui.get_planning_cam_yaw();
+            let pitch_cam = ui.get_planning_cam_pitch();
+            let dist = ui.get_planning_cam_distance();
+            let pan_x = ui.get_planning_cam_pan_x();
+            let pan_y = ui.get_planning_cam_pan_y();
+
+            let gs = gs.lock().unwrap();
+            let dx_px = mx - gs.drag_start_screen[0];
+            let dy_px = my - gs.drag_start_screen[1];
+            let start_pos = gs.drag_start_pos;
+
+            let mvp = renderer::compute_mvp(yaw_cam, pitch_cam, dist, pan_x, pan_y, pw as f32 / ph as f32);
+
+            let sensitivity = dist * 0.002;
+            let translate_delta = |axis: usize| -> f32 {
+                let mut dir = [0.0f32; 3];
+                dir[axis] = 1.0;
+                let p0 = renderer::project_to_screen(start_pos, &mvp, pw, ph);
+                let p1_pos = [start_pos[0] + dir[0], start_pos[1] + dir[1], start_pos[2] + dir[2]];
+                let p1 = renderer::project_to_screen(p1_pos, &mvp, pw, ph);
+                if let (Some((sx0, sy0)), Some((sx1, sy1))) = (p0, p1) {
+                    let ax = sx1 - sx0;
+                    let ay = sy1 - sy0;
+                    let len2 = ax * ax + ay * ay;
+                    if len2 > 0.001 {
+                        (dx_px * ax + dy_px * ay) / len2
+                    } else {
+                        0.0
+                    }
+                } else {
+                    dx_px * sensitivity
+                }
+            };
+
+            let mut ps = ps.lock().unwrap();
+
+            match handle {
+                renderer::HANDLE_TRANSLATE_X | renderer::HANDLE_TRANSLATE_Y | renderer::HANDLE_TRANSLATE_Z => {
+                    let axis = (handle - 1) as usize;
+                    let delta = translate_delta(axis);
+                    let mut new_pos = start_pos;
+                    new_pos[axis] += delta;
+
+                    match sel_type {
+                        1 if sel_idx < ps.base_stations.len() => {
+                            ps.base_stations[sel_idx].pos = new_pos;
+                            rebuild_bs_render_data(&mut ps);
+                        }
+                        2 if sel_idx < ps.anchors.len() => {
+                            ps.anchors[sel_idx].pos = new_pos;
+                            rebuild_anchor_positions(&mut ps);
+                        }
+                        3 if sel_idx < ps.obstacles.len() => {
+                            ps.obstacles[sel_idx].pos = new_pos;
+                            rebuild_obstacle_meshes(&mut ps);
+                        }
+                        _ => {}
+                    }
+                }
+                renderer::HANDLE_ROTATE_AZ => {
+                    if sel_type == 1 && sel_idx < ps.base_stations.len() {
+                        let delta = dx_px * 0.5;
+                        ps.base_stations[sel_idx].azimuth_deg = gs.drag_start_azimuth + delta;
+                        rebuild_bs_render_data(&mut ps);
+                    }
+                }
+                renderer::HANDLE_ROTATE_EL => {
+                    if sel_type == 1 && sel_idx < ps.base_stations.len() {
+                        let delta = dy_px * 0.5;
+                        ps.base_stations[sel_idx].elevation_deg = gs.drag_start_elevation + delta;
+                        rebuild_bs_render_data(&mut ps);
+                    }
+                }
+                renderer::HANDLE_ROTATE_YAW => {
+                    if sel_type == 3 && sel_idx < ps.obstacles.len() {
+                        let delta = dx_px * 0.5;
+                        ps.obstacles[sel_idx].yaw_deg = gs.drag_start_yaw + delta;
+                        rebuild_obstacle_meshes(&mut ps);
+                    }
+                }
+                _ => {}
+            }
+
+            // Update UI model for the moved item
+            match sel_type {
+                1 if sel_idx < ps.base_stations.len() => {
+                    let bs = &ps.base_stations[sel_idx];
+                    let mut model: Vec<LhBaseStationData> = {
+                        let m = ui.get_planning_base_stations();
+                        (0..m.row_count()).filter_map(|i| m.row_data(i)).collect()
+                    };
+                    if sel_idx < model.len() {
+                        model[sel_idx] = LhBaseStationData {
+                            x: format!("{:.2}", bs.pos[0]).into(),
+                            y: format!("{:.2}", bs.pos[1]).into(),
+                            z: format!("{:.2}", bs.pos[2]).into(),
+                            azimuth: format!("{:.1}", bs.azimuth_deg).into(),
+                            elevation: format!("{:.1}", bs.elevation_deg).into(),
+                        };
+                        ui.set_planning_base_stations(slint::ModelRc::new(slint::VecModel::from(model)));
+                    }
+                }
+                2 if sel_idx < ps.anchors.len() => {
+                    let a = &ps.anchors[sel_idx];
+                    let mut model: Vec<Tdoa3AnchorData> = {
+                        let m = ui.get_planning_anchors();
+                        (0..m.row_count()).filter_map(|i| m.row_data(i)).collect()
+                    };
+                    if sel_idx < model.len() {
+                        model[sel_idx] = Tdoa3AnchorData {
+                            x: format!("{:.2}", a.pos[0]).into(),
+                            y: format!("{:.2}", a.pos[1]).into(),
+                            z: format!("{:.2}", a.pos[2]).into(),
+                        };
+                        ui.set_planning_anchors(slint::ModelRc::new(slint::VecModel::from(model)));
+                    }
+                }
+                3 if sel_idx < ps.obstacles.len() => {
+                    let o = &ps.obstacles[sel_idx];
+                    let mut model: Vec<PlanObstacleData> = {
+                        let m = ui.get_planning_obstacles();
+                        (0..m.row_count()).filter_map(|i| m.row_data(i)).collect()
+                    };
+                    if sel_idx < model.len() {
+                        model[sel_idx] = PlanObstacleData {
+                            kind: match o.kind { planning::ObstacleKind::Box => "Box", planning::ObstacleKind::Cylinder => "Cylinder" }.into(),
+                            x: format!("{:.2}", o.pos[0]).into(),
+                            y: format!("{:.2}", o.pos[1]).into(),
+                            z: format!("{:.2}", o.pos[2]).into(),
+                            yaw: format!("{:.1}", o.yaw_deg).into(),
+                            width: format!("{:.2}", o.width).into(),
+                            depth: format!("{:.2}", o.depth).into(),
+                            height: format!("{:.2}", o.height).into(),
+                            radius: format!("{:.2}", o.radius).into(),
+                            color_r: o.color[0], color_g: o.color[1], color_b: o.color[2],
+                            on_floor: o.on_floor,
+                        };
+                        ui.set_planning_obstacles(slint::ModelRc::new(slint::VecModel::from(model)));
+                    }
+                }
+                _ => {}
+            }
+        });
+
+        // Mouse released (end drag)
+        let ps = planning_state.clone();
+        let uw = ui_weak.clone();
+        ui.on_planning_view_mouse_released(move || {
+            let Some(ui) = uw.upgrade() else { return };
+            ui.set_planning_handle_active(false);
+            ui.set_planning_active_handle(0);
+        });
+
+        // View pan
+        let uw = ui_weak.clone();
+        ui.on_planning_view_pan(move |dx_px, dy_px| {
+            let Some(ui) = uw.upgrade() else { return };
+            let yaw = ui.get_planning_cam_yaw();
             let scale = 0.01_f32;
             let (sy, cy) = yaw.sin_cos();
             let dx = dx_px * scale;
             let dy = -dy_px * scale;
-            ui.set_combined_cam_pan_x(
-                ui.get_combined_cam_pan_x() + dx * sy + dy * cy,
+            ui.set_planning_cam_pan_x(
+                ui.get_planning_cam_pan_x() + dx * sy + dy * cy,
             );
-            ui.set_combined_cam_pan_y(
-                ui.get_combined_cam_pan_y() + dx * (-cy) + dy * sy,
+            ui.set_planning_cam_pan_y(
+                ui.get_planning_cam_pan_y() + dx * (-cy) + dy * sy,
             );
         });
     }
@@ -6413,47 +7441,56 @@ async fn main() {
         let ws = wizard_state.clone();
         let uw = ui_weak.clone();
         ui.on_lh_wizard_import(move || {
-            let Some(path) = rfd::FileDialog::new()
-                .add_filter("YAML", &["yaml", "yml"])
-                .pick_file()
-            else { return };
+            let ws = ws.clone();
+            let uw = uw.clone();
+            slint::spawn_local(async move {
+                let Some(handle) = rfd::AsyncFileDialog::new()
+                    .add_filter("YAML", &["yaml", "yml"])
+                    .pick_file().await
+                else { return };
+                let path = handle.path().to_path_buf();
 
-            match std::fs::read_to_string(&path) {
-                Ok(yaml_str) => {
-                    let ws_lock = ws.lock().unwrap();
-                    match ws_lock.container.load_from_yaml(&yaml_str) {
-                        Ok(()) => {
-                            if let Some(ui) = uw.upgrade() {
-                                ui.set_lh_wizard_notification_text("Session imported".into());
-                                ui.set_lh_wizard_notification_color(slint::Color::from_argb_u8(255, 129, 199, 132));
+                match std::fs::read_to_string(&path) {
+                    Ok(yaml_str) => {
+                        let ws_lock = ws.lock().unwrap();
+                        match ws_lock.container.load_from_yaml(&yaml_str) {
+                            Ok(()) => {
+                                if let Some(ui) = uw.upgrade() {
+                                    ui.set_lh_wizard_notification_text("Session imported".into());
+                                    ui.set_lh_wizard_notification_color(slint::Color::from_argb_u8(255, 129, 199, 132));
+                                }
+                            }
+                            Err(e) => {
+                                eprintln!("Failed to import session: {}", e);
                             }
                         }
-                        Err(e) => {
-                            eprintln!("Failed to import session: {}", e);
-                        }
                     }
+                    Err(e) => eprintln!("Failed to read file: {}", e),
                 }
-                Err(e) => eprintln!("Failed to read file: {}", e),
-            }
+            }).unwrap();
         });
 
         let ws = wizard_state.clone();
         ui.on_lh_wizard_export(move || {
-            let Some(path) = rfd::FileDialog::new()
-                .add_filter("YAML", &["yaml", "yml"])
-                .set_file_name("lh_geo_session.yaml")
-                .save_file()
-            else { return };
+            let ws = ws.clone();
+            slint::spawn_local(async move {
+                let Some(handle) = rfd::AsyncFileDialog::new()
+                    .add_filter("YAML", &["yaml", "yml"])
+                    .set_file_name("lh_geo_session.yaml")
+                    .save_file().await
+                else { return };
+                let path = handle.path().to_path_buf();
 
-            let ws_lock = ws.lock().unwrap();
-            match ws_lock.container.save_to_yaml() {
-                Ok(yaml_str) => {
-                    if let Err(e) = std::fs::write(&path, yaml_str) {
-                        eprintln!("Failed to write file: {}", e);
+                let ws_lock = ws.lock().unwrap();
+                match ws_lock.container.save_to_yaml() {
+                    Ok(yaml_str) => {
+                        if let Err(e) = std::fs::write(&path, yaml_str) {
+                            eprintln!("Failed to write file: {}", e);
+                        }
                     }
+                    Err(e) => eprintln!("Failed to serialize: {}", e),
                 }
-                Err(e) => eprintln!("Failed to serialize: {}", e),
-            }
+            }).unwrap();
         });
 
         // Upload geometry - placeholder

@@ -1,0 +1,36 @@
+room_x: 8.0
+room_y: 8.0
+room_z: 3.0
+resolution: 5.0
+center_origin: true
+receiver_fov_enabled: true
+tilt_compensation_enabled: true
+max_tilt_angle: 10.0
+max_bs_distance: 5.0
+show_coverage:
+- false
+- false
+- true
+- true
+- true
+base_stations:
+- x: -0.2148197
+  y: -3.4018254
+  z: 3.085914
+  azimuth_deg: 94.44406
+  elevation_deg: 48.495693
+- x: 3.3647006
+  y: -0.038637165
+  z: 3.0834239
+  azimuth_deg: 176.24565
+  elevation_deg: 57.470898
+- x: -0.015999062
+  y: 3.5567863
+  z: 3.059245
+  azimuth_deg: -91.38906
+  elevation_deg: 42.59665
+- x: -3.452585
+  y: 0.16178492
+  z: 3.061424
+  azimuth_deg: -1.28803
+  elevation_deg: 31.984055
