@@ -349,6 +349,7 @@ component UnitSidebar inherits Rectangle {
     callback clear-trajectory-clicked();
     callback takeoff-clicked(/* height */ string, /* yaw */ string, /* time */ string);
     callback goto-clicked(/* x */ string, /* y */ string, /* z */ string, /* yaw */ string, /* relative */ bool);
+    callback go-home-clicked();
     callback land-clicked();
     callback identify-clicked();
     callback manual-control-clicked();
@@ -456,7 +457,42 @@ component UnitSidebar inherits Rectangle {
                     }
                 }
 
-                DetailRow { label: "URI"; value: unit.uri; }
+                HorizontalLayout {
+                    spacing: 8px;
+                    padding-left: 16px;
+                    padding-right: 16px;
+
+                    Text {
+                        text: "URI";
+                        font-size: 12px;
+                        font-weight: 600;
+                        color: Palette.foreground.transparentize(0.3);
+                        width: 90px;
+                        vertical-alignment: center;
+                    }
+
+                    Rectangle {
+                        horizontal-stretch: 1;
+                        clip: true;
+
+                        uri-input := TextInput {
+                            text: unit.uri;
+                            read-only: true;
+                            single-line: true;
+                            font-size: 12px;
+                            color: Palette.foreground;
+                            vertical-alignment: center;
+                        }
+
+                        TouchArea {
+                            mouse-cursor: text;
+                            clicked => {
+                                uri-input.focus();
+                                uri-input.select-all();
+                            }
+                        }
+                    }
+                }
                 DetailRow { label: "Serial"; value: unit.serial != "" ? unit.serial : "—"; }
                 DetailRow { label: "Platform"; value: unit.platform-type != "" ? unit.platform-type : "—"; }
                 DetailRow { label: "Firmware"; value: unit.firmware-version != "" ? unit.firmware-version : "—"; }
@@ -707,6 +743,12 @@ component UnitSidebar inherits Rectangle {
                     clicked => { goto-clicked(goto-x.text, goto-y.text, goto-z.text, goto-yaw.text, goto-relative.checked); }
                 }
 
+                // Go to Home
+                Button {
+                    text: "Go to Home";
+                    clicked => { go-home-clicked(); }
+                }
+
                 // Land
                 Button {
                     text: "Land";
@@ -734,6 +776,7 @@ export component UnitsContent inherits Rectangle {
     callback clear-trajectory-requested(/* row index */ int);
     callback takeoff-requested(/* row index */ int, /* height */ string, /* yaw */ string, /* time */ string);
     callback goto-requested(/* row index */ int, /* x */ string, /* y */ string, /* z */ string, /* yaw */ string, /* relative */ bool);
+    callback go-home-requested(/* row index */ int);
     callback land-requested(/* row index */ int);
     callback identify-requested(/* row index */ int);
     callback connect-unit-requested(/* row index */ int);
@@ -923,6 +966,7 @@ export component UnitsContent inherits Rectangle {
             clear-trajectory-clicked => { clear-trajectory-requested(selected-row); }
             takeoff-clicked(height, yaw, time) => { takeoff-requested(selected-row, height, yaw, time); }
             goto-clicked(x, y, z, yaw, relative) => { goto-requested(selected-row, x, y, z, yaw, relative); }
+            go-home-clicked => { go-home-requested(selected-row); }
             land-clicked => { land-requested(selected-row); }
             identify-clicked => { identify-requested(selected-row); }
             manual-control-clicked => {

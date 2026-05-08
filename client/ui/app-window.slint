@@ -460,6 +460,7 @@ export component AppWindow inherits Window {
     callback clear-trajectory(/* row index */ int);
     callback hlc-takeoff(/* row index */ int, /* height */ string, /* yaw */ string, /* time */ string);
     callback hlc-goto(/* row index */ int, /* x */ string, /* y */ string, /* z */ string, /* yaw */ string, /* relative */ bool);
+    callback hlc-go-home(/* row index */ int);
     callback hlc-land(/* row index */ int);
     callback identify-unit(/* row index */ int);
     callback connect-unit(/* row index */ int);
@@ -780,6 +781,7 @@ export component AppWindow inherits Window {
                     clear-trajectory-requested(row) => { clear-trajectory(row); }
                     takeoff-requested(row, height, yaw, time) => { hlc-takeoff(row, height, yaw, time); }
                     goto-requested(row, x, y, z, yaw, relative) => { hlc-goto(row, x, y, z, yaw, relative); }
+                    go-home-requested(row) => { hlc-go-home(row); }
                     land-requested(row) => { hlc-land(row); }
                     identify-requested(row) => { identify-unit(row); }
                     connect-unit-requested(row) => { connect-unit(row); }

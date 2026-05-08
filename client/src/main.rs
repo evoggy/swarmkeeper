@@ -332,6 +332,7 @@ fn update_unit(ui_weak: &slint::Weak<AppWindow>, index: usize, f: impl FnOnce(&m
 struct ConnectedUnit {
     cf: Arc<crazyflie_lib::Crazyflie>,
     identify_stop: Option<Arc<AtomicBool>>,
+    home_position: Option<[f32; 3]>,
 }
 
 type SwarmState = Arc<Mutex<HashMap<usize, ConnectedUnit>>>;
@@ -713,7 +714,7 @@ async fn main() {
                     // Store connected Crazyflie
                     {
                         let mut state = swarm_state.lock().await;
-                        state.insert(i, ConnectedUnit { cf: cf.clone(), identify_stop: None });
+                        state.insert(i, ConnectedUnit { cf: cf.clone(), identify_stop: None, home_position: None });
                     }
 
                     // Read installed decks
@@ -891,7 +892,7 @@ async fn main() {
 
                     {
                         let mut state = swarm_state.lock().await;
-                        state.insert(i, ConnectedUnit { cf: cf.clone(), identify_stop: None });
+                        state.insert(i, ConnectedUnit { cf: cf.clone(), identify_stop: None, home_position: None });
                     }
 
                     let deck_lighthouse: u8 = cf.param.get("deck.bcLighthouse4").await.unwrap_or(0);
@@ -1447,7 +1448,8 @@ async fn main() {
                     });
                 }
                 while join_set.join_next().await.is_some() {}
-                tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+                // Wait for propellers to spin up before taking off
+                tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
 
                 // Snapshot positions before takeoff and show takeoff line
                 {
@@ -2396,7 +2398,8 @@ async fn main() {
                     eprintln!("Arming failed: {:?}", e);
                     return;
                 }
-                tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+                // Wait for propellers to spin up before taking off
+                tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
 
                 // Snapshot position before takeoff and show takeoff line
                 {
@@ -2530,6 +2533,7 @@ async fn main() {
             let yaw_rad = yaw_deg.to_radians();
 
             let swarm_state = swarm_state.clone();
+            let ui_weak_inner = ui_weak.clone();
 
             tokio::spawn(async move {
                 let cf = {
@@ -2543,12 +2547,36 @@ async fn main() {
                     }
                 };
 
+                // Snapshot x,y as home before takeoff; z is the takeoff target height
+                let home_xy = {
+                    let (tx, rx) = tokio::sync::oneshot::channel();
+                    let _ = slint::invoke_from_event_loop(move || {
+                        let pos = if let Some(ui) = ui_weak_inner.upgrade() {
+                            let units = ui.get_units();
+                            units.row_data(original_index).map(|u| [u.pos_x, u.pos_y])
+                        } else {
+                            None
+                        };
+                        let _ = tx.send(pos);
+                    });
+                    rx.await.ok().flatten()
+                };
+                if let Some(xy) = home_xy {
+                    let home = [xy[0], xy[1], height];
+                    let mut state = swarm_state.lock().await;
+                    if let Some(cu) = state.get_mut(&original_index) {
+                        cu.home_position = Some(home);
+                        eprintln!("Unit {} home position saved: ({:.2}, {:.2}, {:.2})", original_index, home[0], home[1], home[2]);
+                    }
+                }
+
                 eprintln!("Arming unit {}...", original_index);
                 if let Err(e) = cf.platform.send_arming_request(true).await {
                     eprintln!("Arming failed: {:?}", e);
                     return;
                 }
-                tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+                // Wait for propellers to spin up before taking off
+                tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
 
                 eprintln!("Taking off unit {} to {:.2}m, yaw={:.1}deg, over {:.1}s...", original_index, height, yaw_deg, duration);
                 if let Err(e) = cf.high_level_commander.take_off(height, Some(yaw_rad), duration, None).await {
@@ -2652,6 +2680,59 @@ async fn main() {
                 eprintln!("Landing unit {}...", original_index);
                 if let Err(e) = cf.high_level_commander.land(0.0, None, 2.0, None).await {
                     eprintln!("Land failed: {:?}", e);
+                }
+            });
+        });
+    }
+
+    // HLC Go Home
+    {
+        let swarm_state = swarm_state.clone();
+        let ui_weak = ui.as_weak();
+
+        ui.on_hlc_go_home(move |row_index| {
+            if row_index < 0 {
+                return;
+            }
+
+            let original_index = {
+                let Some(ui) = ui_weak.upgrade() else { return };
+                let units = ui.get_units();
+                let col = ui.get_sort_column();
+                let ascending = ui.get_sort_ascending();
+                let indices = sort_unit_indices(&units, col, ascending);
+                let row = row_index as usize;
+                if row >= indices.len() {
+                    return;
+                }
+                indices[row]
+            };
+
+            let swarm_state = swarm_state.clone();
+
+            tokio::spawn(async move {
+                let (cf, home) = {
+                    let state = swarm_state.lock().await;
+                    match state.get(&original_index) {
+                        Some(cu) => (cu.cf.clone(), cu.home_position),
+                        None => {
+                            eprintln!("Unit {} is not connected", original_index);
+                            return;
+                        }
+                    }
+                };
+
+                let Some(home) = home else {
+                    eprintln!("Unit {} has no saved home position (takeoff first)", original_index);
+                    return;
+                };
+
+                eprintln!(
+                    "Go home unit {} to ({:.2}, {:.2}, {:.2}) over 3.0s...",
+                    original_index, home[0], home[1], home[2]
+                );
+                if let Err(e) = cf.high_level_commander.go_to(home[0], home[1], home[2], 0.0, 3.0, false, false, None).await {
+                    eprintln!("Go home failed: {:?}", e);
                 }
             });
         });
@@ -2877,7 +2958,7 @@ async fn main() {
 
                 {
                     let mut state = swarm_state.lock().await;
-                    state.insert(original_index, ConnectedUnit { cf: cf.clone(), identify_stop: None });
+                    state.insert(original_index, ConnectedUnit { cf: cf.clone(), identify_stop: None, home_position: None });
                 }
 
                 let deck_lighthouse: u8 = cf.param.get("deck.bcLighthouse4").await.unwrap_or(0);
