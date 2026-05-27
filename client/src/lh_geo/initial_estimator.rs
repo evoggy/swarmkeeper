@@ -35,7 +35,7 @@ impl LighthouseInitialEstimator {
 
         // Remove non-cleaned samples (keep only cleaned)
         // We need to be careful about modifying in place
-        let mut kept_indices: Vec<usize> = cleaned_indices;
+        let kept_indices: Vec<usize> = cleaned_indices;
 
         // Build link stats
         Self::build_link_stats(matched_samples, &kept_indices, solution);

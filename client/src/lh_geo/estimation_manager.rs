@@ -1,8 +1,3 @@
-/// Estimation manager - orchestrates the full geometry estimation pipeline
-///
-/// Ported from LhGeoEstimationManager in lighthouse_geo_estimation_manager.py
-
-use std::collections::HashMap;
 
 use nalgebra::Vector3;
 

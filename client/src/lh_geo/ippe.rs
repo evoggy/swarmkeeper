@@ -6,7 +6,7 @@
 ///
 /// This code uses OpenCV coordinate conventions internally.
 
-use nalgebra::{DMatrix, DVector, Matrix3, Matrix4, Vector3, Vector4};
+use nalgebra::{DMatrix, DVector, Matrix3, Matrix4, Vector3};
 
 #[derive(Debug, Clone)]
 pub(crate) struct IppeSolution {

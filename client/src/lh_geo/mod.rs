@@ -1,3 +1,8 @@
+// Lighthouse geometry solver: an in-progress port whose full API surface is not
+// yet wired up. Suppress dead-code warnings module-wide rather than trimming the
+// solver API while it is being built out.
+#![allow(dead_code)]
+
 pub mod types;
 pub mod bs_vector;
 mod ippe;

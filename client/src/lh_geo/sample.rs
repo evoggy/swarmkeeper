@@ -5,7 +5,6 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use nalgebra::{Matrix3, Vector3};
 use serde::{Deserialize, Serialize};
 
 use super::bs_vector::{projection_pair_list, LighthouseBsVectors};

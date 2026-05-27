@@ -4659,7 +4659,7 @@ async fn main() {
         let ui_weak = ui.as_weak();
 
         ui.on_run_radio_test(move |unit_index| {
-            let link_context = link_context.clone();
+            let _link_context = link_context.clone();
             let swarm_state = swarm_state.clone();
             let ui_weak = ui_weak.clone();
 
@@ -6962,7 +6962,7 @@ async fn main() {
 
         // Update obstacle
         let ps = planning_state.clone();
-        let uw = ui_weak.clone();
+        let _uw = ui_weak.clone();
         ui.on_planning_update_obstacle(move |idx, data| {
             let idx = idx as usize;
             let mut ps = ps.lock().unwrap();
@@ -7492,7 +7492,7 @@ async fn main() {
         });
 
         // Mouse released (end drag)
-        let ps = planning_state.clone();
+        let _ps = planning_state.clone();
         let uw = ui_weak.clone();
         ui.on_planning_view_mouse_released(move || {
             let Some(ui) = uw.upgrade() else { return };
@@ -7893,13 +7893,13 @@ async fn main() {
         });
 
         // View interaction callbacks (camera rotation via mouse drag)
-        let uw = ui_weak.clone();
+        let _uw = ui_weak.clone();
         ui.on_lh_wizard_view_mouse_pressed(move |_x, _y| {
             // Start camera rotation
         });
 
-        let uw = ui_weak.clone();
-        ui.on_lh_wizard_view_mouse_moved(move |x, y| {
+        let _uw = ui_weak.clone();
+        ui.on_lh_wizard_view_mouse_moved(move |_x, _y| {
             // Camera rotation while dragging
             // The Slint touch area handles basic yaw/pitch updates
         });
@@ -7953,7 +7953,7 @@ fn parse_radio_uri(uri: &str) -> Option<(usize, u8, [u8; 5])> {
 async fn run_radio_channel_test(
     uri: String,
     swarm_state: SwarmState,
-    unit_index: usize,
+    _unit_index: usize,
     ui_weak: slint::Weak<AppWindow>,
 ) {
     let (radio_nth, original_channel, address) = match parse_radio_uri(&uri) {

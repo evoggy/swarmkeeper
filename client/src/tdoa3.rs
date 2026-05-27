@@ -54,6 +54,7 @@ impl GdopResult {
     /// Fraction of voxels where the given metric is finite and at or below the threshold.
     /// For pair count, use this as "voxels with >= threshold pairs" by passing the negated
     /// values — or use `coverage_ratio_pairs` instead.
+    #[allow(dead_code)]
     pub fn coverage_ratio(&self, metric: usize, max_val: f32) -> f32 {
         let mut count = 0u32;
         let mut total = 0u32;

@@ -1,15 +1,9 @@
-/// Lighthouse Geometry Wizard - bridges UI to estimation pipeline
-///
-/// Manages wizard state, background solver task, and CF communication.
 
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
-
-use crate::lh_geo::container::{LhGeoInputContainer, LhGeoInputContainerData};
+use crate::lh_geo::container::LhGeoInputContainer;
 use crate::lh_geo::estimation_manager::LhGeoEstimationManager;
 use crate::lh_geo::sample::{LhCfPoseSampleType, LhCfPoseSampleStatus};
-use crate::lh_geo::solution::{LighthouseGeometrySolution, ErrorStats};
-use crate::lh_geo::types::{LhDeck4SensorPositions, Pose};
+use crate::lh_geo::solution::LighthouseGeometrySolution;
+use crate::lh_geo::types::LhDeck4SensorPositions;
 
 /// Wizard collection step
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -59,8 +53,10 @@ pub struct LhWizardState {
     pub container: LhGeoInputContainer,
     pub current_step: WizardStep,
     pub latest_solution: Option<LighthouseGeometrySolution>,
+    #[allow(dead_code)]
     pub is_measuring: bool,
     /// Version of container when last solved
+    #[allow(dead_code)]
     pub last_solved_version: u64,
 }
 

@@ -1092,6 +1092,7 @@ impl Scene3DRenderer {
     }
 
     /// Render a combined view showing both LH coverage and TDoA3 GDOP in the same scene.
+    #[allow(dead_code)]
     #[allow(clippy::too_many_arguments)]
     pub fn render_combined(
         &mut self,
