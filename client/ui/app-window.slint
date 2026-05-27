@@ -6,7 +6,7 @@ import { RadioTestContent, ChannelResult } from "radio-test.slint";
 import { LhCoverageContent, LhBaseStationData } from "lh-coverage.slint";
 import { Tdoa3CoverageContent, Tdoa3AnchorData } from "tdoa3-coverage.slint";
 import { LhWizardContent, WizardSampleData, WizardBsData } from "lh-wizard.slint";
-import { PlanningContent, PlanObstacleData } from "planning.slint";
+import { PlanningContent, PlanObstacleData, PlanPadData } from "planning.slint";
 
 export struct HealthTestResult {
     name: string,
@@ -416,6 +416,10 @@ export component AppWindow inherits Window {
     out property <bool> show-loco-labels: viz-content.show-loco-labels;
     out property <bool> show-axis-labels: viz-content.show-axis-labels;
     out property <bool> show-grid-labels: viz-content.show-grid-labels;
+    in-out property <string> viz-loaded-scene-name <=> viz-content.loaded-scene-name;
+    in-out property <bool> viz-show-scene-overlay <=> viz-content.show-scene-overlay;
+    callback viz-save-pads();
+    callback viz-load-scene();
 
     // Visualization label data (set by Rust)
     in-out property <[VizLabel]> cf-labels;
@@ -462,6 +466,10 @@ export component AppWindow inherits Window {
     callback hlc-goto(/* row index */ int, /* x */ string, /* y */ string, /* z */ string, /* yaw */ string, /* relative */ bool);
     callback hlc-go-home(/* row index */ int);
     callback hlc-land(/* row index */ int);
+    callback random-goto(/* row index */ int);
+    in-out property <string> unit-goto-x-text: "0";
+    in-out property <string> unit-goto-y-text: "0";
+    in-out property <string> unit-goto-z-text: "0";
     callback identify-unit(/* row index */ int);
     callback connect-unit(/* row index */ int);
     callback disconnect-unit(/* row index */ int);
@@ -683,6 +691,14 @@ export component AppWindow inherits Window {
     in-out property <bool> planning-show-coverage-3 <=> planning-content.show-coverage-3;
     in-out property <bool> planning-show-coverage-4 <=> planning-content.show-coverage-4;
     in-out property <string> planning-max-range <=> planning-content.max-range;
+    in-out property <bool> planning-flight-area-enabled <=> planning-content.flight-area-enabled;
+    in-out property <string> planning-flight-area-min-x <=> planning-content.flight-area-min-x;
+    in-out property <string> planning-flight-area-min-y <=> planning-content.flight-area-min-y;
+    in-out property <string> planning-flight-area-min-z <=> planning-content.flight-area-min-z;
+    in-out property <string> planning-flight-area-max-x <=> planning-content.flight-area-max-x;
+    in-out property <string> planning-flight-area-max-y <=> planning-content.flight-area-max-y;
+    in-out property <string> planning-flight-area-max-z <=> planning-content.flight-area-max-z;
+    in-out property <[PlanPadData]> planning-takeoff-pads <=> planning-content.takeoff-pads;
     in-out property <float> planning-tdoa3-scale-min <=> planning-content.tdoa3-scale-min;
     in-out property <float> planning-tdoa3-scale-max <=> planning-content.tdoa3-scale-max;
     in-out property <float> planning-tdoa3-scale-limit <=> planning-content.tdoa3-scale-limit;
@@ -766,13 +782,16 @@ export component AppWindow inherits Window {
         TabWidget {
             Tab {
                 title: "Units";
-                UnitsContent {
+                units-content := UnitsContent {
                     units: root.units;
                     sorted-units: root.sorted-units;
                     table-rows: root.unit-table-rows;
                     sort-column: root.sort-column;
                     sort-ascending: root.sort-ascending;
                     journal-entries: root.journal-entries;
+                    goto-x-text <=> root.unit-goto-x-text;
+                    goto-y-text <=> root.unit-goto-y-text;
+                    goto-z-text <=> root.unit-goto-z-text;
                     sort-requested(col, ascending) => { sort-units(col, ascending); }
                     open-journal-requested(row) => { open-journal(row); }
                     add-journal-entry-requested(row, text) => { add-journal-entry(row, text); }
@@ -781,6 +800,7 @@ export component AppWindow inherits Window {
                     clear-trajectory-requested(row) => { clear-trajectory(row); }
                     takeoff-requested(row, height, yaw, time) => { hlc-takeoff(row, height, yaw, time); }
                     goto-requested(row, x, y, z, yaw, relative) => { hlc-goto(row, x, y, z, yaw, relative); }
+                    random-goto-requested(row) => { random-goto(row); }
                     go-home-requested(row) => { hlc-go-home(row); }
                     land-requested(row) => { hlc-land(row); }
                     identify-requested(row) => { identify-unit(row); }
@@ -830,6 +850,8 @@ export component AppWindow inherits Window {
                     positioning-source-names: root.positioning-source-names;
                     positioning-source-index <=> root.positioning-source-index;
                     positioning-source-changed(idx) => { root.positioning-source-changed(idx); }
+                    save-pads => { root.viz-save-pads(); }
+                    load-scene => { root.viz-load-scene(); }
                 }
             }
             Tab {

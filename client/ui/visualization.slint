@@ -1,4 +1,4 @@
-import { CheckBox, ComboBox, Palette } from "std-widgets.slint";
+import { Button, CheckBox, ComboBox, Palette } from "std-widgets.slint";
 
 export struct VizLabel {
     text: string,
@@ -29,6 +29,12 @@ export component VisualizationContent inherits Rectangle {
     in-out property <[string]> positioning-source-names;
     in-out property <int> positioning-source-index;
     callback positioning-source-changed(int);
+
+    // Scene overlay (flight area + pads)
+    in-out property <string> loaded-scene-name: "";
+    in-out property <bool> show-scene-overlay: true;
+    callback save-pads();
+    callback load-scene();
 
     // Label data (set from Rust)
     in-out property <[VizLabel]> cf-labels;
@@ -210,6 +216,40 @@ export component VisualizationContent inherits Rectangle {
                 CheckBox {
                     text: "Grid measurements (m)";
                     checked <=> root.show-grid-labels;
+                }
+
+                Rectangle {
+                    height: 1px;
+                    background: Palette.border.transparentize(0.5);
+                }
+
+                Text {
+                    text: "Scene";
+                    font-size: 12px;
+                    font-weight: 600;
+                    color: Palette.foreground.transparentize(0.3);
+                }
+
+                CheckBox {
+                    text: "Show flight area / pads";
+                    checked <=> root.show-scene-overlay;
+                }
+
+                Text {
+                    text: root.loaded-scene-name == "" ? "(no scene loaded)" : root.loaded-scene-name;
+                    font-size: 10px;
+                    color: Palette.foreground.transparentize(0.5);
+                    overflow: elide;
+                }
+
+                Button {
+                    text: "Load Scene…";
+                    clicked => { context-menu.close(); root.load-scene(); }
+                }
+
+                Button {
+                    text: "Save Pad Positions";
+                    clicked => { context-menu.close(); root.save-pads(); }
                 }
             }
         }

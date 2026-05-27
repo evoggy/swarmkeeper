@@ -48,6 +48,7 @@ impl crazyflie_lib::TocCache for FileTocCache {
 #[derive(Serialize, Deserialize, Default)]
 struct AppSettings {
     last_swarm_config: Option<String>,
+    last_scene_config: Option<String>,
     tuning_thrust_base: Option<u16>,
     tuning_vx_ki: Option<f32>,
     tuning_vy_ki: Option<f32>,
@@ -609,6 +610,27 @@ async fn main() {
         }
     }
 
+    // Auto-load last scene so the visualizer overlay shows up on launch
+    let initial_viz_scene: Option<(Option<planning::FlightArea>, Vec<planning::TakeoffPad>, Vec<planning::Obstacle>)> = if let Some(ref path) = settings.last_scene_config {
+        let path_buf = std::path::PathBuf::from(path);
+        match planning::load_scene(&path_buf) {
+            Ok(scene) => {
+                let name = path_buf.file_name()
+                    .and_then(|n| n.to_str())
+                    .map(|s| s.to_string())
+                    .unwrap_or_default();
+                ui.set_viz_loaded_scene_name(name.into());
+                Some((scene.flight_area.clone(), scene.takeoff_pads.clone(), scene.obstacles()))
+            }
+            Err(e) => {
+                eprintln!("Failed to auto-load last scene: {}", e);
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     // Restore persisted tuning parameters
     if let Some(v) = settings.tuning_thrust_base {
         ui.set_tuning_thrust_base(v.to_string().into());
@@ -647,6 +669,30 @@ async fn main() {
     let positioning_source: Arc<Mutex<Option<usize>>> = Arc::new(Mutex::new(None));
     let positioning_data: SharedPositioningData = Arc::new(Mutex::new(PositioningData::default()));
     let journal_store: SharedJournalStore = Arc::new(Mutex::new(load_journal()));
+
+    // Visualizer scene overlay (loaded scene's flight area + pads + obstacles)
+    #[derive(Default)]
+    struct VizSceneState {
+        flight_area: Option<planning::FlightArea>,
+        takeoff_pads: Vec<planning::TakeoffPad>,
+        obstacle_triangles: Vec<Vec<f32>>,
+        obstacle_wireframes: Vec<Vec<f32>>,
+        obstacle_colors: Vec<[f32; 3]>,
+    }
+    impl VizSceneState {
+        fn set_obstacles(&mut self, obstacles: &[planning::Obstacle]) {
+            self.obstacle_triangles = obstacles.iter().map(|o| o.triangulate()).collect();
+            self.obstacle_wireframes = obstacles.iter().map(|o| o.wireframe()).collect();
+            self.obstacle_colors = obstacles.iter().map(|o| o.color).collect();
+        }
+    }
+    let viz_scene_state = Arc::new(std::sync::Mutex::new(VizSceneState::default()));
+    if let Some((fa, pads, obstacles)) = initial_viz_scene {
+        let mut s = viz_scene_state.lock().unwrap();
+        s.flight_area = fa;
+        s.takeoff_pads = pads;
+        s.set_obstacles(&obstacles);
+    }
 
     let gilrs = Arc::new(std::sync::Mutex::new(
         gilrs::Gilrs::new().expect("Failed to initialize gamepad library"),
@@ -2738,6 +2784,174 @@ async fn main() {
         });
     }
 
+    // Random goto inside flight area: fills the goto X/Y/Z fields and flies there
+    {
+        let viz_scene_state = viz_scene_state.clone();
+        let ui_weak = ui.as_weak();
+        ui.on_random_goto(move |row_index| {
+            let Some(ui) = ui_weak.upgrade() else { return };
+            let fa = {
+                let s = viz_scene_state.lock().unwrap();
+                s.flight_area.clone()
+            };
+            let Some(fa) = fa else {
+                eprintln!("No flight area defined; load a scene with one first");
+                return;
+            };
+            // Tiny xorshift PRNG seeded from system time, no extra deps
+            fn next_unit(state: &mut u64) -> f32 {
+                *state ^= *state << 13;
+                *state ^= *state >> 7;
+                *state ^= *state << 17;
+                ((*state >> 11) as f64 / (1u64 << 53) as f64) as f32
+            }
+            let mut rng = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos() as u64)
+                .unwrap_or(0x9E3779B97F4A7C15)
+                .max(1);
+            let rx = fa.min[0] + next_unit(&mut rng) * (fa.max[0] - fa.min[0]);
+            let ry = fa.min[1] + next_unit(&mut rng) * (fa.max[1] - fa.min[1]);
+            let rz = fa.min[2] + next_unit(&mut rng) * (fa.max[2] - fa.min[2]);
+            let x_str: slint::SharedString = format!("{:.2}", rx).into();
+            let y_str: slint::SharedString = format!("{:.2}", ry).into();
+            let z_str: slint::SharedString = format!("{:.2}", rz).into();
+            ui.set_unit_goto_x_text(x_str.clone());
+            ui.set_unit_goto_y_text(y_str.clone());
+            ui.set_unit_goto_z_text(z_str.clone());
+            // Trigger the same path as the Goto button (yaw=0, relative=false)
+            ui.invoke_hlc_goto(row_index, x_str, y_str, z_str, "0".into(), false);
+        });
+    }
+
+    // Visualizer: Load Scene (read flight area + pads from a yaml)
+    {
+        let viz_scene_state = viz_scene_state.clone();
+        let ui_weak = ui.as_weak();
+        ui.on_viz_load_scene(move || {
+            let Some(ui) = ui_weak.upgrade() else { return };
+            let uw = ui.as_weak();
+            let viz_scene_state = viz_scene_state.clone();
+            slint::spawn_local(async move {
+                let Some(handle) = rfd::AsyncFileDialog::new()
+                    .add_filter("YAML", &["yaml", "yml"])
+                    .set_directory(std::env::current_dir().unwrap_or_default())
+                    .pick_file().await
+                else { return };
+                let path = handle.path().to_path_buf();
+                match planning::load_scene(&path) {
+                    Ok(scene) => {
+                        {
+                            let mut s = viz_scene_state.lock().unwrap();
+                            s.flight_area = scene.flight_area.clone();
+                            s.takeoff_pads = scene.takeoff_pads.clone();
+                            let obs = scene.obstacles();
+                            s.set_obstacles(&obs);
+                        }
+                        let mut settings: AppSettings = confy::load("swarmkeeper", None).unwrap_or_default();
+                        settings.last_scene_config = Some(path.to_string_lossy().into_owned());
+                        if let Err(e) = confy::store("swarmkeeper", None, &settings) {
+                            eprintln!("Failed to persist last_scene_config: {}", e);
+                        }
+                        if let Some(ui) = uw.upgrade() {
+                            let name = path.file_name()
+                                .and_then(|n| n.to_str())
+                                .map(|s| s.to_string())
+                                .unwrap_or_default();
+                            ui.set_viz_loaded_scene_name(name.into());
+                        }
+                        eprintln!("Loaded scene from {:?}", path);
+                    }
+                    Err(e) => eprintln!("Failed to load scene: {}", e),
+                }
+            }).unwrap();
+        });
+    }
+
+    // Visualizer: Save Pad Positions (snapshot connected drone xy → scene yaml)
+    {
+        let viz_scene_state = viz_scene_state.clone();
+        let swarm_state = swarm_state.clone();
+        let ui_weak = ui.as_weak();
+        ui.on_viz_save_pads(move || {
+            let Some(ui) = ui_weak.upgrade() else { return };
+
+            // Snapshot pads from current connected units' positions
+            let units_model = ui.get_units();
+            let swarm_state_snap = swarm_state.clone();
+            let connected_indices: std::collections::HashSet<usize> = {
+                let Ok(state) = swarm_state_snap.try_lock() else {
+                    eprintln!("Swarm state busy; try again");
+                    return;
+                };
+                state.keys().copied().collect()
+            };
+
+            let mut pads: Vec<planning::TakeoffPad> = Vec::new();
+            for i in 0..units_model.row_count() {
+                if !connected_indices.contains(&i) { continue; }
+                let Some(u) = units_model.row_data(i) else { continue };
+                // Skip units with no positioning fix (origin)
+                if u.pos_x == 0.0 && u.pos_y == 0.0 && u.pos_z == 0.0 { continue; }
+                pads.push(planning::TakeoffPad {
+                    x: u.pos_x,
+                    y: u.pos_y,
+                    radius: 0.10,
+                    label: u.name.to_string(),
+                });
+            }
+
+            if pads.is_empty() {
+                eprintln!("No connected units with positions to capture as pads");
+                return;
+            }
+            eprintln!("Capturing {} pads", pads.len());
+
+            // Update overlay state immediately so they render
+            {
+                let mut s = viz_scene_state.lock().unwrap();
+                s.takeoff_pads = pads.clone();
+            }
+
+            // Pick file: last-loaded scene if present, else file picker
+            let settings: AppSettings = confy::load("swarmkeeper", None).unwrap_or_default();
+            let known_path = settings.last_scene_config.clone();
+
+            let uw = ui.as_weak();
+            slint::spawn_local(async move {
+                let path = if let Some(p) = known_path {
+                    std::path::PathBuf::from(p)
+                } else {
+                    let Some(handle) = rfd::AsyncFileDialog::new()
+                        .add_filter("YAML", &["yaml", "yml"])
+                        .set_file_name("scene.yaml")
+                        .set_directory(std::env::current_dir().unwrap_or_default())
+                        .save_file().await
+                    else { return };
+                    handle.path().to_path_buf()
+                };
+
+                if let Err(e) = planning::save_pads_to_scene(&path, pads) {
+                    eprintln!("Failed to save pads: {}", e);
+                    return;
+                }
+                let mut settings: AppSettings = confy::load("swarmkeeper", None).unwrap_or_default();
+                settings.last_scene_config = Some(path.to_string_lossy().into_owned());
+                if let Err(e) = confy::store("swarmkeeper", None, &settings) {
+                    eprintln!("Failed to persist last_scene_config: {}", e);
+                }
+                if let Some(ui) = uw.upgrade() {
+                    let name = path.file_name()
+                        .and_then(|n| n.to_str())
+                        .map(|s| s.to_string())
+                        .unwrap_or_default();
+                    ui.set_viz_loaded_scene_name(name.into());
+                }
+                eprintln!("Saved pads to {:?}", path);
+            }).unwrap();
+        });
+    }
+
     // Identify unit (blink LEDs or pulse motors)
     {
         let swarm_state = swarm_state.clone();
@@ -3747,6 +3961,8 @@ async fn main() {
         obstacle_colors: Vec<[f32; 3]>,
         room: [f32; 3],
         room_offset: [f32; 3],
+        flight_area: Option<planning::FlightArea>,
+        takeoff_pads: Vec<planning::TakeoffPad>,
         undo_stack: Vec<(Vec<coverage::BaseStation>, Vec<tdoa3::Anchor>, Vec<planning::Obstacle>)>,
     }
     let planning_state = std::sync::Arc::new(std::sync::Mutex::new(PlanningState {
@@ -3763,6 +3979,8 @@ async fn main() {
         obstacle_colors: Vec::new(),
         room: [8.0, 8.0, 3.0],
         room_offset: [0.0; 3],
+        flight_area: None,
+        takeoff_pads: Vec::new(),
         undo_stack: Vec::new(),
     }));
 
@@ -3793,6 +4011,7 @@ async fn main() {
         let tdoa3_state = tdoa3_state.clone();
         let wizard_state_render = wizard_state.clone();
         let planning_state_render = planning_state.clone();
+        let viz_scene_state = viz_scene_state.clone();
         let mut scene_renderer: Option<renderer::Scene3DRenderer> = None;
         let mut coverage_renderer: Option<renderer::Scene3DRenderer> = None;
         let mut tdoa3_renderer: Option<renderer::Scene3DRenderer> = None;
@@ -3934,8 +4153,26 @@ async fn main() {
                                 }
                             }
 
+                            // Scene overlay (flight area + pads + obstacles)
+                            let (flight_area, pads, obs_tris, obs_wires, obs_colors) = if app.get_viz_show_scene_overlay() {
+                                if let Ok(s) = viz_scene_state.try_lock() {
+                                    let fa = s.flight_area.as_ref().map(|f| renderer::FlightAreaBox {
+                                        min: f.min, max: f.max,
+                                    });
+                                    let pads: Vec<renderer::PadCircle> = s.takeoff_pads.iter()
+                                        .map(|p| renderer::PadCircle { x: p.x, y: p.y, radius: p.radius })
+                                        .collect();
+                                    (fa, pads, s.obstacle_triangles.clone(), s.obstacle_wireframes.clone(), s.obstacle_colors.clone())
+                                } else {
+                                    (None, Vec::new(), Vec::new(), Vec::new(), Vec::new())
+                                }
+                            } else {
+                                (None, Vec::new(), Vec::new(), Vec::new(), Vec::new())
+                            };
+
                             let texture = renderer.render(
                                 width, height, yaw, pitch, distance, pan_x, pan_y, &unit_positions, &fixed_points, &trajectory_lines,
+                                flight_area, &pads, &obs_tris, &obs_wires, &obs_colors,
                             );
                             app.set_viz_texture(texture);
 
@@ -6227,10 +6464,12 @@ async fn main() {
         // Save scene
         let ps = planning_state.clone();
         let uw = ui_weak.clone();
+        let viz_scene_state_save = viz_scene_state.clone();
         ui.on_planning_save_scene(move || {
             let Some(ui) = uw.upgrade() else { return };
             let uw2 = ui.as_weak();
             let ps = ps.clone();
+            let viz_scene_state = viz_scene_state_save.clone();
             slint::spawn_local(async move {
                 let Some(handle) = rfd::AsyncFileDialog::new()
                     .add_filter("YAML", &["yaml", "yml"])
@@ -6241,7 +6480,24 @@ async fn main() {
                 let path = handle.path().to_path_buf();
                 let Some(ui) = uw2.upgrade() else { return };
 
-                let pstate = ps.lock().unwrap();
+                let mut pstate = ps.lock().unwrap();
+                // Sync flight area from UI inputs into state before saving
+                if ui.get_planning_flight_area_enabled() {
+                    pstate.flight_area = Some(planning::FlightArea {
+                        min: [
+                            ui.get_planning_flight_area_min_x().parse().unwrap_or(-2.0),
+                            ui.get_planning_flight_area_min_y().parse().unwrap_or(-2.0),
+                            ui.get_planning_flight_area_min_z().parse().unwrap_or(0.0),
+                        ],
+                        max: [
+                            ui.get_planning_flight_area_max_x().parse().unwrap_or(2.0),
+                            ui.get_planning_flight_area_max_y().parse().unwrap_or(2.0),
+                            ui.get_planning_flight_area_max_z().parse().unwrap_or(2.0),
+                        ],
+                    });
+                } else {
+                    pstate.flight_area = None;
+                }
                 let scene = planning::PlanningScene::new(
                     ui.get_planning_room_x().parse().unwrap_or(8.0),
                     ui.get_planning_room_y().parse().unwrap_or(8.0),
@@ -6251,6 +6507,8 @@ async fn main() {
                     &pstate.base_stations,
                     &pstate.anchors,
                     &pstate.obstacles,
+                    pstate.flight_area.clone(),
+                    pstate.takeoff_pads.clone(),
                     ui.get_planning_receiver_fov_enabled(),
                     ui.get_planning_max_bs_distance().parse().unwrap_or(5.0),
                     [
@@ -6266,6 +6524,17 @@ async fn main() {
                 );
                 if let Err(e) = planning::save_scene(&path, &scene) {
                     eprintln!("Failed to save planning scene: {}", e);
+                } else {
+                    let mut settings: AppSettings = confy::load("swarmkeeper", None).unwrap_or_default();
+                    settings.last_scene_config = Some(path.to_string_lossy().into_owned());
+                    if let Err(e) = confy::store("swarmkeeper", None, &settings) {
+                        eprintln!("Failed to persist last_scene_config: {}", e);
+                    }
+                    // Sync the visualizer overlay so it reflects the saved scene
+                    let mut s = viz_scene_state.lock().unwrap();
+                    s.flight_area = pstate.flight_area.clone();
+                    s.takeoff_pads = pstate.takeoff_pads.clone();
+                    s.set_obstacles(&pstate.obstacles);
                 }
             }).unwrap();
         });
@@ -6273,10 +6542,12 @@ async fn main() {
         // Load scene
         let ps = planning_state.clone();
         let uw = ui_weak.clone();
+        let viz_scene_state_load = viz_scene_state.clone();
         ui.on_planning_load_scene(move || {
             let Some(ui) = uw.upgrade() else { return };
             let uw2 = ui.as_weak();
             let ps = ps.clone();
+            let viz_scene_state = viz_scene_state_load.clone();
             slint::spawn_local(async move {
                 let Some(handle) = rfd::AsyncFileDialog::new()
                     .add_filter("YAML", &["yaml", "yml"])
@@ -6292,10 +6563,25 @@ async fn main() {
                         ps.base_stations = scene.base_stations();
                         ps.anchors = scene.anchors();
                         ps.obstacles = scene.obstacles();
+                        ps.flight_area = scene.flight_area.clone();
+                        ps.takeoff_pads = scene.takeoff_pads.clone();
+                        // Sync visualizer overlay
+                        {
+                            let mut s = viz_scene_state.lock().unwrap();
+                            s.flight_area = ps.flight_area.clone();
+                            s.takeoff_pads = ps.takeoff_pads.clone();
+                            s.set_obstacles(&ps.obstacles);
+                        }
                         rebuild_bs_render_data(&mut ps);
                         rebuild_anchor_positions(&mut ps);
                         rebuild_obstacle_meshes(&mut ps);
                         ps.undo_stack.clear();
+
+                        let mut settings: AppSettings = confy::load("swarmkeeper", None).unwrap_or_default();
+                        settings.last_scene_config = Some(path.to_string_lossy().into_owned());
+                        if let Err(e) = confy::store("swarmkeeper", None, &settings) {
+                            eprintln!("Failed to persist last_scene_config: {}", e);
+                        }
 
                         ui.set_planning_room_x(format!("{}", scene.room_x).into());
                         ui.set_planning_room_y(format!("{}", scene.room_y).into());
@@ -6356,6 +6642,28 @@ async fn main() {
                             on_floor: o.on_floor,
                         }).collect();
                         ui.set_planning_obstacles(slint::ModelRc::new(slint::VecModel::from(obs_model)));
+
+                        // Flight area
+                        if let Some(fa) = &ps.flight_area {
+                            ui.set_planning_flight_area_enabled(true);
+                            ui.set_planning_flight_area_min_x(format!("{:.2}", fa.min[0]).into());
+                            ui.set_planning_flight_area_min_y(format!("{:.2}", fa.min[1]).into());
+                            ui.set_planning_flight_area_min_z(format!("{:.2}", fa.min[2]).into());
+                            ui.set_planning_flight_area_max_x(format!("{:.2}", fa.max[0]).into());
+                            ui.set_planning_flight_area_max_y(format!("{:.2}", fa.max[1]).into());
+                            ui.set_planning_flight_area_max_z(format!("{:.2}", fa.max[2]).into());
+                        } else {
+                            ui.set_planning_flight_area_enabled(false);
+                        }
+
+                        // Takeoff pads (read-only display)
+                        let pads_model: Vec<PlanPadData> = ps.takeoff_pads.iter().map(|p| PlanPadData {
+                            label: p.label.clone().into(),
+                            x: format!("{:.2}", p.x).into(),
+                            y: format!("{:.2}", p.y).into(),
+                            radius: format!("{:.2}", p.radius).into(),
+                        }).collect();
+                        ui.set_planning_takeoff_pads(slint::ModelRc::new(slint::VecModel::from(pads_model)));
 
                         ui.set_planning_selected_type(0);
                         ui.set_planning_selected_index(-1);

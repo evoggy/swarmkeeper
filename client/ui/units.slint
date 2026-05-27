@@ -341,6 +341,9 @@ component UnitSidebar inherits Rectangle {
     in property <UnitData> unit;
     in property <bool> has-selection;
     in property <[JournalEntryData]> journal-entries;
+    in-out property <string> goto-x-text: "0";
+    in-out property <string> goto-y-text: "0";
+    in-out property <string> goto-z-text: "0";
     callback close-clicked();
     callback journal-clicked();
     callback add-journal-entry(string);
@@ -349,6 +352,7 @@ component UnitSidebar inherits Rectangle {
     callback clear-trajectory-clicked();
     callback takeoff-clicked(/* height */ string, /* yaw */ string, /* time */ string);
     callback goto-clicked(/* x */ string, /* y */ string, /* z */ string, /* yaw */ string, /* relative */ bool);
+    callback random-goto-clicked();
     callback go-home-clicked();
     callback land-clicked();
     callback identify-clicked();
@@ -690,7 +694,7 @@ component UnitSidebar inherits Rectangle {
                         width: 60px;
                         Text { text: "X"; font-size: 9px; color: Palette.foreground.transparentize(0.5); }
                         goto-x := LineEdit {
-                            text: "0";
+                            text <=> root.goto-x-text;
                             font-size: 11px;
                             height: 24px;
                         }
@@ -701,7 +705,7 @@ component UnitSidebar inherits Rectangle {
                         width: 60px;
                         Text { text: "Y"; font-size: 9px; color: Palette.foreground.transparentize(0.5); }
                         goto-y := LineEdit {
-                            text: "0";
+                            text <=> root.goto-y-text;
                             font-size: 11px;
                             height: 24px;
                         }
@@ -712,7 +716,7 @@ component UnitSidebar inherits Rectangle {
                         width: 60px;
                         Text { text: "Z"; font-size: 9px; color: Palette.foreground.transparentize(0.5); }
                         goto-z := LineEdit {
-                            text: "0";
+                            text <=> root.goto-z-text;
                             font-size: 11px;
                             height: 24px;
                         }
@@ -738,9 +742,18 @@ component UnitSidebar inherits Rectangle {
                     }
                 }
 
-                Button {
-                    text: "Goto";
-                    clicked => { goto-clicked(goto-x.text, goto-y.text, goto-z.text, goto-yaw.text, goto-relative.checked); }
+                HorizontalLayout {
+                    spacing: 4px;
+                    Button {
+                        text: "Goto";
+                        horizontal-stretch: 1;
+                        clicked => { goto-clicked(goto-x.text, goto-y.text, goto-z.text, goto-yaw.text, goto-relative.checked); }
+                    }
+                    Button {
+                        text: "Random in area";
+                        horizontal-stretch: 1;
+                        clicked => { random-goto-clicked(); }
+                    }
                 }
 
                 // Go to Home
@@ -767,6 +780,9 @@ export component UnitsContent inherits Rectangle {
     in property <int> sort-column: -1;
     in property <bool> sort-ascending: true;
     in property <[JournalEntryData]> journal-entries;
+    in-out property <string> goto-x-text: "0";
+    in-out property <string> goto-y-text: "0";
+    in-out property <string> goto-z-text: "0";
 
     callback sort-requested(/* column */ int, /* ascending */ bool);
     callback open-journal-requested(/* row index */ int);
@@ -776,6 +792,7 @@ export component UnitsContent inherits Rectangle {
     callback clear-trajectory-requested(/* row index */ int);
     callback takeoff-requested(/* row index */ int, /* height */ string, /* yaw */ string, /* time */ string);
     callback goto-requested(/* row index */ int, /* x */ string, /* y */ string, /* z */ string, /* yaw */ string, /* relative */ bool);
+    callback random-goto-requested(/* row index */ int);
     callback go-home-requested(/* row index */ int);
     callback land-requested(/* row index */ int);
     callback identify-requested(/* row index */ int);
@@ -934,6 +951,9 @@ export component UnitsContent inherits Rectangle {
         // Sidebar
         if sidebar-open: UnitSidebar {
             width: sidebar-width;
+            goto-x-text <=> root.goto-x-text;
+            goto-y-text <=> root.goto-y-text;
+            goto-z-text <=> root.goto-z-text;
             unit: selected-row >= 0 && selected-row < sorted-units.length ? sorted-units[selected-row] : {
                 name: "",
                 uri: "",
@@ -966,6 +986,7 @@ export component UnitsContent inherits Rectangle {
             clear-trajectory-clicked => { clear-trajectory-requested(selected-row); }
             takeoff-clicked(height, yaw, time) => { takeoff-requested(selected-row, height, yaw, time); }
             goto-clicked(x, y, z, yaw, relative) => { goto-requested(selected-row, x, y, z, yaw, relative); }
+            random-goto-clicked => { random-goto-requested(selected-row); }
             go-home-clicked => { go-home-requested(selected-row); }
             land-clicked => { land-requested(selected-row); }
             identify-clicked => { identify-requested(selected-row); }

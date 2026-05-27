@@ -129,6 +129,19 @@ pub struct UnitPos {
     pub color: [f32; 3],
 }
 
+#[derive(Clone, Copy)]
+pub struct PadCircle {
+    pub x: f32,
+    pub y: f32,
+    pub radius: f32,
+}
+
+#[derive(Clone, Copy)]
+pub struct FlightAreaBox {
+    pub min: [f32; 3],
+    pub max: [f32; 3],
+}
+
 pub struct Scene3DRenderer {
     gl: Rc<glow::Context>,
     program: glow::Program,
@@ -231,6 +244,11 @@ impl Scene3DRenderer {
         units: &[UnitPos],
         fixed_points: &[UnitPos],
         trajectory_lines: &[f32],
+        flight_area: Option<FlightAreaBox>,
+        pads: &[PadCircle],
+        obstacle_triangles: &[Vec<f32>],
+        obstacle_wireframes: &[Vec<f32>],
+        obstacle_colors: &[[f32; 3]],
     ) -> slint::Image {
         let width = width.max(1);
         let height = height.max(1);
@@ -346,6 +364,87 @@ impl Scene3DRenderer {
                 gl.uniform_1_f32(Some(&self.u_point_size), 1.0);
                 upload_and_draw(gl, self.vbo, trajectory_lines, glow::LINE_STRIP);
                 gl.draw_arrays(glow::LINE_STRIP, 0, (trajectory_lines.len() / 3) as i32);
+            }
+
+            // Draw obstacles (solid triangles + wireframe edges)
+            if !obstacle_triangles.is_empty() {
+                gl.enable(glow::BLEND);
+                gl.blend_func(glow::SRC_ALPHA, glow::ONE_MINUS_SRC_ALPHA);
+                for (i, tris) in obstacle_triangles.iter().enumerate() {
+                    if !tris.is_empty() {
+                        let c = obstacle_colors.get(i).copied().unwrap_or([0.45, 0.45, 0.50]);
+                        gl.uniform_3_f32(Some(&self.u_color), c[0], c[1], c[2]);
+                        gl.uniform_1_f32(Some(&self.u_alpha), 0.75);
+                        upload_and_draw(gl, self.vbo, tris, glow::TRIANGLES);
+                        gl.draw_arrays(glow::TRIANGLES, 0, tris.len() as i32 / 3);
+                    }
+                }
+                gl.disable(glow::BLEND);
+                for (i, wire) in obstacle_wireframes.iter().enumerate() {
+                    if !wire.is_empty() {
+                        let c = obstacle_colors.get(i).copied().unwrap_or([0.45, 0.45, 0.50]);
+                        gl.uniform_3_f32(
+                            Some(&self.u_color),
+                            (c[0] + 0.2).min(1.0),
+                            (c[1] + 0.2).min(1.0),
+                            (c[2] + 0.2).min(1.0),
+                        );
+                        gl.uniform_1_f32(Some(&self.u_alpha), 1.0);
+                        upload_and_draw(gl, self.vbo, wire, glow::LINES);
+                        gl.draw_arrays(glow::LINES, 0, wire.len() as i32 / 3);
+                    }
+                }
+                gl.uniform_1_f32(Some(&self.u_alpha), 1.0);
+            }
+
+            // Draw flight area as a wireframe box
+            if let Some(fa) = flight_area {
+                let [x0, y0, z0] = fa.min;
+                let [x1, y1, z1] = fa.max;
+                let edges: [f32; 72] = [
+                    // bottom rectangle (z0)
+                    x0, y0, z0,  x1, y0, z0,
+                    x1, y0, z0,  x1, y1, z0,
+                    x1, y1, z0,  x0, y1, z0,
+                    x0, y1, z0,  x0, y0, z0,
+                    // top rectangle (z1)
+                    x0, y0, z1,  x1, y0, z1,
+                    x1, y0, z1,  x1, y1, z1,
+                    x1, y1, z1,  x0, y1, z1,
+                    x0, y1, z1,  x0, y0, z1,
+                    // verticals
+                    x0, y0, z0,  x0, y0, z1,
+                    x1, y0, z0,  x1, y0, z1,
+                    x1, y1, z0,  x1, y1, z1,
+                    x0, y1, z0,  x0, y1, z1,
+                ];
+                gl.uniform_3_f32(Some(&self.u_color), 0.95, 0.85, 0.20); // amber
+                gl.uniform_1_f32(Some(&self.u_point_size), 1.0);
+                upload_and_draw(gl, self.vbo, &edges, glow::LINES);
+                gl.draw_arrays(glow::LINES, 0, (edges.len() / 3) as i32);
+            }
+
+            // Draw takeoff pads as circles on the floor
+            if !pads.is_empty() {
+                gl.uniform_3_f32(Some(&self.u_color), 0.20, 0.85, 0.95); // light cyan
+                gl.uniform_1_f32(Some(&self.u_point_size), 1.0);
+                let segments = 32;
+                let mut verts: Vec<f32> = Vec::with_capacity(pads.len() * (segments + 1) * 3);
+                for pad in pads {
+                    for i in 0..=segments {
+                        let theta = (i as f32) / (segments as f32) * std::f32::consts::TAU;
+                        verts.push(pad.x + pad.radius * theta.cos());
+                        verts.push(pad.y + pad.radius * theta.sin());
+                        verts.push(0.0);
+                    }
+                }
+                if !verts.is_empty() {
+                    upload_and_draw(gl, self.vbo, &verts, glow::LINES);
+                    let per_pad = (segments + 1) as i32;
+                    for (idx, _) in pads.iter().enumerate() {
+                        gl.draw_arrays(glow::LINE_STRIP, idx as i32 * per_pad, per_pad);
+                    }
+                }
             }
 
             gl.use_program(None);

@@ -97,6 +97,13 @@ export struct PlanObstacleData {
     on-floor: bool,
 }
 
+export struct PlanPadData {
+    label: string,
+    x: string,
+    y: string,
+    radius: string,
+}
+
 // Simple color swatch picker
 component ColorPicker inherits Rectangle {
     in-out property <float> picked-r: 0.45;
@@ -154,6 +161,8 @@ export component PlanningContent inherits Rectangle {
     property <bool> bs-expanded: true;
     property <bool> anchors-expanded: true;
     property <bool> obs-expanded: true;
+    property <bool> flight-area-expanded: true;
+    property <bool> pads-expanded: false;
 
     // Camera state
     in-out property <float> cam-yaw: 0.8;
@@ -184,6 +193,18 @@ export component PlanningContent inherits Rectangle {
     in-out property <bool> show-coverage-2: true;
     in-out property <bool> show-coverage-3: true;
     in-out property <bool> show-coverage-4: true;
+
+    // Flight area
+    in-out property <bool> flight-area-enabled: false;
+    in-out property <string> flight-area-min-x: "-2.0";
+    in-out property <string> flight-area-min-y: "-2.0";
+    in-out property <string> flight-area-min-z: "0.0";
+    in-out property <string> flight-area-max-x: "2.0";
+    in-out property <string> flight-area-max-y: "2.0";
+    in-out property <string> flight-area-max-z: "2.0";
+
+    // Takeoff pads (read-only display)
+    in-out property <[PlanPadData]> takeoff-pads;
 
     // TDoA3 settings
     in-out property <string> max-range: "15.0";
@@ -741,6 +762,79 @@ export component PlanningContent inherits Rectangle {
                                             });
                                         }
                                     }
+                                }
+                            }
+                        }
+
+                        Rectangle { height: 1px; background: Palette.border; }
+
+                        // --- Flight Area ---
+                        HorizontalLayout {
+                            SectionHeader {
+                                title: "Flight Area";
+                                count: root.flight-area-enabled ? 1 : 0;
+                                expanded <=> flight-area-expanded;
+                                horizontal-stretch: 1;
+                            }
+                        }
+
+                        if flight-area-expanded: VerticalLayout {
+                            spacing: 6px;
+
+                            CheckBox {
+                                text: "Enabled";
+                                checked <=> root.flight-area-enabled;
+                            }
+
+                            HorizontalLayout {
+                                spacing: 4px;
+                                Text { text: "Min"; font-size: 11px; vertical-alignment: center; width: 28px; }
+                                NumericInput { text <=> root.flight-area-min-x; width: 60px; }
+                                NumericInput { text <=> root.flight-area-min-y; width: 60px; }
+                                NumericInput { text <=> root.flight-area-min-z; width: 60px; }
+                            }
+                            HorizontalLayout {
+                                spacing: 4px;
+                                Text { text: "Max"; font-size: 11px; vertical-alignment: center; width: 28px; }
+                                NumericInput { text <=> root.flight-area-max-x; width: 60px; }
+                                NumericInput { text <=> root.flight-area-max-y; width: 60px; }
+                                NumericInput { text <=> root.flight-area-max-z; width: 60px; }
+                            }
+                        }
+
+                        Rectangle { height: 1px; background: Palette.border; }
+
+                        // --- Takeoff Pads (read-only; captured in Visualization) ---
+                        HorizontalLayout {
+                            SectionHeader {
+                                title: "Takeoff Pads";
+                                count: root.takeoff-pads.length;
+                                expanded <=> pads-expanded;
+                                horizontal-stretch: 1;
+                            }
+                        }
+
+                        if pads-expanded: VerticalLayout {
+                            spacing: 4px;
+                            if root.takeoff-pads.length == 0: Text {
+                                text: "No pads saved. Use \"Save Pad Positions\" in Visualization.";
+                                font-size: 10px;
+                                color: Palette.foreground.transparentize(0.5);
+                                wrap: word-wrap;
+                            }
+                            for pad in root.takeoff-pads: HorizontalLayout {
+                                spacing: 4px;
+                                Text {
+                                    text: pad.label;
+                                    font-size: 10px;
+                                    vertical-alignment: center;
+                                    horizontal-stretch: 1;
+                                }
+                                Text {
+                                    text: "(" + pad.x + ", " + pad.y + ") r=" + pad.radius;
+                                    font-size: 10px;
+                                    color: Palette.foreground.transparentize(0.4);
+                                    vertical-alignment: center;
                                 }
                             }
                         }

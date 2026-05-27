@@ -341,6 +341,21 @@ struct SceneAnchor {
     z: f32,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct FlightArea {
+    pub min: [f32; 3],
+    pub max: [f32; 3],
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TakeoffPad {
+    pub x: f32,
+    pub y: f32,
+    pub radius: f32,
+    #[serde(default)]
+    pub label: String,
+}
+
 #[derive(Serialize, Deserialize)]
 pub struct PlanningScene {
     pub room_x: f32,
@@ -353,6 +368,10 @@ pub struct PlanningScene {
     anchors: Vec<SceneAnchor>,
     #[serde(default)]
     obstacles: Vec<Obstacle>,
+    #[serde(default)]
+    pub flight_area: Option<FlightArea>,
+    #[serde(default)]
+    pub takeoff_pads: Vec<TakeoffPad>,
     #[serde(default = "default_true")]
     pub receiver_fov_enabled: bool,
     #[serde(default = "default_max_bs_dist")]
@@ -393,6 +412,8 @@ impl PlanningScene {
         base_stations: &[coverage::BaseStation],
         anchors: &[tdoa3::Anchor],
         obstacles: &[Obstacle],
+        flight_area: Option<FlightArea>,
+        takeoff_pads: Vec<TakeoffPad>,
         receiver_fov_enabled: bool,
         max_bs_distance: f32,
         show_coverage: [bool; 5],
@@ -425,6 +446,8 @@ impl PlanningScene {
                 })
                 .collect(),
             obstacles: obstacles.to_vec(),
+            flight_area,
+            takeoff_pads,
             receiver_fov_enabled,
             max_bs_distance,
             show_coverage,
@@ -469,6 +492,33 @@ pub fn load_scene(path: &std::path::Path) -> Result<PlanningScene, String> {
     let content =
         std::fs::read_to_string(path).map_err(|e| format!("Failed to read file: {}", e))?;
     serde_yaml::from_str(&content).map_err(|e| format!("Failed to parse scene: {}", e))
+}
+
+/// Update only the `takeoff_pads` field of an existing scene file. If the file
+/// doesn't exist or can't be parsed, a minimal scene is created.
+pub fn save_pads_to_scene(
+    path: &std::path::Path,
+    pads: Vec<TakeoffPad>,
+) -> Result<(), String> {
+    // Round-trip via Value so we preserve unknown/unstable fields and only
+    // overwrite takeoff_pads.
+    let mut value: serde_yaml::Value = match std::fs::read_to_string(path) {
+        Ok(content) => serde_yaml::from_str(&content)
+            .map_err(|e| format!("Failed to parse existing scene: {}", e))?,
+        Err(_) => serde_yaml::Value::Mapping(serde_yaml::Mapping::new()),
+    };
+    let mapping = value
+        .as_mapping_mut()
+        .ok_or_else(|| "Scene file is not a YAML mapping".to_string())?;
+    let pads_value = serde_yaml::to_value(&pads)
+        .map_err(|e| format!("Failed to serialize pads: {}", e))?;
+    mapping.insert(
+        serde_yaml::Value::String("takeoff_pads".to_string()),
+        pads_value,
+    );
+    let content =
+        serde_yaml::to_string(&value).map_err(|e| format!("Failed to serialize: {}", e))?;
+    std::fs::write(path, content).map_err(|e| format!("Failed to write file: {}", e))
 }
 
 /// Test if any obstacle blocks the ray from `origin` to `target`.
