@@ -6363,6 +6363,9 @@ async fn main() {
                         ui.set_planning_room_y(format!("{}", scene.room_y).into());
                         ui.set_planning_room_z(format!("{}", scene.room_z).into());
                         ui.set_planning_center_origin(scene.center_origin);
+                        ui.set_planning_room_offset_x(format!("{}", scene.room_offset[0]).into());
+                        ui.set_planning_room_offset_y(format!("{}", scene.room_offset[1]).into());
+                        ui.set_planning_room_offset_z(format!("{}", scene.room_offset[2]).into());
                         ui.set_planning_receiver_fov_enabled(scene.receiver_fov_enabled);
                         ui.set_planning_max_bs_distance(format!("{}", scene.max_bs_distance).into());
 
@@ -6504,6 +6507,11 @@ async fn main() {
                     ui.get_planning_room_z().parse().unwrap_or(3.0),
                     ui.get_planning_resolution().parse().unwrap_or(5.0),
                     ui.get_planning_center_origin(),
+                    [
+                        ui.get_planning_room_offset_x().parse().unwrap_or(0.0),
+                        ui.get_planning_room_offset_y().parse().unwrap_or(0.0),
+                        ui.get_planning_room_offset_z().parse().unwrap_or(0.0),
+                    ],
                     &pstate.base_stations,
                     &pstate.anchors,
                     &pstate.obstacles,
@@ -6588,6 +6596,9 @@ async fn main() {
                         ui.set_planning_room_z(format!("{}", scene.room_z).into());
                         ui.set_planning_resolution(format!("{}", scene.resolution).into());
                         ui.set_planning_center_origin(scene.center_origin);
+                        ui.set_planning_room_offset_x(format!("{}", scene.room_offset[0]).into());
+                        ui.set_planning_room_offset_y(format!("{}", scene.room_offset[1]).into());
+                        ui.set_planning_room_offset_z(format!("{}", scene.room_offset[2]).into());
                         ui.set_planning_receiver_fov_enabled(scene.receiver_fov_enabled);
                         ui.set_planning_max_bs_distance(format!("{}", scene.max_bs_distance).into());
                         ui.set_planning_show_coverage_0(scene.show_coverage[0]);
@@ -6598,10 +6609,11 @@ async fn main() {
                         ui.set_planning_max_range(format!("{}", scene.max_range).into());
 
                         // Compute coverage
+                        let uo = scene.room_offset;
                         let offset = if scene.center_origin {
-                            [-scene.room_x / 2.0, -scene.room_y / 2.0, 0.0]
+                            [-scene.room_x / 2.0 + uo[0], -scene.room_y / 2.0 + uo[1], uo[2]]
                         } else {
-                            [0.0, 0.0, 0.0]
+                            [uo[0], uo[1], uo[2]]
                         };
                         ps.room = [scene.room_x, scene.room_y, scene.room_z];
                         ps.room_offset = offset;
@@ -7121,10 +7133,13 @@ async fn main() {
             let max_range: f32 = ui.get_planning_max_range().parse().unwrap_or(15.0);
             let receiver_fov = if ui.get_planning_receiver_fov_enabled() { Some(170.0) } else { None };
 
+            let user_offset_x: f32 = ui.get_planning_room_offset_x().parse().unwrap_or(0.0);
+            let user_offset_y: f32 = ui.get_planning_room_offset_y().parse().unwrap_or(0.0);
+            let user_offset_z: f32 = ui.get_planning_room_offset_z().parse().unwrap_or(0.0);
             let offset = if center {
-                [-room_x / 2.0, -room_y / 2.0, 0.0]
+                [-room_x / 2.0 + user_offset_x, -room_y / 2.0 + user_offset_y, user_offset_z]
             } else {
-                [0.0, 0.0, 0.0]
+                [user_offset_x, user_offset_y, user_offset_z]
             };
 
             let (base_stations, anchors, obstacles) = {

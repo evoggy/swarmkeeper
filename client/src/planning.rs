@@ -364,6 +364,8 @@ pub struct PlanningScene {
     pub resolution: f32,
     #[serde(default)]
     pub center_origin: bool,
+    #[serde(default)]
+    pub room_offset: [f32; 3],
     base_stations: Vec<SceneBaseStation>,
     anchors: Vec<SceneAnchor>,
     #[serde(default)]
@@ -409,6 +411,7 @@ impl PlanningScene {
         room_z: f32,
         resolution: f32,
         center_origin: bool,
+        room_offset: [f32; 3],
         base_stations: &[coverage::BaseStation],
         anchors: &[tdoa3::Anchor],
         obstacles: &[Obstacle],
@@ -427,6 +430,7 @@ impl PlanningScene {
             room_z,
             resolution,
             center_origin,
+            room_offset,
             base_stations: base_stations
                 .iter()
                 .map(|bs| SceneBaseStation {
