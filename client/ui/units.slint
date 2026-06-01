@@ -337,7 +337,7 @@ component LinkQualityBar inherits Rectangle {
     }
 }
 
-component UnitSidebar inherits Rectangle {
+export component UnitSidebar inherits Rectangle {
     in property <UnitData> unit;
     in property <bool> has-selection;
     in property <[JournalEntryData]> journal-entries;
@@ -773,43 +773,12 @@ component UnitSidebar inherits Rectangle {
     }
 }
 
-export component UnitsContent inherits Rectangle {
-    in property <[UnitData]> units;
+// Shared overlay popups triggered by the unit sidebar actions (journal,
+// manual control, power-off confirm). Fills its parent and floats on top.
+export component UnitActionPopups inherits Rectangle {
+    in property <int> selected-row: -1;
     in property <[UnitData]> sorted-units;
-    in property <[[StandardListViewItem]]> table-rows;
-    in property <int> sort-column: -1;
-    in property <bool> sort-ascending: true;
     in property <[JournalEntryData]> journal-entries;
-    in-out property <string> goto-x-text: "0";
-    in-out property <string> goto-y-text: "0";
-    in-out property <string> goto-z-text: "0";
-
-    callback sort-requested(/* column */ int, /* ascending */ bool);
-    callback open-journal-requested(/* row index */ int);
-    callback add-journal-entry-requested(/* row index */ int, /* text */ string);
-    callback upload-trajectory-requested(/* row index */ int);
-    callback fly-trajectory-requested(/* row index */ int);
-    callback clear-trajectory-requested(/* row index */ int);
-    callback takeoff-requested(/* row index */ int, /* height */ string, /* yaw */ string, /* time */ string);
-    callback goto-requested(/* row index */ int, /* x */ string, /* y */ string, /* z */ string, /* yaw */ string, /* relative */ bool);
-    callback random-goto-requested(/* row index */ int);
-    callback go-home-requested(/* row index */ int);
-    callback land-requested(/* row index */ int);
-    callback identify-requested(/* row index */ int);
-    callback connect-unit-requested(/* row index */ int);
-    callback disconnect-unit-requested(/* row index */ int);
-    callback delete-journal-entry-requested(/* row index */ int, /* entry index */ int);
-    callback row-selected(/* row index */ int);
-    callback open-manual-control-requested(/* row index */ int);
-    callback joystick-selected(/* row index */ int, /* joystick index */ int);
-    callback manual-control-stopped(/* row index */ int);
-    callback arm-requested(/* row index */ int, /* arm */ bool);
-    callback recover-requested(/* row index */ int);
-    callback reboot-requested(/* row index */ int);
-    callback power-off-requested(/* row index */ int);
-    callback sysoff-requested(/* row index */ int);
-    callback syson-requested(/* row index */ int);
-
     in property <[string]> joystick-names;
     in property <float> stick-lx;
     in property <float> stick-ly;
@@ -817,196 +786,16 @@ export component UnitsContent inherits Rectangle {
     in property <float> stick-ry;
     in property <bool> manual-control-armed;
 
-    private property <int> selected-row: -1;
-    private property <bool> sidebar-open: false;
-    private property <bool> journal-open: false;
-    private property <bool> manual-control-open: false;
-    private property <bool> confirm-power-off-open: false;
-    private property <length> sidebar-width: 360px;
+    in-out property <bool> manual-control-open: false;
+    in-out property <bool> confirm-power-off-open: false;
+    in-out property <bool> journal-open: false;
 
-    // Column widths (shared between header and data rows for alignment)
-    private property <length> col-indicator-w: 40px;
-    private property <length> col-status-w: 90px;
-    private property <length> col-name-w: 100px;
-    private property <length> col-uri-w: 160px;
-    private property <length> col-x-w: 60px;
-    private property <length> col-y-w: 60px;
-    private property <length> col-z-w: 60px;
-    private property <length> col-battery-w: 110px;
-    private property <length> col-link-w: 90px;
-    private property <length> col-power-w: 80px;
-    private property <length> col-supervisor-w: 90px;
-    private property <length> col-lh-w: 50px;
-    private property <length> col-loco-w: 50px;
-    private property <length> col-ledup-w: 55px;
-    private property <length> col-leddn-w: 55px;
-
-    function toggle-sort(c: int) {
-        if (sort-column == c) {
-            sort-requested(c, !sort-ascending);
-        } else {
-            sort-requested(c, true);
-        }
-    }
-
-    HorizontalLayout {
-        spacing: 0px;
-
-        // Table
-        VerticalLayout {
-            horizontal-stretch: 1;
-
-            // Header row
-            Rectangle {
-                height: 32px;
-                background: Palette.background;
-
-                HorizontalLayout {
-                    spacing: 0px;
-
-                    HeaderCell { width: col-indicator-w; col-width <=> col-indicator-w; min-col-width: 30px; label: "●"; column-index: 0; active-col: sort-column; active-ascending: sort-ascending; clicked => { toggle-sort(0); } }
-                    HeaderCell { horizontal-stretch: 1; min-width: col-status-w; col-width <=> col-status-w; min-col-width: 60px; label: "Status"; column-index: 1; active-col: sort-column; active-ascending: sort-ascending; clicked => { toggle-sort(1); } }
-                    HeaderCell { horizontal-stretch: 1; min-width: col-name-w; col-width <=> col-name-w; min-col-width: 60px; label: "Name"; column-index: 2; active-col: sort-column; active-ascending: sort-ascending; clicked => { toggle-sort(2); } }
-                    HeaderCell { horizontal-stretch: 1; min-width: col-uri-w; col-width <=> col-uri-w; min-col-width: 80px; label: "URI"; column-index: 3; active-col: sort-column; active-ascending: sort-ascending; clicked => { toggle-sort(3); } }
-                    HeaderCell { width: col-x-w; col-width <=> col-x-w; min-col-width: 40px; label: "X"; column-index: 4; active-col: sort-column; active-ascending: sort-ascending; clicked => { toggle-sort(4); } }
-                    HeaderCell { width: col-y-w; col-width <=> col-y-w; min-col-width: 40px; label: "Y"; column-index: 5; active-col: sort-column; active-ascending: sort-ascending; clicked => { toggle-sort(5); } }
-                    HeaderCell { width: col-z-w; col-width <=> col-z-w; min-col-width: 40px; label: "Z"; column-index: 6; active-col: sort-column; active-ascending: sort-ascending; clicked => { toggle-sort(6); } }
-                    HeaderCell { width: col-battery-w; col-width <=> col-battery-w; min-col-width: 70px; label: "Battery"; column-index: 7; active-col: sort-column; active-ascending: sort-ascending; clicked => { toggle-sort(7); } }
-                    HeaderCell { width: col-link-w; col-width <=> col-link-w; min-col-width: 60px; label: "Link"; column-index: 8; active-col: sort-column; active-ascending: sort-ascending; clicked => { toggle-sort(8); } }
-                    HeaderCell { width: col-power-w; col-width <=> col-power-w; min-col-width: 50px; label: "Power"; column-index: 9; active-col: sort-column; active-ascending: sort-ascending; clicked => { toggle-sort(9); } }
-                    HeaderCell { width: col-supervisor-w; col-width <=> col-supervisor-w; min-col-width: 50px; label: "Supervisor"; column-index: 10; active-col: sort-column; active-ascending: sort-ascending; clicked => { toggle-sort(10); } }
-                    HeaderCell { width: col-lh-w; col-width <=> col-lh-w; min-col-width: 35px; label: "LH"; column-index: 11; active-col: sort-column; active-ascending: sort-ascending; clicked => { toggle-sort(11); } }
-                    HeaderCell { width: col-loco-w; col-width <=> col-loco-w; min-col-width: 35px; label: "Loco"; column-index: 12; active-col: sort-column; active-ascending: sort-ascending; clicked => { toggle-sort(12); } }
-                    HeaderCell { width: col-ledup-w; col-width <=> col-ledup-w; min-col-width: 40px; label: "LED ⬆"; column-index: 13; active-col: sort-column; active-ascending: sort-ascending; clicked => { toggle-sort(13); } }
-                    HeaderCell { width: col-leddn-w; col-width <=> col-leddn-w; min-col-width: 40px; label: "LED ⬇"; column-index: 14; active-col: sort-column; active-ascending: sort-ascending; clicked => { toggle-sort(14); } }
-                }
-            }
-
-            // Data rows
-            Flickable {
-                vertical-stretch: 1;
-                viewport-height: table-rows.length * 34px;
-
-                for row[i] in table-rows: Rectangle {
-                    width: parent.width;
-                    y: i * 34px;
-                    height: 34px;
-                    background: selected-row == i ? Palette.foreground.transparentize(0.85)
-                              : sorted-units[i].state != UnitState.disconnected && !sorted-units[i].selftest-passed ? #ff000025
-                              : mod(i, 2) == 0 ? transparent
-                              : Palette.background.darker(0.03);
-                    border-width: 1px;
-                    border-color: Palette.border.transparentize(0.6);
-
-                    TouchArea {
-                        clicked => {
-                            if (selected-row == i && sidebar-open) {
-                                sidebar-open = false;
-                                selected-row = -1;
-                            } else {
-                                selected-row = i;
-                                sidebar-open = true;
-                                row-selected(i);
-                            }
-                        }
-                        mouse-cursor: pointer;
-                    }
-
-                    HorizontalLayout {
-                        spacing: 0px;
-
-                        Cell { width: col-indicator-w; value: row[0].text; }
-                        Cell { horizontal-stretch: 1; min-width: col-status-w; value: row[1].text; }
-                        Cell { horizontal-stretch: 1; min-width: col-name-w; value: row[2].text; }
-                        Cell { horizontal-stretch: 1; min-width: col-uri-w; value: row[3].text; }
-                        Cell { width: col-x-w; value: row[4].text; }
-                        Cell { width: col-y-w; value: row[5].text; }
-                        Cell { width: col-z-w; value: row[6].text; }
-                        BatteryCell { width: col-battery-w; voltage: sorted-units[i].battery-voltage; }
-                        LinkQualityCell { width: col-link-w; quality: sorted-units[i].link-quality; }
-                        Cell { width: col-power-w; value: row[9].text; }
-                        Cell { width: col-supervisor-w; value: row[10].text; }
-                        Cell { width: col-lh-w; value: row[11].text; }
-                        Cell { width: col-loco-w; value: row[12].text; }
-                        Cell { width: col-ledup-w; value: row[13].text; }
-                        Cell { width: col-leddn-w; value: row[14].text; }
-                    }
-                }
-            }
-        }
-
-        // Sidebar resize handle
-        if sidebar-open: Rectangle {
-            width: 4px;
-            background: sidebar-drag.has-hover || sidebar-drag.pressed ? Palette.accent-background : transparent;
-
-            sidebar-drag := TouchArea {
-                mouse-cursor: ew-resize;
-                moved => {
-                    sidebar-width = max(300px, min(600px, sidebar-width - self.mouse-x));
-                }
-            }
-        }
-
-        // Sidebar
-        if sidebar-open: UnitSidebar {
-            width: sidebar-width;
-            goto-x-text <=> root.goto-x-text;
-            goto-y-text <=> root.goto-y-text;
-            goto-z-text <=> root.goto-z-text;
-            unit: selected-row >= 0 && selected-row < sorted-units.length ? sorted-units[selected-row] : {
-                name: "",
-                uri: "",
-                description: "",
-                state: UnitState.disconnected,
-                pos-x: 0,
-                pos-y: 0,
-                pos-z: 0,
-                battery-voltage: 0,
-                deck-lighthouse: false,
-                deck-loco: false,
-                deck-led-top: false,
-                deck-led-bottom: false,
-                serial: "",
-                pm-state: "",
-                supervisor-info: 0,
-                link-quality: 0,
-            };
-            has-selection: selected-row >= 0 && selected-row < sorted-units.length;
-            journal-entries: root.journal-entries;
-            journal-clicked => {
-                open-journal-requested(selected-row);
-                journal-open = true;
-            }
-            add-journal-entry(text) => {
-                add-journal-entry-requested(selected-row, text);
-            }
-            upload-trajectory-clicked => { upload-trajectory-requested(selected-row); }
-            fly-trajectory-clicked => { fly-trajectory-requested(selected-row); }
-            clear-trajectory-clicked => { clear-trajectory-requested(selected-row); }
-            takeoff-clicked(height, yaw, time) => { takeoff-requested(selected-row, height, yaw, time); }
-            goto-clicked(x, y, z, yaw, relative) => { goto-requested(selected-row, x, y, z, yaw, relative); }
-            random-goto-clicked => { random-goto-requested(selected-row); }
-            go-home-clicked => { go-home-requested(selected-row); }
-            land-clicked => { land-requested(selected-row); }
-            identify-clicked => { identify-requested(selected-row); }
-            manual-control-clicked => {
-                open-manual-control-requested(selected-row);
-                manual-control-open = true;
-            }
-            connect-clicked => { connect-unit-requested(selected-row); }
-            disconnect-clicked => { disconnect-unit-requested(selected-row); }
-            recover-clicked => { recover-requested(selected-row); }
-            reboot-clicked => { reboot-requested(selected-row); }
-            power-off-clicked => { confirm-power-off-open = true; }
-            sysoff-clicked => { sysoff-requested(selected-row); }
-            syson-clicked => { syson-requested(selected-row); }
-            close-clicked => {
-                sidebar-open = false;
-                selected-row = -1;
-            }
-        }
-    }
+    callback manual-control-stopped(/* row index */ int);
+    callback joystick-selected(/* row index */ int, /* joystick index */ int);
+    callback arm-requested(/* row index */ int, /* arm */ bool);
+    callback power-off-requested(/* row index */ int);
+    callback add-journal-entry-requested(/* row index */ int, /* text */ string);
+    callback delete-journal-entry-requested(/* row index */ int, /* entry index */ int);
 
     // Manual control popup overlay
     if manual-control-open: Rectangle {
@@ -1338,5 +1127,263 @@ export component UnitsContent inherits Rectangle {
                 }
             }
         }
+    }
+}
+
+export component UnitsContent inherits Rectangle {
+    in property <[UnitData]> units;
+    in property <[UnitData]> sorted-units;
+    in property <[[StandardListViewItem]]> table-rows;
+    in property <int> sort-column: -1;
+    in property <bool> sort-ascending: true;
+    in property <[JournalEntryData]> journal-entries;
+    in-out property <string> goto-x-text: "0";
+    in-out property <string> goto-y-text: "0";
+    in-out property <string> goto-z-text: "0";
+
+    callback sort-requested(/* column */ int, /* ascending */ bool);
+    callback open-journal-requested(/* row index */ int);
+    callback add-journal-entry-requested(/* row index */ int, /* text */ string);
+    callback upload-trajectory-requested(/* row index */ int);
+    callback fly-trajectory-requested(/* row index */ int);
+    callback clear-trajectory-requested(/* row index */ int);
+    callback takeoff-requested(/* row index */ int, /* height */ string, /* yaw */ string, /* time */ string);
+    callback goto-requested(/* row index */ int, /* x */ string, /* y */ string, /* z */ string, /* yaw */ string, /* relative */ bool);
+    callback random-goto-requested(/* row index */ int);
+    callback go-home-requested(/* row index */ int);
+    callback land-requested(/* row index */ int);
+    callback identify-requested(/* row index */ int);
+    callback connect-unit-requested(/* row index */ int);
+    callback disconnect-unit-requested(/* row index */ int);
+    callback delete-journal-entry-requested(/* row index */ int, /* entry index */ int);
+    callback row-selected(/* row index */ int);
+    callback open-manual-control-requested(/* row index */ int);
+    callback joystick-selected(/* row index */ int, /* joystick index */ int);
+    callback manual-control-stopped(/* row index */ int);
+    callback arm-requested(/* row index */ int, /* arm */ bool);
+    callback recover-requested(/* row index */ int);
+    callback reboot-requested(/* row index */ int);
+    callback power-off-requested(/* row index */ int);
+    callback sysoff-requested(/* row index */ int);
+    callback syson-requested(/* row index */ int);
+
+    in property <[string]> joystick-names;
+    in property <float> stick-lx;
+    in property <float> stick-ly;
+    in property <float> stick-rx;
+    in property <float> stick-ry;
+    in property <bool> manual-control-armed;
+
+    private property <int> selected-row: -1;
+    private property <bool> sidebar-open: false;
+    private property <bool> journal-open: false;
+    private property <bool> manual-control-open: false;
+    private property <bool> confirm-power-off-open: false;
+    private property <length> sidebar-width: 360px;
+
+    // Column widths (shared between header and data rows for alignment)
+    private property <length> col-indicator-w: 40px;
+    private property <length> col-status-w: 90px;
+    private property <length> col-name-w: 100px;
+    private property <length> col-uri-w: 160px;
+    private property <length> col-x-w: 60px;
+    private property <length> col-y-w: 60px;
+    private property <length> col-z-w: 60px;
+    private property <length> col-battery-w: 110px;
+    private property <length> col-link-w: 90px;
+    private property <length> col-power-w: 80px;
+    private property <length> col-supervisor-w: 90px;
+    private property <length> col-lh-w: 50px;
+    private property <length> col-loco-w: 50px;
+    private property <length> col-ledup-w: 55px;
+    private property <length> col-leddn-w: 55px;
+
+    function toggle-sort(c: int) {
+        if (sort-column == c) {
+            sort-requested(c, !sort-ascending);
+        } else {
+            sort-requested(c, true);
+        }
+    }
+
+    HorizontalLayout {
+        spacing: 0px;
+
+        // Table
+        VerticalLayout {
+            horizontal-stretch: 1;
+
+            // Header row
+            Rectangle {
+                height: 32px;
+                background: Palette.background;
+
+                HorizontalLayout {
+                    spacing: 0px;
+
+                    HeaderCell { width: col-indicator-w; col-width <=> col-indicator-w; min-col-width: 30px; label: "●"; column-index: 0; active-col: sort-column; active-ascending: sort-ascending; clicked => { toggle-sort(0); } }
+                    HeaderCell { horizontal-stretch: 1; min-width: col-status-w; col-width <=> col-status-w; min-col-width: 60px; label: "Status"; column-index: 1; active-col: sort-column; active-ascending: sort-ascending; clicked => { toggle-sort(1); } }
+                    HeaderCell { horizontal-stretch: 1; min-width: col-name-w; col-width <=> col-name-w; min-col-width: 60px; label: "Name"; column-index: 2; active-col: sort-column; active-ascending: sort-ascending; clicked => { toggle-sort(2); } }
+                    HeaderCell { horizontal-stretch: 1; min-width: col-uri-w; col-width <=> col-uri-w; min-col-width: 80px; label: "URI"; column-index: 3; active-col: sort-column; active-ascending: sort-ascending; clicked => { toggle-sort(3); } }
+                    HeaderCell { width: col-x-w; col-width <=> col-x-w; min-col-width: 40px; label: "X"; column-index: 4; active-col: sort-column; active-ascending: sort-ascending; clicked => { toggle-sort(4); } }
+                    HeaderCell { width: col-y-w; col-width <=> col-y-w; min-col-width: 40px; label: "Y"; column-index: 5; active-col: sort-column; active-ascending: sort-ascending; clicked => { toggle-sort(5); } }
+                    HeaderCell { width: col-z-w; col-width <=> col-z-w; min-col-width: 40px; label: "Z"; column-index: 6; active-col: sort-column; active-ascending: sort-ascending; clicked => { toggle-sort(6); } }
+                    HeaderCell { width: col-battery-w; col-width <=> col-battery-w; min-col-width: 70px; label: "Battery"; column-index: 7; active-col: sort-column; active-ascending: sort-ascending; clicked => { toggle-sort(7); } }
+                    HeaderCell { width: col-link-w; col-width <=> col-link-w; min-col-width: 60px; label: "Link"; column-index: 8; active-col: sort-column; active-ascending: sort-ascending; clicked => { toggle-sort(8); } }
+                    HeaderCell { width: col-power-w; col-width <=> col-power-w; min-col-width: 50px; label: "Power"; column-index: 9; active-col: sort-column; active-ascending: sort-ascending; clicked => { toggle-sort(9); } }
+                    HeaderCell { width: col-supervisor-w; col-width <=> col-supervisor-w; min-col-width: 50px; label: "Supervisor"; column-index: 10; active-col: sort-column; active-ascending: sort-ascending; clicked => { toggle-sort(10); } }
+                    HeaderCell { width: col-lh-w; col-width <=> col-lh-w; min-col-width: 35px; label: "LH"; column-index: 11; active-col: sort-column; active-ascending: sort-ascending; clicked => { toggle-sort(11); } }
+                    HeaderCell { width: col-loco-w; col-width <=> col-loco-w; min-col-width: 35px; label: "Loco"; column-index: 12; active-col: sort-column; active-ascending: sort-ascending; clicked => { toggle-sort(12); } }
+                    HeaderCell { width: col-ledup-w; col-width <=> col-ledup-w; min-col-width: 40px; label: "LED ⬆"; column-index: 13; active-col: sort-column; active-ascending: sort-ascending; clicked => { toggle-sort(13); } }
+                    HeaderCell { width: col-leddn-w; col-width <=> col-leddn-w; min-col-width: 40px; label: "LED ⬇"; column-index: 14; active-col: sort-column; active-ascending: sort-ascending; clicked => { toggle-sort(14); } }
+                }
+            }
+
+            // Data rows
+            Flickable {
+                vertical-stretch: 1;
+                viewport-height: table-rows.length * 34px;
+
+                for row[i] in table-rows: Rectangle {
+                    width: parent.width;
+                    y: i * 34px;
+                    height: 34px;
+                    background: selected-row == i ? Palette.foreground.transparentize(0.85)
+                              : sorted-units[i].state != UnitState.disconnected && !sorted-units[i].selftest-passed ? #ff000025
+                              : mod(i, 2) == 0 ? transparent
+                              : Palette.background.darker(0.03);
+                    border-width: 1px;
+                    border-color: Palette.border.transparentize(0.6);
+
+                    TouchArea {
+                        clicked => {
+                            if (selected-row == i && sidebar-open) {
+                                sidebar-open = false;
+                                selected-row = -1;
+                            } else {
+                                selected-row = i;
+                                sidebar-open = true;
+                                row-selected(i);
+                            }
+                        }
+                        mouse-cursor: pointer;
+                    }
+
+                    HorizontalLayout {
+                        spacing: 0px;
+
+                        Cell { width: col-indicator-w; value: row[0].text; }
+                        Cell { horizontal-stretch: 1; min-width: col-status-w; value: row[1].text; }
+                        Cell { horizontal-stretch: 1; min-width: col-name-w; value: row[2].text; }
+                        Cell { horizontal-stretch: 1; min-width: col-uri-w; value: row[3].text; }
+                        Cell { width: col-x-w; value: row[4].text; }
+                        Cell { width: col-y-w; value: row[5].text; }
+                        Cell { width: col-z-w; value: row[6].text; }
+                        BatteryCell { width: col-battery-w; voltage: sorted-units[i].battery-voltage; }
+                        LinkQualityCell { width: col-link-w; quality: sorted-units[i].link-quality; }
+                        Cell { width: col-power-w; value: row[9].text; }
+                        Cell { width: col-supervisor-w; value: row[10].text; }
+                        Cell { width: col-lh-w; value: row[11].text; }
+                        Cell { width: col-loco-w; value: row[12].text; }
+                        Cell { width: col-ledup-w; value: row[13].text; }
+                        Cell { width: col-leddn-w; value: row[14].text; }
+                    }
+                }
+            }
+        }
+
+        // Sidebar resize handle
+        if sidebar-open: Rectangle {
+            width: 4px;
+            background: sidebar-drag.has-hover || sidebar-drag.pressed ? Palette.accent-background : transparent;
+
+            sidebar-drag := TouchArea {
+                mouse-cursor: ew-resize;
+                moved => {
+                    sidebar-width = max(300px, min(600px, sidebar-width - self.mouse-x));
+                }
+            }
+        }
+
+        // Sidebar
+        if sidebar-open: UnitSidebar {
+            width: sidebar-width;
+            goto-x-text <=> root.goto-x-text;
+            goto-y-text <=> root.goto-y-text;
+            goto-z-text <=> root.goto-z-text;
+            unit: selected-row >= 0 && selected-row < sorted-units.length ? sorted-units[selected-row] : {
+                name: "",
+                uri: "",
+                description: "",
+                state: UnitState.disconnected,
+                pos-x: 0,
+                pos-y: 0,
+                pos-z: 0,
+                battery-voltage: 0,
+                deck-lighthouse: false,
+                deck-loco: false,
+                deck-led-top: false,
+                deck-led-bottom: false,
+                serial: "",
+                pm-state: "",
+                supervisor-info: 0,
+                link-quality: 0,
+            };
+            has-selection: selected-row >= 0 && selected-row < sorted-units.length;
+            journal-entries: root.journal-entries;
+            journal-clicked => {
+                open-journal-requested(selected-row);
+                journal-open = true;
+            }
+            add-journal-entry(text) => {
+                add-journal-entry-requested(selected-row, text);
+            }
+            upload-trajectory-clicked => { upload-trajectory-requested(selected-row); }
+            fly-trajectory-clicked => { fly-trajectory-requested(selected-row); }
+            clear-trajectory-clicked => { clear-trajectory-requested(selected-row); }
+            takeoff-clicked(height, yaw, time) => { takeoff-requested(selected-row, height, yaw, time); }
+            goto-clicked(x, y, z, yaw, relative) => { goto-requested(selected-row, x, y, z, yaw, relative); }
+            random-goto-clicked => { random-goto-requested(selected-row); }
+            go-home-clicked => { go-home-requested(selected-row); }
+            land-clicked => { land-requested(selected-row); }
+            identify-clicked => { identify-requested(selected-row); }
+            manual-control-clicked => {
+                open-manual-control-requested(selected-row);
+                manual-control-open = true;
+            }
+            connect-clicked => { connect-unit-requested(selected-row); }
+            disconnect-clicked => { disconnect-unit-requested(selected-row); }
+            recover-clicked => { recover-requested(selected-row); }
+            reboot-clicked => { reboot-requested(selected-row); }
+            power-off-clicked => { confirm-power-off-open = true; }
+            sysoff-clicked => { sysoff-requested(selected-row); }
+            syson-clicked => { syson-requested(selected-row); }
+            close-clicked => {
+                sidebar-open = false;
+                selected-row = -1;
+            }
+        }
+    }
+
+    // Sidebar action popups (journal, manual control, power-off confirm)
+    UnitActionPopups {
+        selected-row: root.selected-row;
+        sorted-units: root.sorted-units;
+        journal-entries: root.journal-entries;
+        joystick-names: root.joystick-names;
+        stick-lx: root.stick-lx;
+        stick-ly: root.stick-ly;
+        stick-rx: root.stick-rx;
+        stick-ry: root.stick-ry;
+        manual-control-armed: root.manual-control-armed;
+        manual-control-open <=> root.manual-control-open;
+        confirm-power-off-open <=> root.confirm-power-off-open;
+        journal-open <=> root.journal-open;
+        manual-control-stopped(row) => { root.manual-control-stopped(row); }
+        joystick-selected(row, idx) => { root.joystick-selected(row, idx); }
+        arm-requested(row, arm) => { root.arm-requested(row, arm); }
+        power-off-requested(row) => { root.power-off-requested(row); }
+        add-journal-entry-requested(row, text) => { root.add-journal-entry-requested(row, text); }
+        delete-journal-entry-requested(row, entry) => { root.delete-journal-entry-requested(row, entry); }
     }
 }

@@ -1,4 +1,6 @@
 import { Button, CheckBox, ComboBox, Palette } from "std-widgets.slint";
+import { UnitSidebar, UnitActionPopups } from "units.slint";
+import { UnitData, JournalEntryData } from "unit-card.slint";
 
 export struct VizLabel {
     text: string,
@@ -42,6 +44,55 @@ export component VisualizationContent inherits Rectangle {
     in-out property <[VizLabel]> loco-labels;
     in-out property <[VizLabel]> axis-labels;
     in-out property <[VizLabel]> grid-labels;
+
+    // Unit selection / sidebar (shared with the Units tab).
+    // selected-unit is a row index into sorted-units; -1 = nothing selected.
+    in property <[UnitData]> sorted-units;
+    in-out property <int> selected-unit: -1;
+    in property <[JournalEntryData]> journal-entries;
+    in property <[string]> joystick-names;
+    in property <float> stick-lx;
+    in property <float> stick-ly;
+    in property <float> stick-rx;
+    in property <float> stick-ry;
+    in property <bool> manual-control-armed;
+    in-out property <string> goto-x-text: "0";
+    in-out property <string> goto-y-text: "0";
+    in-out property <string> goto-z-text: "0";
+
+    // Fired on a left-click that wasn't a drag; Rust hit-tests and sets selected-unit.
+    callback viz-unit-clicked(/* x */ float, /* y */ float);
+
+    // Sidebar action callbacks (row index into sorted-units) — mapped to the
+    // same shared AppWindow callbacks the Units tab uses.
+    callback open-journal-requested(/* row index */ int);
+    callback add-journal-entry-requested(/* row index */ int, /* text */ string);
+    callback upload-trajectory-requested(/* row index */ int);
+    callback fly-trajectory-requested(/* row index */ int);
+    callback clear-trajectory-requested(/* row index */ int);
+    callback takeoff-requested(/* row index */ int, /* height */ string, /* yaw */ string, /* time */ string);
+    callback goto-requested(/* row index */ int, /* x */ string, /* y */ string, /* z */ string, /* yaw */ string, /* relative */ bool);
+    callback random-goto-requested(/* row index */ int);
+    callback go-home-requested(/* row index */ int);
+    callback land-requested(/* row index */ int);
+    callback identify-requested(/* row index */ int);
+    callback connect-unit-requested(/* row index */ int);
+    callback disconnect-unit-requested(/* row index */ int);
+    callback delete-journal-entry-requested(/* row index */ int, /* entry index */ int);
+    callback open-manual-control-requested(/* row index */ int);
+    callback joystick-selected(/* row index */ int, /* joystick index */ int);
+    callback manual-control-stopped(/* row index */ int);
+    callback arm-requested(/* row index */ int, /* arm */ bool);
+    callback recover-requested(/* row index */ int);
+    callback reboot-requested(/* row index */ int);
+    callback power-off-requested(/* row index */ int);
+    callback sysoff-requested(/* row index */ int);
+    callback syson-requested(/* row index */ int);
+
+    private property <bool> journal-open: false;
+    private property <bool> manual-control-open: false;
+    private property <bool> confirm-power-off-open: false;
+    private property <length> sidebar-width: 360px;
 
     Image {
         source: root.texture;
@@ -120,6 +171,7 @@ export component VisualizationContent inherits Rectangle {
         property <bool> dragging;
         property <bool> right-button;
         property <bool> right-click-moved;
+        property <bool> left-click-moved;
 
         scroll-event(e) => {
             if (e.delta-y > 0) {
@@ -139,9 +191,15 @@ export component VisualizationContent inherits Rectangle {
                 if (e.button == PointerEventButton.right) {
                     self.right-click-moved = false;
                 }
+                if (e.button == PointerEventButton.left) {
+                    self.left-click-moved = false;
+                }
             } else if (e.kind == PointerEventKind.up) {
                 if (e.button == PointerEventButton.right && !self.right-click-moved) {
                     context-menu.show();
+                }
+                if (e.button == PointerEventButton.left && !self.left-click-moved) {
+                    root.viz-unit-clicked(self.mouse-x / 1px, self.mouse-y / 1px);
                 }
                 self.dragging = false;
             }
@@ -155,6 +213,7 @@ export component VisualizationContent inherits Rectangle {
                         root.cam-pan-x += (self.mouse-x / 1px - self.prev-x) * 0.01;
                         root.cam-pan-y -= (self.mouse-y / 1px - self.prev-y) * 0.01;
                     } else {
+                        self.left-click-moved = true;
                         root.cam-yaw -= (self.mouse-x / 1px - self.prev-x) * 0.01;
                         root.cam-pitch = clamp(root.cam-pitch + (self.mouse-y / 1px - self.prev-y) * 0.01, 0.1, 1.5);
                     }
@@ -282,5 +341,67 @@ export component VisualizationContent inherits Rectangle {
                 }
             }
         }
+    }
+
+    // Unit sidebar overlay (shared component with the Units tab), anchored right.
+    if selected-unit >= 0 && selected-unit < sorted-units.length: Rectangle {
+        width: sidebar-width;
+        x: parent.width - self.width;
+
+        // Absorb clicks on the sidebar so they don't reach the camera TouchArea.
+        TouchArea { }
+
+        UnitSidebar {
+            width: 100%;
+            height: 100%;
+            unit: sorted-units[selected-unit];
+            has-selection: true;
+            journal-entries: root.journal-entries;
+            goto-x-text <=> root.goto-x-text;
+            goto-y-text <=> root.goto-y-text;
+            goto-z-text <=> root.goto-z-text;
+            journal-clicked => { open-journal-requested(selected-unit); journal-open = true; }
+            add-journal-entry(text) => { add-journal-entry-requested(selected-unit, text); }
+            upload-trajectory-clicked => { upload-trajectory-requested(selected-unit); }
+            fly-trajectory-clicked => { fly-trajectory-requested(selected-unit); }
+            clear-trajectory-clicked => { clear-trajectory-requested(selected-unit); }
+            takeoff-clicked(height, yaw, time) => { takeoff-requested(selected-unit, height, yaw, time); }
+            goto-clicked(x, y, z, yaw, relative) => { goto-requested(selected-unit, x, y, z, yaw, relative); }
+            random-goto-clicked => { random-goto-requested(selected-unit); }
+            go-home-clicked => { go-home-requested(selected-unit); }
+            land-clicked => { land-requested(selected-unit); }
+            identify-clicked => { identify-requested(selected-unit); }
+            manual-control-clicked => { open-manual-control-requested(selected-unit); manual-control-open = true; }
+            connect-clicked => { connect-unit-requested(selected-unit); }
+            disconnect-clicked => { disconnect-unit-requested(selected-unit); }
+            recover-clicked => { recover-requested(selected-unit); }
+            reboot-clicked => { reboot-requested(selected-unit); }
+            power-off-clicked => { confirm-power-off-open = true; }
+            sysoff-clicked => { sysoff-requested(selected-unit); }
+            syson-clicked => { syson-requested(selected-unit); }
+            close-clicked => { root.selected-unit = -1; }
+        }
+    }
+
+    // Sidebar action popups (shared component with the Units tab).
+    UnitActionPopups {
+        selected-row: root.selected-unit;
+        sorted-units: root.sorted-units;
+        journal-entries: root.journal-entries;
+        joystick-names: root.joystick-names;
+        stick-lx: root.stick-lx;
+        stick-ly: root.stick-ly;
+        stick-rx: root.stick-rx;
+        stick-ry: root.stick-ry;
+        manual-control-armed: root.manual-control-armed;
+        manual-control-open <=> root.manual-control-open;
+        confirm-power-off-open <=> root.confirm-power-off-open;
+        journal-open <=> root.journal-open;
+        manual-control-stopped(row) => { root.manual-control-stopped(row); }
+        joystick-selected(row, idx) => { root.joystick-selected(row, idx); }
+        arm-requested(row, arm) => { root.arm-requested(row, arm); }
+        power-off-requested(row) => { root.power-off-requested(row); }
+        add-journal-entry-requested(row, text) => { root.add-journal-entry-requested(row, text); }
+        delete-journal-entry-requested(row, entry) => { root.delete-journal-entry-requested(row, entry); }
     }
 }

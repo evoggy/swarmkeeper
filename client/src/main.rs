@@ -338,6 +338,56 @@ struct ConnectedUnit {
 
 type SwarmState = Arc<Mutex<HashMap<usize, ConnectedUnit>>>;
 
+/// Lazily fetch platform/firmware info for the unit at a `sorted-units` row
+/// index, updating the UI when done. Shared by the Units-table selection and
+/// the visualization click-to-select so both populate the sidebar identically.
+fn fetch_unit_details(ui_weak: slint::Weak<AppWindow>, swarm_state: SwarmState, row_index: i32) {
+    if row_index < 0 {
+        return;
+    }
+
+    let (original_index, already_fetched) = {
+        let Some(ui) = ui_weak.upgrade() else { return };
+        let units = ui.get_units();
+        let col = ui.get_sort_column();
+        let ascending = ui.get_sort_ascending();
+        let indices = sort_unit_indices(&units, col, ascending);
+        let row = row_index as usize;
+        if row >= indices.len() {
+            return;
+        }
+        let idx = indices[row];
+        let sorted = ui.get_sorted_units();
+        let unit = sorted.row_data(row).unwrap();
+        if unit.state == UnitState::Disconnected {
+            return;
+        }
+        (idx, !unit.platform_type.is_empty())
+    };
+
+    if already_fetched {
+        return;
+    }
+
+    tokio::spawn(async move {
+        let cf = {
+            let state = swarm_state.lock().await;
+            match state.get(&original_index) {
+                Some(cu) => cu.cf.clone(),
+                None => return,
+            }
+        };
+
+        let platform_type = cf.platform.device_type_name().await.unwrap_or_default();
+        let firmware_version = cf.platform.firmware_version().await.unwrap_or_default();
+
+        update_unit(&ui_weak, original_index, move |u| {
+            u.platform_type = platform_type.into();
+            u.firmware_version = firmware_version.into();
+        });
+    });
+}
+
 #[derive(Default, Clone)]
 struct PositioningData {
     lighthouse_bs: Vec<(u8, [f32; 3])>,  // (base station ID, position)
@@ -3048,53 +3098,60 @@ async fn main() {
         let ui_weak = ui.as_weak();
 
         ui.on_unit_row_selected(move |row_index| {
-            if row_index < 0 {
+            fetch_unit_details(ui_weak.clone(), swarm_state.clone(), row_index);
+        });
+    }
+
+    // Click-to-select a Crazyflie in the 3D visualization → open the unit sidebar
+    {
+        let swarm_state = swarm_state.clone();
+        let ui_weak = ui.as_weak();
+
+        ui.on_viz_unit_clicked(move |click_x, click_y| {
+            let Some(ui) = ui_weak.upgrade() else { return };
+
+            let width = ui.get_viz_width() as u32;
+            let height = ui.get_viz_height() as u32;
+            if width == 0 || height == 0 {
                 return;
             }
 
-            let (original_index, already_fetched) = {
-                let Some(ui) = ui_weak.upgrade() else { return };
-                let units = ui.get_units();
-                let col = ui.get_sort_column();
-                let ascending = ui.get_sort_ascending();
-                let indices = sort_unit_indices(&units, col, ascending);
-                let row = row_index as usize;
-                if row >= indices.len() {
-                    return;
-                }
-                let idx = indices[row];
-                let sorted = ui.get_sorted_units();
-                let unit = sorted.row_data(row).unwrap();
-                if unit.state == UnitState::Disconnected {
-                    return;
-                }
-                (idx, !unit.platform_type.is_empty())
-            };
+            let aspect = width as f32 / height as f32;
+            let mvp = renderer::compute_mvp(
+                ui.get_cam_yaw(),
+                ui.get_cam_pitch(),
+                ui.get_cam_distance(),
+                ui.get_cam_pan_x(),
+                ui.get_cam_pan_y(),
+                aspect,
+            );
 
-            if already_fetched {
-                return;
+            // Pick the nearest unit whose projected position is within the radius.
+            let sorted = ui.get_sorted_units();
+            let pick_radius = 18.0_f32;
+            let mut best: Option<(i32, f32)> = None;
+            for row in 0..sorted.row_count() {
+                let Some(u) = sorted.row_data(row) else { continue };
+                let Some((sx, sy)) = renderer::project_to_screen(
+                    [u.pos_x, u.pos_y, u.pos_z], &mvp, width, height,
+                ) else { continue };
+                let dx = sx - click_x;
+                let dy = sy - click_y;
+                let dist = (dx * dx + dy * dy).sqrt();
+                if dist <= pick_radius && best.map_or(true, |(_, d)| dist < d) {
+                    best = Some((row as i32, dist));
+                }
             }
 
-            let swarm_state = swarm_state.clone();
-            let ui_weak = ui_weak.clone();
-
-            tokio::spawn(async move {
-                let cf = {
-                    let state = swarm_state.lock().await;
-                    match state.get(&original_index) {
-                        Some(cu) => cu.cf.clone(),
-                        None => return,
-                    }
-                };
-
-                let platform_type = cf.platform.device_type_name().await.unwrap_or_default();
-                let firmware_version = cf.platform.firmware_version().await.unwrap_or_default();
-
-                update_unit(&ui_weak, original_index, move |u| {
-                    u.platform_type = platform_type.into();
-                    u.firmware_version = firmware_version.into();
-                });
-            });
+            match best {
+                Some((row, _)) => {
+                    ui.set_viz_selected_unit(row);
+                    fetch_unit_details(ui_weak.clone(), swarm_state.clone(), row);
+                }
+                None => {
+                    ui.set_viz_selected_unit(-1);
+                }
+            }
         });
     }
 
@@ -4091,6 +4148,18 @@ async fn main() {
 
                             // Read unit positions from model
                             let units_model = app.get_units();
+
+                            // Map the selected sorted-units row back to a units-model index.
+                            let selected_row = app.get_viz_selected_unit();
+                            let selected_original: i32 = if selected_row >= 0 {
+                                let indices = sort_unit_indices(
+                                    &units_model, app.get_sort_column(), app.get_sort_ascending(),
+                                );
+                                indices.get(selected_row as usize).map(|&i| i as i32).unwrap_or(-1)
+                            } else {
+                                -1
+                            };
+
                             let mut unit_positions = Vec::new();
                             for i in 0..units_model.row_count() {
                                 if let Some(u) = units_model.row_data(i) {
@@ -4107,6 +4176,7 @@ async fn main() {
                                         y: u.pos_y,
                                         z: u.pos_z,
                                         color,
+                                        selected: i as i32 == selected_original,
                                     });
                                 }
                             }
@@ -4120,6 +4190,7 @@ async fn main() {
                                     fixed_points.push(renderer::UnitPos {
                                         x: pos[0], y: pos[1], z: pos[2],
                                         color: [0.94 * alpha, 0.27 * alpha, 0.27 * alpha],
+                                        selected: false,
                                     });
                                 }
                                 // Track which loco anchors are currently present
@@ -4129,6 +4200,7 @@ async fn main() {
                                     fixed_points.push(renderer::UnitPos {
                                         x: pos[0], y: pos[1], z: pos[2],
                                         color: [1.0, 0.85, 0.0],
+                                        selected: false,
                                     });
                                 }
                                 // Show previously seen anchors that are no longer present at 50%
@@ -4138,6 +4210,7 @@ async fn main() {
                                         fixed_points.push(renderer::UnitPos {
                                             x: pos[0], y: pos[1], z: pos[2],
                                             color: [1.0 * alpha, 0.85 * alpha, 0.0],
+                                            selected: false,
                                         });
                                     }
                                 }

@@ -421,6 +421,11 @@ export component AppWindow inherits Window {
     callback viz-save-pads();
     callback viz-load-scene();
 
+    // Visualization unit selection (sorted-units row index; -1 = none).
+    // Set by Rust after hit-testing a left-click in the 3D view.
+    in-out property <int> viz-selected-unit <=> viz-content.selected-unit;
+    callback viz-unit-clicked(/* x */ float, /* y */ float);
+
     // Visualization label data (set by Rust)
     in-out property <[VizLabel]> cf-labels;
     in-out property <[VizLabel]> lh-labels;
@@ -869,6 +874,43 @@ export component AppWindow inherits Window {
                     positioning-source-changed(idx) => { root.positioning-source-changed(idx); }
                     save-pads => { root.viz-save-pads(); }
                     load-scene => { root.viz-load-scene(); }
+
+                    // Shared unit sidebar (same component as the Units tab)
+                    sorted-units: root.sorted-units;
+                    journal-entries: root.journal-entries;
+                    joystick-names: root.joystick-names;
+                    stick-lx: root.stick-lx;
+                    stick-ly: root.stick-ly;
+                    stick-rx: root.stick-rx;
+                    stick-ry: root.stick-ry;
+                    manual-control-armed: root.manual-control-armed;
+                    goto-x-text <=> root.unit-goto-x-text;
+                    goto-y-text <=> root.unit-goto-y-text;
+                    goto-z-text <=> root.unit-goto-z-text;
+                    viz-unit-clicked(x, y) => { root.viz-unit-clicked(x, y); }
+                    open-journal-requested(row) => { open-journal(row); }
+                    add-journal-entry-requested(row, text) => { add-journal-entry(row, text); }
+                    upload-trajectory-requested(row) => { upload-trajectory(row); }
+                    fly-trajectory-requested(row) => { fly-trajectory(row); }
+                    clear-trajectory-requested(row) => { clear-trajectory(row); }
+                    takeoff-requested(row, height, yaw, time) => { hlc-takeoff(row, height, yaw, time); }
+                    goto-requested(row, x, y, z, yaw, relative) => { hlc-goto(row, x, y, z, yaw, relative); }
+                    random-goto-requested(row) => { random-goto(row); }
+                    go-home-requested(row) => { hlc-go-home(row); }
+                    land-requested(row) => { hlc-land(row); }
+                    identify-requested(row) => { identify-unit(row); }
+                    connect-unit-requested(row) => { connect-unit(row); }
+                    disconnect-unit-requested(row) => { disconnect-unit(row); }
+                    delete-journal-entry-requested(row, entry-idx) => { delete-journal-entry(row, entry-idx); }
+                    open-manual-control-requested(row) => { open-manual-control(row); }
+                    joystick-selected(row, idx) => { start-manual-control(row, idx); }
+                    manual-control-stopped(row) => { stop-manual-control(row); }
+                    arm-requested(row, arm) => { arm-unit(row, arm); }
+                    recover-requested(row) => { recover-unit(row); }
+                    reboot-requested(row) => { reboot-unit(row); }
+                    power-off-requested(row) => { power-off-unit(row); }
+                    sysoff-requested(row) => { sysoff-unit(row); }
+                    syson-requested(row) => { syson-unit(row); }
                 }
             }
             Tab {

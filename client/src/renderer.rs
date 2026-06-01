@@ -127,6 +127,7 @@ pub struct UnitPos {
     pub y: f32,
     pub z: f32,
     pub color: [f32; 3],
+    pub selected: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -317,8 +318,18 @@ impl Scene3DRenderer {
             // Draw units as points
             gl.uniform_1_f32(Some(&self.u_point_size), 10.0);
             for unit in units {
-                gl.uniform_3_f32(Some(&self.u_color), unit.color[0], unit.color[1], unit.color[2]);
                 let pos = [unit.x, unit.y, unit.z];
+
+                // Highlight halo behind the selected unit (larger white point).
+                if unit.selected {
+                    gl.uniform_3_f32(Some(&self.u_color), 1.0, 1.0, 1.0);
+                    gl.uniform_1_f32(Some(&self.u_point_size), 20.0);
+                    upload_and_draw(gl, self.vbo, &pos, glow::POINTS);
+                    gl.draw_arrays(glow::POINTS, 0, 1);
+                    gl.uniform_1_f32(Some(&self.u_point_size), 10.0);
+                }
+
+                gl.uniform_3_f32(Some(&self.u_color), unit.color[0], unit.color[1], unit.color[2]);
                 upload_and_draw(gl, self.vbo, &pos, glow::POINTS);
                 gl.draw_arrays(glow::POINTS, 0, 1);
 
