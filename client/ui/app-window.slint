@@ -3,8 +3,8 @@ import { UnitsContent } from "units.slint";
 import { VisualizationContent, VizLabel } from "visualization.slint";
 import { UnitData, UnitState, JournalEntryData } from "unit-card.slint";
 import { RadioTestContent, ChannelResult } from "radio-test.slint";
-import { LhCoverageContent, LhBaseStationData } from "lh-coverage.slint";
-import { Tdoa3CoverageContent, Tdoa3AnchorData } from "tdoa3-coverage.slint";
+import { LhBaseStationData } from "lh-coverage.slint";
+import { Tdoa3AnchorData } from "tdoa3-coverage.slint";
 import { LhWizardContent, WizardSampleData, WizardBsData } from "lh-wizard.slint";
 import { PlanningContent, PlanObstacleData, PlanPadData } from "planning.slint";
 
@@ -522,44 +522,45 @@ export component AppWindow inherits Window {
     in-out property <float> stick-ry;
     in-out property <bool> manual-control-armed;
 
-    // LH Coverage
+    // LH Coverage — standalone tab removed (folded into Planning). Properties kept
+    // as plain storage so the (now inert) legacy Rust handlers still resolve.
     in-out property <image> lh-coverage-texture;
-    out property <float> lh-coverage-width: lh-cov-content.viewport-width;
-    out property <float> lh-coverage-height: lh-cov-content.viewport-height;
-    out property <float> lh-cov-cam-yaw: lh-cov-content.cam-yaw;
-    out property <float> lh-cov-cam-pitch: lh-cov-content.cam-pitch;
-    out property <float> lh-cov-cam-distance: lh-cov-content.cam-distance;
-    in-out property <float> lh-cov-cam-pan-x <=> lh-cov-content.cam-pan-x;
-    in-out property <float> lh-cov-cam-pan-y <=> lh-cov-content.cam-pan-y;
-    in-out property <string> lh-cov-room-x <=> lh-cov-content.room-x;
-    in-out property <string> lh-cov-room-y <=> lh-cov-content.room-y;
-    in-out property <string> lh-cov-room-z <=> lh-cov-content.room-z;
-    in-out property <string> lh-cov-resolution <=> lh-cov-content.resolution;
+    out property <float> lh-coverage-width;
+    out property <float> lh-coverage-height;
+    out property <float> lh-cov-cam-yaw;
+    out property <float> lh-cov-cam-pitch;
+    out property <float> lh-cov-cam-distance;
+    in-out property <float> lh-cov-cam-pan-x;
+    in-out property <float> lh-cov-cam-pan-y;
+    in-out property <string> lh-cov-room-x;
+    in-out property <string> lh-cov-room-y;
+    in-out property <string> lh-cov-room-z;
+    in-out property <string> lh-cov-resolution;
     in-out property <[LhBaseStationData]> lh-cov-base-stations;
-    in-out property <bool> lh-cov-show-coverage-0 <=> lh-cov-content.show-coverage-0;
-    in-out property <bool> lh-cov-show-coverage-1 <=> lh-cov-content.show-coverage-1;
-    in-out property <bool> lh-cov-show-coverage-2 <=> lh-cov-content.show-coverage-2;
-    in-out property <bool> lh-cov-show-coverage-3 <=> lh-cov-content.show-coverage-3;
-    in-out property <bool> lh-cov-show-coverage-4 <=> lh-cov-content.show-coverage-4;
-    in-out property <bool> lh-cov-receiver-fov-enabled <=> lh-cov-content.receiver-fov-enabled;
-    in-out property <bool> lh-cov-tilt-compensation-enabled <=> lh-cov-content.tilt-compensation-enabled;
-    in-out property <string> lh-cov-max-tilt-angle <=> lh-cov-content.max-tilt-angle;
-    in-out property <string> lh-cov-max-bs-distance <=> lh-cov-content.max-bs-distance;
-    in-out property <bool> lh-cov-center-origin <=> lh-cov-content.center-origin;
-    in-out property <string> lh-cov-room-offset-x <=> lh-cov-content.room-offset-x;
-    in-out property <string> lh-cov-room-offset-y <=> lh-cov-content.room-offset-y;
-    in-out property <string> lh-cov-room-offset-z <=> lh-cov-content.room-offset-z;
+    in-out property <bool> lh-cov-show-coverage-0;
+    in-out property <bool> lh-cov-show-coverage-1;
+    in-out property <bool> lh-cov-show-coverage-2;
+    in-out property <bool> lh-cov-show-coverage-3;
+    in-out property <bool> lh-cov-show-coverage-4;
+    in-out property <bool> lh-cov-receiver-fov-enabled;
+    in-out property <bool> lh-cov-tilt-compensation-enabled;
+    in-out property <string> lh-cov-max-tilt-angle;
+    in-out property <string> lh-cov-max-bs-distance;
+    in-out property <bool> lh-cov-center-origin;
+    in-out property <string> lh-cov-room-offset-x;
+    in-out property <string> lh-cov-room-offset-y;
+    in-out property <string> lh-cov-room-offset-z;
     in-out property <int> lh-cov-selected-bs: -1;
     in-out property <bool> lh-cov-handle-active: false;
     in-out property <int> lh-cov-active-handle: 0;
     in-out property <[VizLabel]> lh-cov-grid-labels;
     in-out property <string> lh-cov-coverage-1-text;
     in-out property <string> lh-cov-coverage-2-text;
-    in-out property <string> lh-cov-trajectories-status <=> lh-cov-content.trajectories-status;
-    in-out property <bool> lh-cov-show-trajectories <=> lh-cov-content.show-trajectories;
-    in-out property <string> lh-cov-traj-offset-x <=> lh-cov-content.traj-offset-x;
-    in-out property <string> lh-cov-traj-offset-y <=> lh-cov-content.traj-offset-y;
-    in-out property <string> lh-cov-traj-offset-z <=> lh-cov-content.traj-offset-z;
+    in-out property <string> lh-cov-trajectories-status;
+    in-out property <bool> lh-cov-show-trajectories;
+    in-out property <string> lh-cov-traj-offset-x;
+    in-out property <string> lh-cov-traj-offset-y;
+    in-out property <string> lh-cov-traj-offset-z;
     callback lh-cov-load-geometry();
     callback lh-cov-save-scene();
     callback lh-cov-load-scene();
@@ -621,30 +622,31 @@ export component AppWindow inherits Window {
     callback lh-wizard-view-mouse-released();
     callback lh-wizard-view-pan(float, float);
 
-    // TDoA3 Coverage
+    // TDoA3 Coverage — standalone tab removed (folded into Planning). Properties kept
+    // as plain storage so the (now inert) legacy Rust handlers still resolve.
     in-out property <image> tdoa3-texture;
-    out property <float> tdoa3-width: tdoa3-content.viewport-width;
-    out property <float> tdoa3-height: tdoa3-content.viewport-height;
-    out property <float> tdoa3-cam-yaw: tdoa3-content.cam-yaw;
-    out property <float> tdoa3-cam-pitch: tdoa3-content.cam-pitch;
-    out property <float> tdoa3-cam-distance: tdoa3-content.cam-distance;
-    in-out property <float> tdoa3-cam-pan-x <=> tdoa3-content.cam-pan-x;
-    in-out property <float> tdoa3-cam-pan-y <=> tdoa3-content.cam-pan-y;
-    in-out property <string> tdoa3-room-x <=> tdoa3-content.room-x;
-    in-out property <string> tdoa3-room-y <=> tdoa3-content.room-y;
-    in-out property <string> tdoa3-room-z <=> tdoa3-content.room-z;
-    in-out property <string> tdoa3-resolution <=> tdoa3-content.resolution;
+    out property <float> tdoa3-width;
+    out property <float> tdoa3-height;
+    out property <float> tdoa3-cam-yaw;
+    out property <float> tdoa3-cam-pitch;
+    out property <float> tdoa3-cam-distance;
+    in-out property <float> tdoa3-cam-pan-x;
+    in-out property <float> tdoa3-cam-pan-y;
+    in-out property <string> tdoa3-room-x;
+    in-out property <string> tdoa3-room-y;
+    in-out property <string> tdoa3-room-z;
+    in-out property <string> tdoa3-resolution;
     in-out property <[Tdoa3AnchorData]> tdoa3-anchors;
-    in-out property <string> tdoa3-max-range <=> tdoa3-content.max-range;
-    in-out property <float> tdoa3-scale-min-value <=> tdoa3-content.scale-min-value;
-    in-out property <float> tdoa3-scale-max-value <=> tdoa3-content.scale-max-value;
-    in-out property <float> tdoa3-scale-limit <=> tdoa3-content.scale-limit;
-    in-out property <bool> tdoa3-show-outside-hull <=> tdoa3-content.show-outside-hull;
-    in-out property <bool> tdoa3-center-origin <=> tdoa3-content.center-origin;
-    in-out property <int> tdoa3-metric-index <=> tdoa3-content.metric-index;
-    in-out property <string> tdoa3-pair-a <=> tdoa3-content.pair-a;
-    in-out property <string> tdoa3-pair-b <=> tdoa3-content.pair-b;
-    in-out property <string> tdoa3-measurement-noise <=> tdoa3-content.measurement-noise;
+    in-out property <string> tdoa3-max-range;
+    in-out property <float> tdoa3-scale-min-value;
+    in-out property <float> tdoa3-scale-max-value;
+    in-out property <float> tdoa3-scale-limit;
+    in-out property <bool> tdoa3-show-outside-hull;
+    in-out property <bool> tdoa3-center-origin;
+    in-out property <int> tdoa3-metric-index;
+    in-out property <string> tdoa3-pair-a;
+    in-out property <string> tdoa3-pair-b;
+    in-out property <string> tdoa3-measurement-noise;
     callback tdoa3-metric-changed(int);
     callback tdoa3-pair-changed();
     in-out property <int> tdoa3-selected-anchor: -1;
@@ -709,6 +711,18 @@ export component AppWindow inherits Window {
     in-out property <string> planning-measurement-noise <=> planning-content.measurement-noise;
     in-out property <int> planning-error-metric-index <=> planning-content.error-metric-index;
     callback planning-error-metric-changed(int);
+    in-out property <string> planning-pair-a <=> planning-content.pair-a;
+    in-out property <string> planning-pair-b <=> planning-content.pair-b;
+    in-out property <bool> planning-show-outside-hull <=> planning-content.show-outside-hull;
+    in-out property <bool> planning-tilt-compensation-enabled <=> planning-content.tilt-compensation-enabled;
+    in-out property <string> planning-max-tilt-angle <=> planning-content.max-tilt-angle;
+    in-out property <bool> planning-show-trajectories <=> planning-content.show-trajectories;
+    in-out property <string> planning-trajectories-status;
+    in-out property <string> planning-traj-offset-x <=> planning-content.traj-offset-x;
+    in-out property <string> planning-traj-offset-y <=> planning-content.traj-offset-y;
+    in-out property <string> planning-traj-offset-z <=> planning-content.traj-offset-z;
+    callback planning-load-geometry();
+    callback planning-load-trajectories();
     in-out property <int> planning-selected-type: 0;
     in-out property <int> planning-selected-index: -1;
     in-out property <bool> planning-handle-active: false;
@@ -858,32 +872,6 @@ export component AppWindow inherits Window {
                 }
             }
             Tab {
-                title: "LH Coverage";
-                lh-cov-content := LhCoverageContent {
-                    texture <=> root.lh-coverage-texture;
-                    base-stations <=> root.lh-cov-base-stations;
-                    selected-bs <=> root.lh-cov-selected-bs;
-                    handle-active <=> root.lh-cov-handle-active;
-                    active-handle <=> root.lh-cov-active-handle;
-                    grid-labels: root.lh-cov-grid-labels;
-                    coverage-1-text: root.lh-cov-coverage-1-text;
-                    coverage-2-text: root.lh-cov-coverage-2-text;
-                    load-geometry => { root.lh-cov-load-geometry(); }
-                    save-scene => { root.lh-cov-save-scene(); }
-                    load-scene => { root.lh-cov-load-scene(); }
-                    add-base-station => { root.lh-cov-add-bs(); }
-                    undo => { root.lh-cov-undo(); }
-                    remove-base-station(idx) => { root.lh-cov-remove-bs(idx); }
-                    update-base-station(idx, data) => { root.lh-cov-update-bs(idx, data); }
-                    recompute => { root.lh-cov-recompute(); }
-                    load-trajectories => { root.lh-cov-load-trajectories(); }
-                    view-mouse-pressed(x, y) => { root.lh-cov-view-mouse-pressed(x, y); }
-                    view-mouse-moved(x, y) => { root.lh-cov-view-mouse-moved(x, y); }
-                    view-mouse-released => { root.lh-cov-view-mouse-released(); }
-                    view-pan(dx, dy) => { root.lh-cov-view-pan(dx, dy); }
-                }
-            }
-            Tab {
                 title: "LH Wizard";
                 lh-wizard-content := LhWizardContent {
                     texture <=> root.lh-wizard-texture;
@@ -900,33 +888,6 @@ export component AppWindow inherits Window {
                     view-mouse-moved(x, y) => { root.lh-wizard-view-mouse-moved(x, y); }
                     view-mouse-released => { root.lh-wizard-view-mouse-released(); }
                     view-pan(dx, dy) => { root.lh-wizard-view-pan(dx, dy); }
-                }
-            }
-            Tab {
-                title: "TDoA3 Coverage";
-                tdoa3-content := Tdoa3CoverageContent {
-                    texture <=> root.tdoa3-texture;
-                    anchors <=> root.tdoa3-anchors;
-                    selected-anchor <=> root.tdoa3-selected-anchor;
-                    handle-active <=> root.tdoa3-handle-active;
-                    active-handle <=> root.tdoa3-active-handle;
-                    grid-labels: root.tdoa3-grid-labels;
-                    stats-text-1: root.tdoa3-stats-text-1;
-                    stats-text-2: root.tdoa3-stats-text-2;
-                    stats-text-3: root.tdoa3-stats-text-3;
-                    metric-changed(idx) => { root.tdoa3-metric-changed(idx); }
-                    pair-changed => { root.tdoa3-pair-changed(); }
-                    save-scene => { root.tdoa3-save-scene(); }
-                    load-scene => { root.tdoa3-load-scene(); }
-                    add-anchor => { root.tdoa3-add-anchor(); }
-                    undo => { root.tdoa3-undo(); }
-                    remove-anchor(idx) => { root.tdoa3-remove-anchor(idx); }
-                    update-anchor(idx, data) => { root.tdoa3-update-anchor(idx, data); }
-                    recompute => { root.tdoa3-recompute(); }
-                    view-mouse-pressed(x, y) => { root.tdoa3-view-mouse-pressed(x, y); }
-                    view-mouse-moved(x, y) => { root.tdoa3-view-mouse-moved(x, y); }
-                    view-mouse-released => { root.tdoa3-view-mouse-released(); }
-                    view-pan(dx, dy) => { root.tdoa3-view-pan(dx, dy); }
                 }
             }
             Tab {
@@ -965,6 +926,9 @@ export component AppWindow inherits Window {
                     undo => { root.planning-undo(); }
                     recompute => { root.planning-recompute(); }
                     error-metric-changed(idx) => { root.planning-error-metric-changed(idx); }
+                    trajectories-status: root.planning-trajectories-status;
+                    load-geometry => { root.planning-load-geometry(); }
+                    load-trajectories => { root.planning-load-trajectories(); }
                     view-mouse-pressed(x, y) => { root.planning-view-mouse-pressed(x, y); }
                     view-mouse-moved(x, y) => { root.planning-view-mouse-moved(x, y); }
                     view-mouse-released => { root.planning-view-mouse-released(); }

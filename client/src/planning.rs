@@ -386,6 +386,10 @@ pub struct PlanningScene {
     pub tdoa3_scale_min: f32,
     #[serde(default = "default_tdoa3_scale_max")]
     pub tdoa3_scale_max: f32,
+    #[serde(default = "default_true")]
+    pub tilt_compensation_enabled: bool,
+    #[serde(default = "default_max_tilt")]
+    pub max_tilt_angle: f32,
 }
 
 fn default_true() -> bool {
@@ -402,6 +406,9 @@ fn default_max_range() -> f32 {
 }
 fn default_tdoa3_scale_max() -> f32 {
     0.5
+}
+fn default_max_tilt() -> f32 {
+    10.0
 }
 
 impl PlanningScene {
@@ -423,6 +430,8 @@ impl PlanningScene {
         max_range: f32,
         tdoa3_scale_min: f32,
         tdoa3_scale_max: f32,
+        tilt_compensation_enabled: bool,
+        max_tilt_angle: f32,
     ) -> Self {
         Self {
             room_x,
@@ -458,6 +467,8 @@ impl PlanningScene {
             max_range,
             tdoa3_scale_min,
             tdoa3_scale_max,
+            tilt_compensation_enabled,
+            max_tilt_angle,
         }
     }
 

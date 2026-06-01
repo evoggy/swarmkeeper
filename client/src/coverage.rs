@@ -266,6 +266,14 @@ pub fn load_geometry_yaml(path: &std::path::Path) -> Result<Vec<BaseStation>, St
         stations.insert(id, BaseStation::from_rotation_matrix(pos, r));
     }
 
+    if stations.is_empty() {
+        return Err(
+            "No base-station geometry found ('geos' is empty). This file likely \
+             contains only calibration data — load a config with estimated geometry."
+                .to_string(),
+        );
+    }
+
     Ok(stations.into_values().collect())
 }
 

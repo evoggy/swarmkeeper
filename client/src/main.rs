@@ -3964,6 +3964,13 @@ async fn main() {
         flight_area: Option<planning::FlightArea>,
         takeoff_pads: Vec<planning::TakeoffPad>,
         undo_stack: Vec<(Vec<coverage::BaseStation>, Vec<tdoa3::Anchor>, Vec<planning::Obstacle>)>,
+        convex_hull: Option<tdoa3::ConvexHull>,
+        trajectories: Vec<Vec<[f32; 3]>>,
+        lh_ratio_1: f32,
+        lh_ratio_2: f32,
+        gdop_mean: f32,
+        hull_stats: Option<(f32, f32, f32)>,
+        last_metric: i32,
     }
     let planning_state = std::sync::Arc::new(std::sync::Mutex::new(PlanningState {
         base_stations: Vec::new(),
@@ -3982,6 +3989,13 @@ async fn main() {
         flight_area: None,
         takeoff_pads: Vec::new(),
         undo_stack: Vec::new(),
+        convex_hull: None,
+        trajectories: Vec::new(),
+        lh_ratio_1: 0.0,
+        lh_ratio_2: 0.0,
+        gdop_mean: 0.0,
+        hull_stats: None,
+        last_metric: -1,
     }));
 
     struct PlanningGizmoState {
@@ -4558,14 +4572,26 @@ async fn main() {
                                     let pan_x = app.get_planning_cam_pan_x();
                                     let pan_y = app.get_planning_cam_pan_y();
 
-                                    let (room, room_offset, bs_render, lh_voxels, anchor_positions, tdoa3_voxels, obstacle_tris, obstacle_wires, obstacle_cols) = {
+                                    let (room, room_offset, bs_render, lh_voxels, anchor_positions, tdoa3_voxels, obstacle_tris, obstacle_wires, obstacle_cols, trajectories) = {
                                         let ps = planning_state_render.lock().unwrap();
                                         (ps.room, ps.room_offset, ps.bs_render_data.clone(),
                                          ps.lh_voxels.clone(), ps.anchor_positions.clone(),
                                          ps.tdoa3_voxels.clone(),
                                          ps.obstacle_triangles.clone(),
                                          ps.obstacle_wireframes.clone(),
-                                         ps.obstacle_colors.clone())
+                                         ps.obstacle_colors.clone(),
+                                         ps.trajectories.clone())
+                                    };
+
+                                    let traj_for_render: Vec<Vec<[f32; 3]>> = if app.get_planning_show_trajectories() {
+                                        let tox: f32 = app.get_planning_traj_offset_x().parse().unwrap_or(0.0);
+                                        let toy: f32 = app.get_planning_traj_offset_y().parse().unwrap_or(0.0);
+                                        let toz: f32 = app.get_planning_traj_offset_z().parse().unwrap_or(0.0);
+                                        trajectories.iter()
+                                            .map(|t| t.iter().map(|p| [p[0] + tox, p[1] + toy, p[2] + toz]).collect())
+                                            .collect()
+                                    } else {
+                                        Vec::new()
                                     };
 
                                     let show_lh_coverage = [
@@ -4575,6 +4601,24 @@ async fn main() {
                                         app.get_planning_show_coverage_3(),
                                         app.get_planning_show_coverage_4(),
                                     ];
+
+                                    // Flight area read live from the UI inputs (not just on save)
+                                    let flight_area = if app.get_planning_flight_area_enabled() {
+                                        Some(renderer::FlightAreaBox {
+                                            min: [
+                                                app.get_planning_flight_area_min_x().parse().unwrap_or(-2.0),
+                                                app.get_planning_flight_area_min_y().parse().unwrap_or(-2.0),
+                                                app.get_planning_flight_area_min_z().parse().unwrap_or(0.0),
+                                            ],
+                                            max: [
+                                                app.get_planning_flight_area_max_x().parse().unwrap_or(2.0),
+                                                app.get_planning_flight_area_max_y().parse().unwrap_or(2.0),
+                                                app.get_planning_flight_area_max_z().parse().unwrap_or(2.0),
+                                            ],
+                                        })
+                                    } else {
+                                        None
+                                    };
 
                                     let tex = plan_renderer.render_planning(
                                         pw, ph,
@@ -4592,6 +4636,8 @@ async fn main() {
                                         app.get_planning_selected_type(),
                                         app.get_planning_selected_index(),
                                         app.get_planning_active_handle(),
+                                        &traj_for_render,
+                                        flight_area,
                                     );
                                     app.set_planning_texture(tex);
 
@@ -6432,24 +6478,220 @@ async fn main() {
             ps.obstacle_colors = ps.obstacles.iter().map(|o| o.color).collect();
         }
 
-        // Map error metric index to DOP metric and name
-        fn error_metric_to_dop(idx: i32) -> (usize, &'static str) {
-            match idx {
-                1 => (tdoa3::METRIC_HDOP, "HERR"),
-                2 => (tdoa3::METRIC_VDOP, "VERR"),
-                _ => (tdoa3::METRIC_GDOP, "GERR"),
-            }
-        }
+        // Compute the displayed TDoA3 voxels + two stats lines for a given metric.
+        // Ported from the standalone TDoA3 Coverage tab so Planning supports the
+        // full set of metrics (DOP / error / sensitivity / pair sensitivity).
+        #[allow(clippy::too_many_arguments)]
+        fn tdoa3_metric_voxels_and_stats(
+            display_metric: usize,
+            gdop_result: Option<&tdoa3::GdopResult>,
+            anchors: &[tdoa3::Anchor],
+            convex_hull: Option<&tdoa3::ConvexHull>,
+            room: [f32; 3],
+            resolution: f32,
+            max_range: f32,
+            offset: [f32; 3],
+            sigma: f32,
+            min_slider: f32,
+            max_slider: f32,
+            show_outside_hull: bool,
+            pair_a: usize,
+            pair_b: usize,
+        ) -> (Vec<(f32, f32, f32, f32)>, [String; 2]) {
+            const DISP_PAIRS: usize = 5;
+            const DISP_PAIR_SENS: usize = 6;
+            const DISP_X_ERR: usize = 7;
+            const DISP_Y_ERR: usize = 8;
+            const DISP_Z_ERR: usize = 9;
+            const DISP_XY_ERR: usize = 10;
+            const DISP_GLOBAL_ERR: usize = 11;
+            const DISP_X_SENS: usize = 12;
+            const DISP_Z_SENS: usize = 14;
+            const DISP_MIN_SENS: usize = 15;
+            const DISP_MIN_XY_SENS: usize = 16;
 
-        // Extract tdoa3 voxels for the selected error metric, scaled by sigma
-        fn extract_tdoa3_voxels(ps: &mut PlanningState, metric_idx: i32, sigma: f32) {
-            if let Some(ref result) = ps.tdoa3_gdop_result {
-                let (dop_metric, _) = error_metric_to_dop(metric_idx);
-                ps.tdoa3_voxels = result.iter_voxels(ps.room_offset, dop_metric).collect();
-                for v in &mut ps.tdoa3_voxels {
-                    v.3 *= sigma;
+            let hull_filter = |voxels: Vec<(f32, f32, f32, f32)>| -> Vec<(f32, f32, f32, f32)> {
+                if show_outside_hull {
+                    voxels
+                } else {
+                    voxels.into_iter()
+                        .filter(|(x, y, z, _)| convex_hull.map_or(true, |h| h.contains(&[*x, *y, *z])))
+                        .collect()
+                }
+            };
+
+            // Pair sensitivity (single anchor pair)
+            if display_metric == DISP_PAIR_SENS {
+                if pair_a >= anchors.len() || pair_b >= anchors.len() || pair_a == pair_b {
+                    return (Vec::new(), [
+                        "Select two different valid anchor indices".to_string(),
+                        String::new(),
+                    ]);
+                }
+                let voxels = hull_filter(tdoa3::compute_pair_sensitivity(
+                    room[0], room[1], room[2], resolution,
+                    anchors[pair_a].pos, anchors[pair_b].pos, max_range, offset,
+                ));
+                let (min_v, max_v, avg_v) = tdoa3::voxel_stats(&voxels);
+                return (voxels, [
+                    format!("|h| min: {:.2}  max: {:.2}  avg: {:.2}", min_v, max_v, avg_v),
+                    format!("Pair: anchor {} ↔ anchor {} (0 = degenerate, 2 = ideal)", pair_a, pair_b),
+                ]);
+            }
+
+            // Axis sensitivity (X / Y / Z)
+            if (DISP_X_SENS..=DISP_Z_SENS).contains(&display_metric) {
+                let axis = display_metric - DISP_X_SENS;
+                let axis_name = ["X", "Y", "Z"][axis];
+                let voxels = hull_filter(tdoa3::compute_axis_sensitivity(
+                    room[0], room[1], room[2], resolution, anchors, max_range, offset, axis,
+                ));
+                let (min_v, max_v, avg_v) = tdoa3::voxel_stats(&voxels);
+                return (voxels, [
+                    format!("{} sensitivity: min {:.2}  max {:.2}  avg {:.2}", axis_name, min_v, max_v, avg_v),
+                    "High = measurements respond to movement, low = flat hyperbolas".to_string(),
+                ]);
+            }
+
+            // Min-of-axes sensitivity
+            if display_metric == DISP_MIN_SENS || display_metric == DISP_MIN_XY_SENS {
+                let include_z = display_metric == DISP_MIN_SENS;
+                let voxels = hull_filter(tdoa3::compute_min_axis_sensitivity(
+                    room[0], room[1], room[2], resolution, anchors, max_range, offset, include_z,
+                ));
+                let label = if include_z { "Min XYZ" } else { "Min XY" };
+                let (min_v, max_v, avg_v) = tdoa3::voxel_stats(&voxels);
+                return (voxels, [
+                    format!("{} sensitivity: min {:.2}  max {:.2}  avg {:.2}", label, min_v, max_v, avg_v),
+                    "Weakest axis at each point (low = bottleneck for positioning)".to_string(),
+                ]);
+            }
+
+            // DOP / error metrics from the precomputed GDOP result
+            let Some(result) = gdop_result else {
+                return (Vec::new(), [String::new(), String::new()]);
+            };
+            let (storage_metric, metric_name, sigma_mult) = match display_metric {
+                0 => (tdoa3::METRIC_GDOP, "GDOP", 1.0),
+                1 => (tdoa3::METRIC_HDOP, "HDOP", 1.0),
+                2 => (tdoa3::METRIC_VDOP, "VDOP", 1.0),
+                3 => (tdoa3::METRIC_XDOP, "XDOP", 1.0),
+                4 => (tdoa3::METRIC_YDOP, "YDOP", 1.0),
+                DISP_PAIRS => (tdoa3::METRIC_PAIRS, "Pairs", 1.0),
+                DISP_X_ERR => (tdoa3::METRIC_XDOP, "σ_x", sigma),
+                DISP_Y_ERR => (tdoa3::METRIC_YDOP, "σ_y", sigma),
+                DISP_Z_ERR => (tdoa3::METRIC_VDOP, "σ_z", sigma),
+                DISP_XY_ERR => (tdoa3::METRIC_HDOP, "σ_xy", sigma),
+                DISP_GLOBAL_ERR => (tdoa3::METRIC_GDOP, "σ_xyz", sigma),
+                _ => (tdoa3::METRIC_GDOP, "GDOP", 1.0),
+            };
+
+            let mut voxels: Vec<(f32, f32, f32, f32)> =
+                hull_filter(result.iter_voxels(offset, storage_metric).collect());
+            if sigma_mult != 1.0 {
+                for v in &mut voxels {
+                    if v.3.is_finite() { v.3 *= sigma_mult; }
                 }
             }
+
+            // Stats over visible voxels within slider range
+            let mut vis_min = f32::INFINITY;
+            let mut vis_max = f32::NEG_INFINITY;
+            let mut vis_sum = 0.0_f64;
+            let mut vis_sum_sq = 0.0_f64;
+            let mut vis_count = 0u32;
+            let mut total_finite = 0u32;
+            for &(_, _, _, v) in &voxels {
+                if v.is_finite() {
+                    total_finite += 1;
+                    if v >= min_slider && v <= max_slider {
+                        vis_min = vis_min.min(v);
+                        vis_max = vis_max.max(v);
+                        vis_sum += v as f64;
+                        vis_sum_sq += (v as f64) * (v as f64);
+                        vis_count += 1;
+                    }
+                }
+            }
+            let vis_mean = if vis_count > 0 { vis_sum / vis_count as f64 } else { 0.0 };
+            let vis_std = if vis_count > 1 {
+                ((vis_sum_sq / vis_count as f64) - vis_mean * vis_mean).max(0.0).sqrt()
+            } else { 0.0 };
+            let ratio = if total_finite > 0 { vis_count as f32 / total_finite as f32 } else { 0.0 };
+
+            let lines = if (DISP_X_ERR..=DISP_GLOBAL_ERR).contains(&display_metric) {
+                let axis = match display_metric {
+                    DISP_X_ERR => "X", DISP_Y_ERR => "Y", DISP_Z_ERR => "Z",
+                    DISP_XY_ERR => "XY", _ => "Global",
+                };
+                [
+                    format!("{} error: min {:.3}m  max {:.3}m  avg {:.3}m  σ {:.3}m",
+                        axis, vis_min, vis_max, vis_mean, vis_std),
+                    format!("{} ∈ [{:.2}, {:.2}]m: {:.1}% (σ_tdoa = {}m)",
+                        metric_name, min_slider, max_slider, ratio * 100.0, sigma),
+                ]
+            } else if display_metric == DISP_PAIRS {
+                [
+                    format!("{} min: {:.0}  max: {:.0}  avg: {:.1}", metric_name,
+                        if vis_min.is_finite() { vis_min } else { 0.0 },
+                        if vis_max.is_finite() { vis_max } else { 0.0 }, vis_mean),
+                    format!("≥3 pairs: {:.1}%  ≥6 pairs: {:.1}%",
+                        result.coverage_ratio_pairs(3.0) * 100.0,
+                        result.coverage_ratio_pairs(6.0) * 100.0),
+                ]
+            } else {
+                [
+                    format!("{} min: {:.3}  max: {:.3}  avg: {:.3}  σ: {:.3}", metric_name,
+                        if vis_min.is_finite() { vis_min } else { 0.0 },
+                        if vis_max.is_finite() { vis_max } else { 0.0 }, vis_mean, vis_std),
+                    format!("{} ∈ [{:.2}, {:.2}]: {:.1}%", metric_name, min_slider, max_slider, ratio * 100.0),
+                ]
+            };
+            (voxels, lines)
+        }
+
+        // Refresh Planning's TDoA3 voxels + stats text for the current metric,
+        // reusing the already-computed GDOP result (no recompute needed).
+        fn refresh_planning_tdoa3(ui: &AppWindow, ps: &mut PlanningState) {
+            let metric = ui.get_planning_error_metric_index().max(0) as usize;
+            let sigma: f32 = ui.get_planning_measurement_noise().parse().unwrap_or(0.15);
+            let resolution: f32 = ui.get_planning_resolution().parse().unwrap_or(5.0);
+            let max_range: f32 = ui.get_planning_max_range().parse().unwrap_or(15.0);
+            let min_slider = ui.get_planning_tdoa3_scale_min();
+            let max_slider = ui.get_planning_tdoa3_scale_max();
+            let show_outside_hull = ui.get_planning_show_outside_hull();
+            let pair_a: usize = ui.get_planning_pair_a().parse().unwrap_or(0);
+            let pair_b: usize = ui.get_planning_pair_b().parse().unwrap_or(1);
+
+            let (voxels, stats) = tdoa3_metric_voxels_and_stats(
+                metric,
+                ps.tdoa3_gdop_result.as_ref(),
+                &ps.anchors,
+                ps.convex_hull.as_ref(),
+                ps.room,
+                resolution,
+                max_range,
+                ps.room_offset,
+                sigma,
+                min_slider,
+                max_slider,
+                show_outside_hull,
+                pair_a,
+                pair_b,
+            );
+            ps.tdoa3_voxels = voxels;
+
+            // Line 1: LH coverage + room global-error glance (+ hull glance if available)
+            let mut line1 = format!(
+                "LH: {:.0}% ≥1BS, {:.0}% ≥2BS  |  Room σ_xyz {:.1}cm",
+                ps.lh_ratio_1 * 100.0, ps.lh_ratio_2 * 100.0, ps.gdop_mean * sigma * 100.0,
+            );
+            if let Some((g, _, _)) = ps.hull_stats {
+                line1 += &format!("  Hull {:.1}cm", g * sigma * 100.0);
+            }
+            ui.set_planning_stats_text_1(line1.into());
+            ui.set_planning_stats_text_2(stats[0].clone().into());
+            ui.set_planning_stats_text_3(stats[1].clone().into());
         }
 
         fn rebuild_bs_render_data(ps: &mut PlanningState) {
@@ -6529,6 +6771,8 @@ async fn main() {
                     ui.get_planning_max_range().parse().unwrap_or(15.0),
                     ui.get_planning_tdoa3_scale_min(),
                     ui.get_planning_tdoa3_scale_max(),
+                    ui.get_planning_tilt_compensation_enabled(),
+                    ui.get_planning_max_tilt_angle().parse().unwrap_or(10.0),
                 );
                 if let Err(e) = planning::save_scene(&path, &scene) {
                     eprintln!("Failed to save planning scene: {}", e);
@@ -6607,6 +6851,8 @@ async fn main() {
                         ui.set_planning_show_coverage_3(scene.show_coverage[3]);
                         ui.set_planning_show_coverage_4(scene.show_coverage[4]);
                         ui.set_planning_max_range(format!("{}", scene.max_range).into());
+                        ui.set_planning_tilt_compensation_enabled(scene.tilt_compensation_enabled);
+                        ui.set_planning_max_tilt_angle(format!("{}", scene.max_tilt_angle).into());
 
                         // Compute coverage
                         let uo = scene.room_offset;
@@ -6689,6 +6935,80 @@ async fn main() {
                     }
                     Err(e) => {
                         eprintln!("Failed to load planning scene: {}", e);
+                    }
+                }
+            }).unwrap();
+        });
+
+        // Load LH base-station geometry from a YAML file
+        let ps = planning_state.clone();
+        let uw = ui_weak.clone();
+        ui.on_planning_load_geometry(move || {
+            let Some(ui) = uw.upgrade() else { return };
+            let uw2 = ui.as_weak();
+            let ps = ps.clone();
+            slint::spawn_local(async move {
+                let Some(handle) = rfd::AsyncFileDialog::new()
+                    .add_filter("YAML", &["yaml", "yml"])
+                    .pick_file().await
+                else { return };
+                let path = handle.path().to_path_buf();
+                let Some(ui) = uw2.upgrade() else { return };
+                match coverage::load_geometry_yaml(&path) {
+                    Ok(stations) => {
+                        let mut ps = ps.lock().unwrap();
+                        ps.base_stations = stations;
+                        rebuild_bs_render_data(&mut ps);
+                        let model: Vec<LhBaseStationData> = ps.base_stations.iter().map(|bs| LhBaseStationData {
+                            x: format!("{:.2}", bs.pos[0]).into(),
+                            y: format!("{:.2}", bs.pos[1]).into(),
+                            z: format!("{:.2}", bs.pos[2]).into(),
+                            azimuth: format!("{:.1}", bs.azimuth_deg).into(),
+                            elevation: format!("{:.1}", bs.elevation_deg).into(),
+                        }).collect();
+                        ui.set_planning_base_stations(slint::ModelRc::new(slint::VecModel::from(model)));
+                        let n = ps.base_stations.len();
+                        ui.set_planning_selected_type(0);
+                        ui.set_planning_selected_index(-1);
+                        ui.set_planning_stats_text_1(format!("Loaded {} base stations from geometry", n).into());
+                        drop(ps);
+                        ui.invoke_planning_recompute();
+                    }
+                    Err(e) => {
+                        eprintln!("Failed to load geometry: {}", e);
+                        ui.set_planning_stats_text_1(format!("Load geometry failed: {}", e).into());
+                    }
+                }
+            }).unwrap();
+        });
+
+        // Load trajectory CSV overlay
+        let ps = planning_state.clone();
+        let uw = ui_weak.clone();
+        ui.on_planning_load_trajectories(move || {
+            let Some(ui) = uw.upgrade() else { return };
+            let uw2 = ui.as_weak();
+            let ps = ps.clone();
+            slint::spawn_local(async move {
+                let Some(handle) = rfd::AsyncFileDialog::new()
+                    .add_filter("CSV files", &["csv"])
+                    .set_title("Load Trajectories CSV")
+                    .pick_file().await
+                else { return };
+                let path = handle.path().to_path_buf();
+                let Some(ui) = uw2.upgrade() else { return };
+                match coverage::load_trajectories_csv(&path) {
+                    Ok(trajectories) => {
+                        let n_cfs = trajectories.len();
+                        let n_steps = trajectories.first().map(|t| t.len()).unwrap_or(0);
+                        ui.set_planning_trajectories_status(
+                            format!("{} CFs, {} steps", n_cfs, n_steps).into(),
+                        );
+                        ps.lock().unwrap().trajectories = trajectories;
+                        ui.window().request_redraw();
+                    }
+                    Err(e) => {
+                        ui.set_planning_trajectories_status(format!("Error: {}", e).into());
                     }
                 }
             }).unwrap();
@@ -7085,35 +7405,23 @@ async fn main() {
             let Ok(result) = rx.try_recv() else { return };
 
             // Result received — update state and UI
-            let (lh_voxels, lh_ratio_1, lh_ratio_2, tdoa3_result, gdop_mean, hdop_mean, vdop_mean, hull_stats, offset, room) = result;
+            let (lh_voxels, lh_ratio_1, lh_ratio_2, tdoa3_result, gdop_mean, _hdop_mean, _vdop_mean, hull_stats, offset, room) = result;
 
             let Some(ui) = uw_timer.upgrade() else { return };
-            let sigma: f32 = ui.get_planning_measurement_noise().parse().unwrap_or(0.15);
-            let metric_idx = ui.get_planning_error_metric_index();
 
             let mut pstate = ps_timer.lock().unwrap();
             pstate.room = room;
             pstate.room_offset = offset;
             pstate.lh_voxels = lh_voxels;
+            pstate.lh_ratio_1 = lh_ratio_1;
+            pstate.lh_ratio_2 = lh_ratio_2;
+            pstate.gdop_mean = gdop_mean;
+            pstate.hull_stats = hull_stats;
             pstate.tdoa3_gdop_result = Some(tdoa3_result);
-            extract_tdoa3_voxels(&mut pstate, metric_idx, sigma);
+            let hull = tdoa3::ConvexHull::build(&pstate.anchor_positions);
+            pstate.convex_hull = hull;
+            refresh_planning_tdoa3(&ui, &mut pstate);
             drop(pstate);
-
-            ui.set_planning_stats_text_1(
-                format!("LH: {:.0}% ≥1 BS, {:.0}% ≥2 BS", lh_ratio_1 * 100.0, lh_ratio_2 * 100.0).into()
-            );
-            ui.set_planning_stats_text_2(
-                format!("Room  GERR={:.1} HERR={:.1} VERR={:.1} cm",
-                    gdop_mean * sigma * 100.0, hdop_mean * sigma * 100.0, vdop_mean * sigma * 100.0).into()
-            );
-            if let Some((g, h, v)) = hull_stats {
-                ui.set_planning_stats_text_3(
-                    format!("Hull  GERR={:.1} HERR={:.1} VERR={:.1} cm",
-                        g * sigma * 100.0, h * sigma * 100.0, v * sigma * 100.0).into()
-                );
-            } else {
-                ui.set_planning_stats_text_3("".into());
-            }
 
             ui.set_planning_computing(false);
             *rx_opt = None; // clear receiver
@@ -7132,6 +7440,9 @@ async fn main() {
             let max_bs_dist: f32 = ui.get_planning_max_bs_distance().parse().unwrap_or(5.0);
             let max_range: f32 = ui.get_planning_max_range().parse().unwrap_or(15.0);
             let receiver_fov = if ui.get_planning_receiver_fov_enabled() { Some(170.0) } else { None };
+            let tilt_reduction = if ui.get_planning_tilt_compensation_enabled() {
+                Some(ui.get_planning_max_tilt_angle().parse().unwrap_or(10.0))
+            } else { None };
 
             let user_offset_x: f32 = ui.get_planning_room_offset_x().parse().unwrap_or(0.0);
             let user_offset_y: f32 = ui.get_planning_room_offset_y().parse().unwrap_or(0.0);
@@ -7154,7 +7465,7 @@ async fn main() {
                 let lh_result = planning::compute_coverage_with_obstacles(
                     room_x, room_y, room_z, resolution,
                     &base_stations, 160.0, 115.0,
-                    receiver_fov, None, max_bs_dist, offset,
+                    receiver_fov, tilt_reduction, max_bs_dist, offset,
                     &obstacles,
                 );
                 let lh_ratio_1 = lh_result.coverage_ratio(1);
@@ -7187,14 +7498,30 @@ async fn main() {
         // Keep the timer alive — it runs forever, polling for results
         std::mem::forget(compute_timer);
 
-        // Error metric changed (switch GERR/HERR/VERR without recomputing)
+        // Metric changed / display option changed — re-extract voxels + stats
+        // without recomputing the GDOP grid. Resets the colour scale only when
+        // the metric index actually changes (so editing noise/pair/hull doesn't
+        // clobber the user's slider positions).
         let ps = planning_state.clone();
         let uw = ui_weak.clone();
         ui.on_planning_error_metric_changed(move |idx| {
             let Some(ui) = uw.upgrade() else { return };
-            let sigma: f32 = ui.get_planning_measurement_noise().parse().unwrap_or(0.15);
             let mut ps = ps.lock().unwrap();
-            extract_tdoa3_voxels(&mut ps, idx, sigma);
+            if idx != ps.last_metric {
+                ps.last_metric = idx;
+                // Error metrics (7-11) are in metres; DOP/sensitivity are unitless.
+                let (limit, default_min, default_max) = match idx.max(0) as usize {
+                    7..=11 => (2.0_f32, 0.0_f32, 0.5_f32),   // error in metres
+                    12..=16 => (2.0_f32, 0.0_f32, 1.0_f32),  // sensitivity
+                    5 => (20.0, 0.0, 12.0),                  // anchor pairs (count)
+                    6 => (2.0, 0.0, 2.0),                    // pair sensitivity
+                    _ => (10.0, 0.0, 5.0),                   // DOP values
+                };
+                ui.set_planning_tdoa3_scale_limit(limit);
+                ui.set_planning_tdoa3_scale_min(default_min);
+                ui.set_planning_tdoa3_scale_max(default_max);
+            }
+            refresh_planning_tdoa3(&ui, &mut ps);
         });
 
         // Mouse interaction: press

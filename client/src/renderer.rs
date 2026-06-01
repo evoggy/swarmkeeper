@@ -1410,6 +1410,10 @@ impl Scene3DRenderer {
         selected_type: i32,  // 0=none, 1=BS, 2=anchor, 3=obstacle
         selected_index: i32,
         active_handle: i32,
+        // LH trajectory overlay
+        trajectories: &[Vec<[f32; 3]>],
+        // Flight area wireframe (None = not shown)
+        flight_area: Option<FlightAreaBox>,
     ) -> slint::Image {
         let width = width.max(1);
         let height = height.max(1);
@@ -1482,6 +1486,57 @@ impl Scene3DRenderer {
             gl.uniform_3_f32(Some(&self.u_color), 0.5, 0.5, 0.55);
             upload_and_draw(gl, self.vbo, &box_verts, glow::LINES);
             gl.draw_arrays(glow::LINES, 0, box_verts.len() as i32 / 3);
+
+            // --- Trajectories (LH overlay) ---
+            if !trajectories.is_empty() {
+                for (i, traj) in trajectories.iter().enumerate() {
+                    if traj.len() < 2 {
+                        continue;
+                    }
+                    let hue = (i as f32 * 0.618033988) % 1.0; // golden ratio hue rotation
+                    let (r, g, b) = hue_to_rgb(hue);
+                    gl.uniform_3_f32(Some(&self.u_color), r, g, b);
+                    let verts: Vec<f32> = traj.iter().flat_map(|p| p.iter().copied()).collect();
+                    upload_and_draw(gl, self.vbo, &verts, glow::LINE_STRIP);
+                    gl.draw_arrays(glow::LINE_STRIP, 0, traj.len() as i32);
+                }
+                // Start positions as larger dots
+                gl.uniform_1_f32(Some(&self.u_point_size), 6.0);
+                for (i, traj) in trajectories.iter().enumerate() {
+                    if let Some(start) = traj.first() {
+                        let hue = (i as f32 * 0.618033988) % 1.0;
+                        let (r, g, b) = hue_to_rgb(hue);
+                        gl.uniform_3_f32(Some(&self.u_color), r, g, b);
+                        upload_and_draw(gl, self.vbo, start, glow::POINTS);
+                        gl.draw_arrays(glow::POINTS, 0, 1);
+                    }
+                }
+                gl.uniform_1_f32(Some(&self.u_point_size), 1.0);
+            }
+
+            // --- Flight area wireframe ---
+            if let Some(fa) = flight_area {
+                let [x0, y0, z0] = fa.min;
+                let [x1, y1, z1] = fa.max;
+                let edges: [f32; 72] = [
+                    x0, y0, z0,  x1, y0, z0,
+                    x1, y0, z0,  x1, y1, z0,
+                    x1, y1, z0,  x0, y1, z0,
+                    x0, y1, z0,  x0, y0, z0,
+                    x0, y0, z1,  x1, y0, z1,
+                    x1, y0, z1,  x1, y1, z1,
+                    x1, y1, z1,  x0, y1, z1,
+                    x0, y1, z1,  x0, y0, z1,
+                    x0, y0, z0,  x0, y0, z1,
+                    x1, y0, z0,  x1, y0, z1,
+                    x1, y1, z0,  x1, y1, z1,
+                    x0, y1, z0,  x0, y1, z1,
+                ];
+                gl.uniform_3_f32(Some(&self.u_color), 0.95, 0.85, 0.20); // amber
+                gl.uniform_1_f32(Some(&self.u_point_size), 1.0);
+                upload_and_draw(gl, self.vbo, &edges, glow::LINES);
+                gl.draw_arrays(glow::LINES, 0, (edges.len() / 3) as i32);
+            }
 
             // --- Obstacles (opaque solid triangles + wireframe) ---
             for (i, tris) in obstacle_triangles.iter().enumerate() {

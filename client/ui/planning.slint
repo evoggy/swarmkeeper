@@ -163,6 +163,7 @@ export component PlanningContent inherits Rectangle {
     property <bool> obs-expanded: true;
     property <bool> flight-area-expanded: true;
     property <bool> pads-expanded: false;
+    property <bool> traj-expanded: false;
 
     // Camera state
     in-out property <float> cam-yaw: 0.8;
@@ -212,14 +213,28 @@ export component PlanningContent inherits Rectangle {
     // TDoA3 settings
     in-out property <string> max-range: "15.0";
     in-out property <float> tdoa3-scale-min: 0.0;
-    in-out property <float> tdoa3-scale-max: 0.05;
-    in-out property <float> tdoa3-scale-limit: 0.1;
+    in-out property <float> tdoa3-scale-max: 5.0;
+    in-out property <float> tdoa3-scale-limit: 10.0;
     in-out property <string> measurement-noise: "0.15";
     in-out property <bool> show-tdoa3-voxels: true;
     in-out property <bool> computing: false;
-    in-out property <[string]> error-metric-names: ["GERR", "HERR", "VERR"];
+    in-out property <[string]> error-metric-names: ["GDOP", "HDOP", "VDOP", "XDOP", "YDOP", "Anchor Pairs", "Pair Sensitivity", "X Error (m)", "Y Error (m)", "Z Error (m)", "XY Error (m)", "Global Error (m)", "X Sensitivity", "Y Sensitivity", "Z Sensitivity", "Min XYZ Sensitivity", "Min XY Sensitivity"];
     in-out property <int> error-metric-index: 0;
     callback error-metric-changed(int);
+    // Pair sensitivity selector + convex hull toggle (ported from TDoA3 Coverage)
+    in-out property <string> pair-a: "0";
+    in-out property <string> pair-b: "1";
+    in-out property <bool> show-outside-hull: true;
+    // LH tilt compensation + trajectory overlay (ported from LH Coverage)
+    in-out property <bool> tilt-compensation-enabled: true;
+    in-out property <string> max-tilt-angle: "10";
+    in-out property <bool> show-trajectories: true;
+    in-out property <string> trajectories-status: "";
+    in-out property <string> traj-offset-x: "0.0";
+    in-out property <string> traj-offset-y: "0.0";
+    in-out property <string> traj-offset-z: "0.0";
+    callback load-geometry();
+    callback load-trajectories();
 
     // Stats
     in-out property <string> stats-text-1: "";
@@ -367,6 +382,10 @@ export component PlanningContent inherits Rectangle {
                                 count: root.base-stations.length;
                                 expanded <=> bs-expanded;
                                 horizontal-stretch: 1;
+                            }
+                            Button {
+                                text: "Load";
+                                clicked => { root.load-geometry(); }
                             }
                             Button {
                                 text: "Add";
@@ -579,7 +598,12 @@ export component PlanningContent inherits Rectangle {
                         if obs-expanded: VerticalLayout {
                             spacing: 8px;
 
-                            for obs[idx] in root.obstacles: Rectangle {
+                            for obs[idx] in root.obstacles: obs-row := Rectangle {
+                                // Local mirror of the on-floor flag: the obstacle
+                                // model isn't refreshed on every edit, so sibling
+                                // field handlers must read this instead of the
+                                // (stale) obs.on-floor to avoid clobbering it.
+                                property <bool> on-floor-state: obs.on-floor;
                                 border-radius: 4px;
                                 background: root.selected-type == 3 && root.selected-index == idx
                                     ? Palette.accent-background
@@ -601,8 +625,9 @@ export component PlanningContent inherits Rectangle {
                                         Rectangle { horizontal-stretch: 1; }
                                         CheckBox {
                                             text: "Floor";
-                                            checked: obs.on-floor;
+                                            checked: obs-row.on-floor-state;
                                             toggled => {
+                                                obs-row.on-floor-state = self.checked;
                                                 root.update-obstacle(idx, {
                                                     kind: obs.kind,
                                                     x: obs-x.text, y: obs-y.text, z: obs-z.text,
@@ -638,7 +663,7 @@ export component PlanningContent inherits Rectangle {
                                                     width: obs-w.text, depth: obs-d.text, height: obs-h.text,
                                                     radius: obs-r.text,
                                                     color-r: obs.color-r, color-g: obs.color-g, color-b: obs.color-b,
-                                                    on-floor: obs.on-floor,
+                                                    on-floor: obs-row.on-floor-state,
                                                 });
                                             }
                                         }
@@ -654,7 +679,7 @@ export component PlanningContent inherits Rectangle {
                                                     width: obs-w.text, depth: obs-d.text, height: obs-h.text,
                                                     radius: obs-r.text,
                                                     color-r: obs.color-r, color-g: obs.color-g, color-b: obs.color-b,
-                                                    on-floor: obs.on-floor,
+                                                    on-floor: obs-row.on-floor-state,
                                                 });
                                             }
                                         }
@@ -670,7 +695,7 @@ export component PlanningContent inherits Rectangle {
                                                     width: obs-w.text, depth: obs-d.text, height: obs-h.text,
                                                     radius: obs-r.text,
                                                     color-r: obs.color-r, color-g: obs.color-g, color-b: obs.color-b,
-                                                    on-floor: obs.on-floor,
+                                                    on-floor: obs-row.on-floor-state,
                                                 });
                                             }
                                         }
@@ -686,7 +711,7 @@ export component PlanningContent inherits Rectangle {
                                                     width: obs-w.text, depth: obs-d.text, height: obs-h.text,
                                                     radius: obs-r.text,
                                                     color-r: obs.color-r, color-g: obs.color-g, color-b: obs.color-b,
-                                                    on-floor: obs.on-floor,
+                                                    on-floor: obs-row.on-floor-state,
                                                 });
                                             }
                                         }
@@ -706,7 +731,7 @@ export component PlanningContent inherits Rectangle {
                                                     width: val, depth: obs-d.text, height: obs-h.text,
                                                     radius: obs-r.text,
                                                     color-r: obs.color-r, color-g: obs.color-g, color-b: obs.color-b,
-                                                    on-floor: obs.on-floor,
+                                                    on-floor: obs-row.on-floor-state,
                                                 });
                                             }
                                         }
@@ -722,7 +747,7 @@ export component PlanningContent inherits Rectangle {
                                                     width: obs-w.text, depth: val, height: obs-h.text,
                                                     radius: obs-r.text,
                                                     color-r: obs.color-r, color-g: obs.color-g, color-b: obs.color-b,
-                                                    on-floor: obs.on-floor,
+                                                    on-floor: obs-row.on-floor-state,
                                                 });
                                             }
                                         }
@@ -738,7 +763,7 @@ export component PlanningContent inherits Rectangle {
                                                     width: obs-w.text, depth: obs-d.text, height: val,
                                                     radius: obs-r.text,
                                                     color-r: obs.color-r, color-g: obs.color-g, color-b: obs.color-b,
-                                                    on-floor: obs.on-floor,
+                                                    on-floor: obs-row.on-floor-state,
                                                 });
                                             }
                                         }
@@ -754,7 +779,7 @@ export component PlanningContent inherits Rectangle {
                                                     width: obs-w.text, depth: obs-d.text, height: obs-h.text,
                                                     radius: val,
                                                     color-r: obs.color-r, color-g: obs.color-g, color-b: obs.color-b,
-                                                    on-floor: obs.on-floor,
+                                                    on-floor: obs-row.on-floor-state,
                                                 });
                                             }
                                         }
@@ -772,7 +797,7 @@ export component PlanningContent inherits Rectangle {
                                                 width: obs-w.text, depth: obs-d.text, height: obs-h.text,
                                                 radius: obs-r.text,
                                                 color-r: r, color-g: g, color-b: b,
-                                                on-floor: obs.on-floor,
+                                                on-floor: obs-row.on-floor-state,
                                             });
                                         }
                                     }
@@ -855,6 +880,45 @@ export component PlanningContent inherits Rectangle {
 
                         Rectangle { height: 1px; background: Palette.border; }
 
+                        // --- Trajectories (LH overlay) ---
+                        HorizontalLayout {
+                            SectionHeader {
+                                title: "Trajectories";
+                                count: root.trajectories-status != "" ? 1 : 0;
+                                expanded <=> traj-expanded;
+                                horizontal-stretch: 1;
+                            }
+                            Button {
+                                text: "Load CSV";
+                                clicked => { root.load-trajectories(); }
+                            }
+                        }
+
+                        if traj-expanded: VerticalLayout {
+                            spacing: 6px;
+
+                            CheckBox {
+                                text: "Show trajectories";
+                                checked <=> root.show-trajectories;
+                            }
+
+                            HorizontalLayout {
+                                spacing: 4px;
+                                Text { text: "Offset"; font-size: 11px; vertical-alignment: center; width: 36px; }
+                                NumericInput { text <=> root.traj-offset-x; width: 60px; }
+                                NumericInput { text <=> root.traj-offset-y; width: 60px; }
+                                NumericInput { text <=> root.traj-offset-z; width: 60px; }
+                            }
+
+                            if root.trajectories-status != "": Text {
+                                text: root.trajectories-status;
+                                font-size: 10px;
+                                color: Palette.foreground.transparentize(0.4);
+                            }
+                        }
+
+                        Rectangle { height: 1px; background: Palette.border; }
+
                         // --- Coverage ---
                         Text {
                             text: "Coverage";
@@ -866,6 +930,16 @@ export component PlanningContent inherits Rectangle {
                         CheckBox {
                             text: "Receiver FOV (170°)";
                             checked <=> root.receiver-fov-enabled;
+                        }
+
+                        HorizontalLayout {
+                            spacing: 4px;
+                            CheckBox {
+                                text: "Max tilt ±";
+                                checked <=> root.tilt-compensation-enabled;
+                            }
+                            LineEdit { text <=> root.max-tilt-angle; width: 60px; }
+                            Text { text: "°"; font-size: 12px; vertical-alignment: center; }
                         }
 
                         HorizontalLayout {
@@ -901,30 +975,55 @@ export component PlanningContent inherits Rectangle {
                             CheckBox { text: "Show TDoA3"; checked <=> root.show-tdoa3-voxels; }
                             ComboBox {
                                 model: root.error-metric-names;
-                                current-index: root.error-metric-index;
+                                current-index <=> root.error-metric-index;
                                 selected(val) => { root.error-metric-changed(self.current-index); }
-                                width: 80px;
+                                horizontal-stretch: 1;
                             }
                         }
 
-                        HorizontalLayout {
+                        if root.error-metric-index == 6: HorizontalLayout {
                             spacing: 4px;
-                            Text { text: "Noise (m):"; font-size: 11px; vertical-alignment: center; }
-                            LineEdit { text <=> root.measurement-noise; width: 60px; }
+                            Text { text: "Anchor A:"; font-size: 11px; vertical-alignment: center; }
+                            NumericInput {
+                                text <=> root.pair-a;
+                                width: 50px;
+                                edited(val) => { root.error-metric-changed(root.error-metric-index); }
+                            }
+                            Text { text: "B:"; font-size: 11px; vertical-alignment: center; }
+                            NumericInput {
+                                text <=> root.pair-b;
+                                width: 50px;
+                                edited(val) => { root.error-metric-changed(root.error-metric-index); }
+                            }
+                        }
+
+                        if root.error-metric-index >= 7 && root.error-metric-index <= 11: HorizontalLayout {
+                            spacing: 4px;
+                            Text { text: "σ TDoA (m):"; font-size: 11px; vertical-alignment: center; }
+                            LineEdit {
+                                text <=> root.measurement-noise;
+                                width: 60px;
+                                edited(val) => { root.error-metric-changed(root.error-metric-index); }
+                            }
+                        }
+
+                        CheckBox {
+                            text: "Show outside convex hull";
+                            checked <=> root.show-outside-hull;
+                            toggled => { root.error-metric-changed(root.error-metric-index); }
                         }
 
                         HorizontalLayout {
                             spacing: 4px;
-                            Text { text: "Err min (cm):"; font-size: 11px; vertical-alignment: center; }
+                            Text { text: "Scale min:"; font-size: 11px; vertical-alignment: center; width: 60px; }
                             Slider {
                                 minimum: 0;
-                                maximum: root.tdoa3-scale-limit * 100;
-                                value: root.tdoa3-scale-min * 100;
-                                changed(v) => { root.tdoa3-scale-min = v / 100; }
-                                width: 120px;
+                                maximum: root.tdoa3-scale-limit;
+                                value <=> root.tdoa3-scale-min;
+                                horizontal-stretch: 1;
                             }
                             Text {
-                                text: "\{round(root.tdoa3-scale-min * 10000) / 100}";
+                                text: "\{round(root.tdoa3-scale-min * 100) / 100}";
                                 font-size: 11px;
                                 vertical-alignment: center;
                                 width: 40px;
@@ -933,16 +1032,15 @@ export component PlanningContent inherits Rectangle {
 
                         HorizontalLayout {
                             spacing: 4px;
-                            Text { text: "Err max (cm):"; font-size: 11px; vertical-alignment: center; }
+                            Text { text: "Scale max:"; font-size: 11px; vertical-alignment: center; width: 60px; }
                             Slider {
-                                minimum: 0;
-                                maximum: root.tdoa3-scale-limit * 100;
-                                value: root.tdoa3-scale-max * 100;
-                                changed(v) => { root.tdoa3-scale-max = v / 100; }
-                                width: 120px;
+                                minimum: 0.01;
+                                maximum: root.tdoa3-scale-limit;
+                                value <=> root.tdoa3-scale-max;
+                                horizontal-stretch: 1;
                             }
                             Text {
-                                text: "\{round(root.tdoa3-scale-max * 10000) / 100}";
+                                text: "\{round(root.tdoa3-scale-max * 100) / 100}";
                                 font-size: 11px;
                                 vertical-alignment: center;
                                 width: 40px;
@@ -989,6 +1087,26 @@ export component PlanningContent inherits Rectangle {
                 }
             }
 
+            view-focus := FocusScope {
+                key-pressed(e) => {
+                    if (e.text == Key.Delete || e.text == Key.Backspace) {
+                        if (root.selected-type == 1 && root.selected-index >= 0) {
+                            root.remove-base-station(root.selected-index);
+                            accept
+                        } else if (root.selected-type == 2 && root.selected-index >= 0) {
+                            root.remove-anchor(root.selected-index);
+                            accept
+                        } else if (root.selected-type == 3 && root.selected-index >= 0) {
+                            root.remove-obstacle(root.selected-index);
+                            accept
+                        } else {
+                            reject
+                        }
+                    } else {
+                        reject
+                    }
+                }
+
             TouchArea {
                 property <float> prev-x;
                 property <float> prev-y;
@@ -1006,6 +1124,7 @@ export component PlanningContent inherits Rectangle {
 
                 pointer-event(e) => {
                     if (e.kind == PointerEventKind.down) {
+                        view-focus.focus();
                         if (e.button == PointerEventButton.left) {
                             root.view-mouse-pressed(self.mouse-x / 1px, self.mouse-y / 1px);
                             if (!root.handle-active) {
@@ -1045,6 +1164,7 @@ export component PlanningContent inherits Rectangle {
                         self.prev-y = self.mouse-y / 1px;
                     }
                 }
+            }
             }
         }
 
