@@ -2,57 +2,7 @@ import { VerticalBox, HorizontalBox, Button, LineEdit, ScrollView, Palette, Chec
 import { VizLabel } from "visualization.slint";
 import { LhBaseStationData } from "lh-coverage.slint";
 import { Tdoa3AnchorData } from "tdoa3-coverage.slint";
-
-// Collapsible section header with toggle arrow
-component SectionHeader inherits Rectangle {
-    in property <string> title;
-    in-out property <bool> expanded: true;
-    in property <int> count: 0;
-    callback toggle();
-
-    height: 28px;
-    background: touch.has-hover ? Palette.background.darker(0.05) : transparent;
-
-    touch := TouchArea {
-        clicked => {
-            root.expanded = !root.expanded;
-            root.toggle();
-        }
-        mouse-cursor: pointer;
-    }
-
-    HorizontalLayout {
-        spacing: 6px;
-        padding-left: 4px;
-        padding-right: 4px;
-
-        Text {
-            text: root.expanded ? "v" : ">";
-            font-size: 11px;
-            font-weight: 700;
-            vertical-alignment: center;
-            width: 12px;
-            color: Palette.foreground.transparentize(0.4);
-        }
-
-        Text {
-            text: root.title;
-            font-size: 12px;
-            font-weight: 600;
-            color: Palette.foreground.transparentize(0.3);
-            vertical-alignment: center;
-        }
-
-        if root.count > 0: Text {
-            text: "(\{root.count})";
-            font-size: 11px;
-            color: Palette.foreground.transparentize(0.5);
-            vertical-alignment: center;
-        }
-
-        Rectangle { horizontal-stretch: 1; }
-    }
-}
+import { SectionHeader } from "widgets.slint";
 
 // Minimal numeric input without the clear ("X") button
 component NumericInput inherits Rectangle {

@@ -1,5 +1,6 @@
 import { Button, Palette, ScrollView, VerticalBox, HorizontalBox, LineEdit, CheckBox, ComboBox } from "std-widgets.slint";
 import { UnitData, UnitState, JournalEntryData } from "unit-card.slint";
+import { SectionHeader } from "widgets.slint";
 
 component HeaderCell inherits Rectangle {
     in property <string> label;
@@ -365,6 +366,17 @@ export component UnitSidebar inherits Rectangle {
     callback sysoff-clicked();
     callback syson-clicked();
 
+    // Collapsible info section state (Status expanded by default)
+    property <bool> status-expanded: true;
+    property <bool> info-expanded: false;
+    property <bool> link-expanded: false;
+
+    // Collapsible action section state (Flight expanded by default)
+    property <bool> flight-expanded: true;
+    property <bool> trajectory-expanded: false;
+    property <bool> tools-expanded: false;
+    property <bool> power-expanded: false;
+
     property <string> state-text: unit.state == UnitState.disconnected ? "Disconnected"
                                 : unit.state == UnitState.connected ? "Connected"
                                 : unit.state == UnitState.charging ? "Charging"
@@ -461,79 +473,250 @@ export component UnitSidebar inherits Rectangle {
                     }
                 }
 
+                // Status section
                 HorizontalLayout {
-                    spacing: 8px;
                     padding-left: 16px;
                     padding-right: 16px;
-
-                    Text {
-                        text: "URI";
-                        font-size: 12px;
-                        font-weight: 600;
-                        color: Palette.foreground.transparentize(0.3);
-                        width: 90px;
-                        vertical-alignment: center;
-                    }
-
-                    Rectangle {
+                    SectionHeader {
+                        title: "Status";
+                        expanded <=> root.status-expanded;
                         horizontal-stretch: 1;
-                        clip: true;
+                    }
+                }
+                if root.status-expanded: VerticalLayout {
+                    spacing: 8px;
+                    padding-bottom: 4px;
 
-                        uri-input := TextInput {
-                            text: unit.uri;
-                            read-only: true;
-                            single-line: true;
-                            font-size: 12px;
-                            color: Palette.foreground;
-                            vertical-alignment: center;
+                    BatteryBar { voltage: unit.battery-voltage; }
+                    DetailRow { label: "Power State"; value: unit.pm-state != "" ? unit.pm-state : "—"; }
+                    DetailRow { label: "Supervisor"; value: unit.supervisor-state != "" ? unit.supervisor-state : "—"; }
+                    DetailRow { label: "Position X"; value: "\{round(unit.pos-x * 100) / 100}"; }
+                    DetailRow { label: "Position Y"; value: "\{round(unit.pos-y * 100) / 100}"; }
+                    DetailRow { label: "Position Z"; value: "\{round(unit.pos-z * 100) / 100}"; }
+                }
+
+                // Flight section
+                HorizontalLayout {
+                    padding-left: 16px;
+                    padding-right: 16px;
+                    SectionHeader {
+                        title: "Flight";
+                        expanded <=> root.flight-expanded;
+                        horizontal-stretch: 1;
+                    }
+                }
+                if root.flight-expanded: VerticalLayout {
+                    padding-left: 16px;
+                    padding-right: 16px;
+                    padding-bottom: 8px;
+                    spacing: 8px;
+
+                    // Takeoff fields
+                    HorizontalLayout {
+                        spacing: 4px;
+
+                        VerticalLayout {
+                            spacing: 1px;
+                            width: 60px;
+                            Text { text: "H (m)"; font-size: 9px; color: Palette.foreground.transparentize(0.5); }
+                            takeoff-height := LineEdit {
+                                text: "0.5";
+                                font-size: 11px;
+                                height: 24px;
+                            }
                         }
 
-                        TouchArea {
-                            mouse-cursor: text;
-                            clicked => {
-                                uri-input.focus();
-                                uri-input.select-all();
+                        VerticalLayout {
+                            spacing: 1px;
+                            width: 60px;
+                            Text { text: "Yaw (°)"; font-size: 9px; color: Palette.foreground.transparentize(0.5); }
+                            takeoff-yaw := LineEdit {
+                                text: "0";
+                                font-size: 11px;
+                                height: 24px;
+                            }
+                        }
+
+                        VerticalLayout {
+                            spacing: 1px;
+                            width: 60px;
+                            Text { text: "Time (s)"; font-size: 9px; color: Palette.foreground.transparentize(0.5); }
+                            takeoff-time := LineEdit {
+                                text: "2";
+                                font-size: 11px;
+                                height: 24px;
                             }
                         }
                     }
-                }
-                DetailRow { label: "Serial"; value: unit.serial != "" ? unit.serial : "—"; }
-                DetailRow { label: "Platform"; value: unit.platform-type != "" ? unit.platform-type : "—"; }
-                DetailRow { label: "Firmware"; value: unit.firmware-version != "" ? unit.firmware-version : "—"; }
-                DetailRow { label: "Description"; value: unit.description != "" ? unit.description : "—"; }
-                DetailRow { label: "Position X"; value: "\{round(unit.pos-x * 100) / 100}"; }
-                DetailRow { label: "Position Y"; value: "\{round(unit.pos-y * 100) / 100}"; }
-                DetailRow { label: "Position Z"; value: "\{round(unit.pos-z * 100) / 100}"; }
 
-                BatteryBar { voltage: unit.battery-voltage; }
-                LinkQualityBar { quality: unit.link-quality; }
+                    Button {
+                        text: "Takeoff";
+                        clicked => { takeoff-clicked(takeoff-height.text, takeoff-yaw.text, takeoff-time.text); }
+                    }
 
-                // Link Statistics section
-                Rectangle {
-                    height: 1px;
-                    background: Palette.border.transparentize(0.5);
-                }
+                    // Goto fields
+                    HorizontalLayout {
+                        spacing: 4px;
 
-                HorizontalLayout {
-                    padding-left: 16px;
-                    padding-right: 16px;
+                        VerticalLayout {
+                            spacing: 1px;
+                            width: 60px;
+                            Text { text: "X"; font-size: 9px; color: Palette.foreground.transparentize(0.5); }
+                            goto-x := LineEdit {
+                                text <=> root.goto-x-text;
+                                font-size: 11px;
+                                height: 24px;
+                            }
+                        }
 
-                    Text {
-                        text: "Link Statistics";
-                        font-size: 12px;
-                        font-weight: 600;
-                        color: Palette.foreground.transparentize(0.3);
+                        VerticalLayout {
+                            spacing: 1px;
+                            width: 60px;
+                            Text { text: "Y"; font-size: 9px; color: Palette.foreground.transparentize(0.5); }
+                            goto-y := LineEdit {
+                                text <=> root.goto-y-text;
+                                font-size: 11px;
+                                height: 24px;
+                            }
+                        }
+
+                        VerticalLayout {
+                            spacing: 1px;
+                            width: 60px;
+                            Text { text: "Z"; font-size: 9px; color: Palette.foreground.transparentize(0.5); }
+                            goto-z := LineEdit {
+                                text <=> root.goto-z-text;
+                                font-size: 11px;
+                                height: 24px;
+                            }
+                        }
+
+                        VerticalLayout {
+                            spacing: 1px;
+                            width: 60px;
+                            Text { text: "Yaw (°)"; font-size: 9px; color: Palette.foreground.transparentize(0.5); }
+                            goto-yaw := LineEdit {
+                                text: "0";
+                                font-size: 11px;
+                                height: 24px;
+                            }
+                        }
+                    }
+
+                    HorizontalLayout {
+                        spacing: 8px;
+
+                        goto-relative := CheckBox {
+                            text: "Relative";
+                        }
+                    }
+
+                    HorizontalLayout {
+                        spacing: 4px;
+                        Button {
+                            text: "Goto";
+                            horizontal-stretch: 1;
+                            clicked => { goto-clicked(goto-x.text, goto-y.text, goto-z.text, goto-yaw.text, goto-relative.checked); }
+                        }
+                        Button {
+                            text: "Random in area";
+                            horizontal-stretch: 1;
+                            clicked => { random-goto-clicked(); }
+                        }
+                    }
+
+                    Button {
+                        text: "Go to Home";
+                        clicked => { go-home-clicked(); }
+                    }
+
+                    Button {
+                        text: "Land";
+                        clicked => { land-clicked(); }
                     }
                 }
 
-                DetailRow { label: "Uplink"; value: "\{round(unit.uplink-rate * 30 / 100) / 10} kB/s (\{round(unit.uplink-rate)} pkt/s)"; }
-                DetailRow { label: "Downlink"; value: "\{round(unit.downlink-rate * 30 / 100) / 10} kB/s (\{round(unit.downlink-rate)} pkt/s)"; }
-                DetailRow { label: "Radio TX"; value: "\{round(unit.radio-send-rate)} pkt/s"; }
-                DetailRow { label: "Avg Retries"; value: "\{round(unit.avg-retries * 10) / 10}"; }
-                if unit.has-rssi: DetailRow { label: "RSSI"; value: "\{round(unit.rssi)} dBm"; }
+                // Crazyflie info section
+                HorizontalLayout {
+                    padding-left: 16px;
+                    padding-right: 16px;
+                    SectionHeader {
+                        title: "Crazyflie info";
+                        expanded <=> root.info-expanded;
+                        horizontal-stretch: 1;
+                    }
+                }
+                if root.info-expanded: VerticalLayout {
+                    spacing: 4px;
+                    padding-bottom: 4px;
 
-                DetailRow { label: "Power State"; value: unit.pm-state != "" ? unit.pm-state : "—"; }
-                DetailRow { label: "Supervisor"; value: unit.supervisor-state != "" ? unit.supervisor-state : "—"; }
+                    HorizontalLayout {
+                        spacing: 8px;
+                        padding-left: 16px;
+                        padding-right: 16px;
+
+                        Text {
+                            text: "URI";
+                            font-size: 12px;
+                            font-weight: 600;
+                            color: Palette.foreground.transparentize(0.3);
+                            width: 90px;
+                            vertical-alignment: center;
+                        }
+
+                        Rectangle {
+                            horizontal-stretch: 1;
+                            clip: true;
+
+                            uri-input := TextInput {
+                                text: unit.uri;
+                                read-only: true;
+                                single-line: true;
+                                font-size: 12px;
+                                color: Palette.foreground;
+                                vertical-alignment: center;
+                            }
+
+                            TouchArea {
+                                mouse-cursor: text;
+                                clicked => {
+                                    uri-input.focus();
+                                    uri-input.select-all();
+                                }
+                            }
+                        }
+                    }
+                    DetailRow { label: "Serial"; value: unit.serial != "" ? unit.serial : "—"; }
+                    DetailRow { label: "Platform"; value: unit.platform-type != "" ? unit.platform-type : "—"; }
+                    DetailRow { label: "Firmware"; value: unit.firmware-version != "" ? unit.firmware-version : "—"; }
+                    DetailRow { label: "Description"; value: unit.description != "" ? unit.description : "—"; }
+                    DetailRow { label: "Lighthouse"; value: unit.deck-lighthouse ? "Yes" : "No"; }
+                    DetailRow { label: "Loco"; value: unit.deck-loco ? "Yes" : "No"; }
+                    DetailRow { label: "LED Top"; value: unit.deck-led-top ? "Yes" : "No"; }
+                    DetailRow { label: "LED Bottom"; value: unit.deck-led-bottom ? "Yes" : "No"; }
+                }
+
+                // Link Statistics section
+                HorizontalLayout {
+                    padding-left: 16px;
+                    padding-right: 16px;
+                    SectionHeader {
+                        title: "Link Statistics";
+                        expanded <=> root.link-expanded;
+                        horizontal-stretch: 1;
+                    }
+                }
+                if root.link-expanded: VerticalLayout {
+                    spacing: 8px;
+                    padding-bottom: 4px;
+
+                    LinkQualityBar { quality: unit.link-quality; }
+                    DetailRow { label: "Uplink"; value: "\{round(unit.uplink-rate * 30 / 100) / 10} kB/s (\{round(unit.uplink-rate)} pkt/s)"; }
+                    DetailRow { label: "Downlink"; value: "\{round(unit.downlink-rate * 30 / 100) / 10} kB/s (\{round(unit.downlink-rate)} pkt/s)"; }
+                    DetailRow { label: "Radio TX"; value: "\{round(unit.radio-send-rate)} pkt/s"; }
+                    DetailRow { label: "Avg Retries"; value: "\{round(unit.avg-retries * 10) / 10}"; }
+                    if unit.has-rssi: DetailRow { label: "RSSI"; value: "\{round(unit.rssi)} dBm"; }
+                }
 
                 if is-crashed: HorizontalLayout {
                     padding-left: 16px;
@@ -545,29 +728,6 @@ export component UnitSidebar inherits Rectangle {
                     }
                 }
 
-                // Decks section
-                Rectangle {
-                    height: 1px;
-                    background: Palette.border.transparentize(0.5);
-                }
-
-                HorizontalLayout {
-                    padding-left: 16px;
-                    padding-right: 16px;
-
-                    Text {
-                        text: "Installed Decks";
-                        font-size: 12px;
-                        font-weight: 600;
-                        color: Palette.foreground.transparentize(0.3);
-                    }
-                }
-
-                DetailRow { label: "Lighthouse"; value: unit.deck-lighthouse ? "Yes" : "No"; }
-                DetailRow { label: "Loco"; value: unit.deck-loco ? "Yes" : "No"; }
-                DetailRow { label: "LED Top"; value: unit.deck-led-top ? "Yes" : "No"; }
-                DetailRow { label: "LED Bottom"; value: unit.deck-led-bottom ? "Yes" : "No"; }
-
                 // Actions
                 Rectangle {
                     height: 1px;
@@ -578,194 +738,87 @@ export component UnitSidebar inherits Rectangle {
                     padding-left: 16px;
                     padding-right: 16px;
                     padding-bottom: 16px;
+                    spacing: 4px;
+
+                // Trajectory
+                SectionHeader {
+                    title: "Trajectory";
+                    expanded <=> root.trajectory-expanded;
+                }
+                if root.trajectory-expanded: VerticalLayout {
                     spacing: 8px;
+                    padding-bottom: 8px;
 
-                Button {
-                    text: unit.identifying ? "Stop Identifying" : "Identify";
-                    clicked => { identify-clicked(); }
-                }
-
-                Button {
-                    text: "Manual Control";
-                    clicked => { manual-control-clicked(); }
-                }
-
-                Button {
-                    text: unit.journal-entry-count > 0 ? "Journal (\{unit.journal-entry-count})" : "Journal";
-                    clicked => { journal-clicked(); }
-                }
-
-                Button {
-                    text: "Upload Trajectory";
-                    clicked => { upload-trajectory-clicked(); }
-                }
-
-                Button {
-                    text: "Fly Trajectory";
-                    clicked => { fly-trajectory-clicked(); }
-                }
-
-                Button {
-                    text: "Clear Trajectory";
-                    clicked => { clear-trajectory-clicked(); }
-                }
-
-                // Divider before power commands
-                Rectangle {
-                    height: 1px;
-                    background: Palette.border.transparentize(0.5);
-                }
-
-                Button {
-                    text: "Reboot";
-                    clicked => { reboot-clicked(); }
-                }
-
-                Button {
-                    text: "Power Off";
-                    clicked => { power-off-clicked(); }
-                }
-
-                Button {
-                    text: "Sleep";
-                    clicked => { sysoff-clicked(); }
-                }
-
-                Button {
-                    text: "Wake Up";
-                    clicked => { syson-clicked(); }
-                }
-
-                // Divider before HLC commands
-                Rectangle {
-                    height: 1px;
-                    background: Palette.border.transparentize(0.5);
-                }
-
-                // Takeoff fields
-                HorizontalLayout {
-                    spacing: 4px;
-
-                    VerticalLayout {
-                        spacing: 1px;
-                        width: 60px;
-                        Text { text: "H (m)"; font-size: 9px; color: Palette.foreground.transparentize(0.5); }
-                        takeoff-height := LineEdit {
-                            text: "0.5";
-                            font-size: 11px;
-                            height: 24px;
-                        }
+                    Button {
+                        text: "Upload Trajectory";
+                        clicked => { upload-trajectory-clicked(); }
                     }
 
-                    VerticalLayout {
-                        spacing: 1px;
-                        width: 60px;
-                        Text { text: "Yaw (°)"; font-size: 9px; color: Palette.foreground.transparentize(0.5); }
-                        takeoff-yaw := LineEdit {
-                            text: "0";
-                            font-size: 11px;
-                            height: 24px;
-                        }
+                    Button {
+                        text: "Fly Trajectory";
+                        clicked => { fly-trajectory-clicked(); }
                     }
 
-                    VerticalLayout {
-                        spacing: 1px;
-                        width: 60px;
-                        Text { text: "Time (s)"; font-size: 9px; color: Palette.foreground.transparentize(0.5); }
-                        takeoff-time := LineEdit {
-                            text: "2";
-                            font-size: 11px;
-                            height: 24px;
-                        }
+                    Button {
+                        text: "Clear Trajectory";
+                        clicked => { clear-trajectory-clicked(); }
                     }
                 }
 
-                Button {
-                    text: "Takeoff";
-                    clicked => { takeoff-clicked(takeoff-height.text, takeoff-yaw.text, takeoff-time.text); }
+                // Tools
+                SectionHeader {
+                    title: "Tools";
+                    count: unit.journal-entry-count;
+                    expanded <=> root.tools-expanded;
                 }
-
-                // Goto fields
-                HorizontalLayout {
-                    spacing: 4px;
-
-                    VerticalLayout {
-                        spacing: 1px;
-                        width: 60px;
-                        Text { text: "X"; font-size: 9px; color: Palette.foreground.transparentize(0.5); }
-                        goto-x := LineEdit {
-                            text <=> root.goto-x-text;
-                            font-size: 11px;
-                            height: 24px;
-                        }
-                    }
-
-                    VerticalLayout {
-                        spacing: 1px;
-                        width: 60px;
-                        Text { text: "Y"; font-size: 9px; color: Palette.foreground.transparentize(0.5); }
-                        goto-y := LineEdit {
-                            text <=> root.goto-y-text;
-                            font-size: 11px;
-                            height: 24px;
-                        }
-                    }
-
-                    VerticalLayout {
-                        spacing: 1px;
-                        width: 60px;
-                        Text { text: "Z"; font-size: 9px; color: Palette.foreground.transparentize(0.5); }
-                        goto-z := LineEdit {
-                            text <=> root.goto-z-text;
-                            font-size: 11px;
-                            height: 24px;
-                        }
-                    }
-
-                    VerticalLayout {
-                        spacing: 1px;
-                        width: 60px;
-                        Text { text: "Yaw (°)"; font-size: 9px; color: Palette.foreground.transparentize(0.5); }
-                        goto-yaw := LineEdit {
-                            text: "0";
-                            font-size: 11px;
-                            height: 24px;
-                        }
-                    }
-                }
-
-                HorizontalLayout {
+                if root.tools-expanded: VerticalLayout {
                     spacing: 8px;
+                    padding-bottom: 8px;
 
-                    goto-relative := CheckBox {
-                        text: "Relative";
-                    }
-                }
-
-                HorizontalLayout {
-                    spacing: 4px;
                     Button {
-                        text: "Goto";
-                        horizontal-stretch: 1;
-                        clicked => { goto-clicked(goto-x.text, goto-y.text, goto-z.text, goto-yaw.text, goto-relative.checked); }
+                        text: unit.identifying ? "Stop Identifying" : "Identify";
+                        clicked => { identify-clicked(); }
                     }
+
                     Button {
-                        text: "Random in area";
-                        horizontal-stretch: 1;
-                        clicked => { random-goto-clicked(); }
+                        text: "Manual Control";
+                        clicked => { manual-control-clicked(); }
+                    }
+
+                    Button {
+                        text: unit.journal-entry-count > 0 ? "Journal (\{unit.journal-entry-count})" : "Journal";
+                        clicked => { journal-clicked(); }
                     }
                 }
 
-                // Go to Home
-                Button {
-                    text: "Go to Home";
-                    clicked => { go-home-clicked(); }
+                // Power & System
+                SectionHeader {
+                    title: "Power & System";
+                    expanded <=> root.power-expanded;
                 }
+                if root.power-expanded: VerticalLayout {
+                    spacing: 8px;
+                    padding-bottom: 8px;
 
-                // Land
-                Button {
-                    text: "Land";
-                    clicked => { land-clicked(); }
+                    Button {
+                        text: "Reboot";
+                        clicked => { reboot-clicked(); }
+                    }
+
+                    Button {
+                        text: "Sleep";
+                        clicked => { sysoff-clicked(); }
+                    }
+
+                    Button {
+                        text: "Wake Up";
+                        clicked => { syson-clicked(); }
+                    }
+
+                    Button {
+                        text: "Power Off";
+                        clicked => { power-off-clicked(); }
+                    }
                 }
             }
             }

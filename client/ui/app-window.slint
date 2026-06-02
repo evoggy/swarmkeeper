@@ -17,11 +17,78 @@ export struct HealthTestResult {
     m4-pass: bool,
 }
 
+component MenuItem inherits Rectangle {
+    in property <string> text;
+    in property <bool> enabled: true;
+    callback clicked();
+
+    height: 32px;
+    background: (root.enabled && touch.has-hover) ? Palette.accent-background : transparent;
+
+    Text {
+        text: root.text;
+        font-size: 13px;
+        color: root.enabled ? Palette.foreground : Palette.foreground.with-alpha(0.4);
+        vertical-alignment: center;
+        x: 16px;
+    }
+
+    touch := TouchArea {
+        enabled: root.enabled;
+        clicked => { root.clicked(); }
+        mouse-cursor: root.enabled ? pointer : default;
+    }
+}
+
+component MenuSeparator inherits Rectangle {
+    height: 9px;
+
+    Rectangle {
+        height: 1px;
+        width: parent.width - 16px;
+        background: Palette.border;
+    }
+}
+
+component MenuTitle inherits Rectangle {
+    in property <string> text;
+    callback clicked();
+
+    Text {
+        text: root.text;
+        font-size: 13px;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+
+    TouchArea {
+        clicked => { root.clicked(); }
+        mouse-cursor: pointer;
+    }
+}
+
 component MenuBar inherits Rectangle {
     callback exit-clicked();
     callback open-swarm-clicked();
+    callback connect-clicked();
+    callback disconnect-clicked();
+    callback reconnect-clicked();
     callback arm-all-clicked();
     callback disarm-all-clicked();
+    callback upload-trajectory-swarm-clicked();
+    callback fly-trajectory-swarm-clicked();
+    callback sync-blink-clicked();
+    callback delayed-sync-blink-clicked();
+    callback land-swarm-clicked();
+    callback reboot-swarm-clicked();
+    callback sysoff-swarm-clicked();
+    callback syson-swarm-clicked();
+    callback power-off-swarm-clicked();
+    callback download-toc-clicked();
+    callback upload-geometry-clicked();
+    callback upload-params-clicked();
+    callback tuning-clicked();
+    callback health-test-clicked();
 
     in property <bool> connected;
 
@@ -32,154 +99,213 @@ component MenuBar inherits Rectangle {
         spacing: 0px;
         alignment: start;
 
-        Rectangle {
-            width: 60px;
-            height: parent.height;
-
-            Text {
-                text: "File";
-                font-size: 13px;
-                horizontal-alignment: center;
-                vertical-alignment: center;
-            }
-
-            TouchArea {
-                clicked => { file-popup.show(); }
-                mouse-cursor: pointer;
-            }
-        }
-
-        Rectangle {
-            width: 60px;
-            height: parent.height;
-
-            Text {
-                text: "Swarm";
-                font-size: 13px;
-                horizontal-alignment: center;
-                vertical-alignment: center;
-            }
-
-            TouchArea {
-                clicked => { swarm-popup.show(); }
-                mouse-cursor: pointer;
-            }
-        }
-    }
-
-    swarm-popup := PopupWindow {
-        x: 60px;
-        y: root.height;
-        width: 140px;
-
-        Rectangle {
-            width: 140px;
-            height: 64px;
-            background: Palette.background;
-            border-width: 1px;
-            border-color: Palette.border;
-
-            VerticalLayout {
-                Rectangle {
-                    height: 32px;
-                    background: (root.connected && arm-touch.has-hover) ? Palette.accent-background : transparent;
-
-                    Text {
-                        text: "Arm All";
-                        font-size: 13px;
-                        color: root.connected ? Palette.foreground : Palette.foreground.with-alpha(0.4);
-                        vertical-alignment: center;
-                        x: 16px;
-                    }
-
-                    arm-touch := TouchArea {
-                        enabled: root.connected;
-                        clicked => {
-                            swarm-popup.close();
-                            arm-all-clicked();
-                        }
-                        mouse-cursor: root.connected ? pointer : default;
-                    }
-                }
-
-                Rectangle {
-                    height: 32px;
-                    background: (root.connected && disarm-touch.has-hover) ? Palette.accent-background : transparent;
-
-                    Text {
-                        text: "Disarm All";
-                        font-size: 13px;
-                        color: root.connected ? Palette.foreground : Palette.foreground.with-alpha(0.4);
-                        vertical-alignment: center;
-                        x: 16px;
-                    }
-
-                    disarm-touch := TouchArea {
-                        enabled: root.connected;
-                        clicked => {
-                            swarm-popup.close();
-                            disarm-all-clicked();
-                        }
-                        mouse-cursor: root.connected ? pointer : default;
-                    }
-                }
-            }
-        }
+        MenuTitle { width: 54px; text: "File"; clicked => { file-popup.show(); } }
+        MenuTitle { width: 66px; text: "Swarm"; clicked => { swarm-popup.show(); } }
+        MenuTitle { width: 60px; text: "Flight"; clicked => { flight-popup.show(); } }
+        MenuTitle { width: 68px; text: "System"; clicked => { system-popup.show(); } }
+        MenuTitle { width: 60px; text: "Setup"; clicked => { setup-popup.show(); } }
+        MenuTitle { width: 92px; text: "Diagnostics"; clicked => { diagnostics-popup.show(); } }
     }
 
     file-popup := PopupWindow {
         x: 0px;
         y: root.height;
-        width: 140px;
+        width: 180px;
 
         Rectangle {
-            width: 140px;
+            width: 180px;
             height: 64px;
             background: Palette.background;
             border-width: 1px;
             border-color: Palette.border;
 
             VerticalLayout {
-                Rectangle {
-                    height: 32px;
-                    background: open-touch.has-hover ? Palette.accent-background : transparent;
-
-                    Text {
-                        text: "Open swarm...";
-                        font-size: 13px;
-                        color: Palette.foreground;
-                        vertical-alignment: center;
-                        x: 16px;
-                    }
-
-                    open-touch := TouchArea {
-                        clicked => {
-                            file-popup.close();
-                            open-swarm-clicked();
-                        }
-                        mouse-cursor: pointer;
-                    }
+                MenuItem {
+                    text: "Open swarm...";
+                    clicked => { file-popup.close(); open-swarm-clicked(); }
                 }
+                MenuItem {
+                    text: "Exit";
+                    clicked => { file-popup.close(); exit-clicked(); }
+                }
+            }
+        }
+    }
 
-                Rectangle {
-                    height: 32px;
-                    background: menu-touch.has-hover ? Palette.accent-background : transparent;
+    swarm-popup := PopupWindow {
+        x: 54px;
+        y: root.height;
+        width: 180px;
 
-                    Text {
-                        text: "Exit";
-                        font-size: 13px;
-                        color: Palette.foreground;
-                        vertical-alignment: center;
-                        x: 16px;
-                    }
+        Rectangle {
+            width: 180px;
+            height: 169px;
+            background: Palette.background;
+            border-width: 1px;
+            border-color: Palette.border;
 
-                    menu-touch := TouchArea {
-                        clicked => {
-                            file-popup.close();
-                            exit-clicked();
-                        }
-                        mouse-cursor: pointer;
-                    }
+            VerticalLayout {
+                MenuItem {
+                    text: "Connect Swarm";
+                    enabled: !root.connected;
+                    clicked => { swarm-popup.close(); connect-clicked(); }
+                }
+                MenuItem {
+                    text: "Disconnect";
+                    enabled: root.connected;
+                    clicked => { swarm-popup.close(); disconnect-clicked(); }
+                }
+                MenuItem {
+                    text: "Reconnect";
+                    enabled: root.connected;
+                    clicked => { swarm-popup.close(); reconnect-clicked(); }
+                }
+                MenuSeparator {}
+                MenuItem {
+                    text: "Arm All";
+                    enabled: root.connected;
+                    clicked => { swarm-popup.close(); arm-all-clicked(); }
+                }
+                MenuItem {
+                    text: "Disarm All";
+                    enabled: root.connected;
+                    clicked => { swarm-popup.close(); disarm-all-clicked(); }
+                }
+            }
+        }
+    }
+
+    flight-popup := PopupWindow {
+        x: 120px;
+        y: root.height;
+        width: 180px;
+
+        Rectangle {
+            width: 180px;
+            height: 178px;
+            background: Palette.background;
+            border-width: 1px;
+            border-color: Palette.border;
+
+            VerticalLayout {
+                MenuItem {
+                    text: "Upload Trajectory";
+                    enabled: root.connected;
+                    clicked => { flight-popup.close(); upload-trajectory-swarm-clicked(); }
+                }
+                MenuItem {
+                    text: "Fly Trajectory";
+                    enabled: root.connected;
+                    clicked => { flight-popup.close(); fly-trajectory-swarm-clicked(); }
+                }
+                MenuSeparator {}
+                MenuItem {
+                    text: "Sync Blink";
+                    enabled: root.connected;
+                    clicked => { flight-popup.close(); sync-blink-clicked(); }
+                }
+                MenuItem {
+                    text: "Delayed Sync Blink";
+                    enabled: root.connected;
+                    clicked => { flight-popup.close(); delayed-sync-blink-clicked(); }
+                }
+                MenuSeparator {}
+                MenuItem {
+                    text: "Land All";
+                    enabled: root.connected;
+                    clicked => { flight-popup.close(); land-swarm-clicked(); }
+                }
+            }
+        }
+    }
+
+    system-popup := PopupWindow {
+        x: 180px;
+        y: root.height;
+        width: 180px;
+
+        Rectangle {
+            width: 180px;
+            height: 137px;
+            background: Palette.background;
+            border-width: 1px;
+            border-color: Palette.border;
+
+            VerticalLayout {
+                MenuItem {
+                    text: "Reboot";
+                    clicked => { system-popup.close(); reboot-swarm-clicked(); }
+                }
+                MenuItem {
+                    text: "Sleep";
+                    clicked => { system-popup.close(); sysoff-swarm-clicked(); }
+                }
+                MenuItem {
+                    text: "Wake Up";
+                    clicked => { system-popup.close(); syson-swarm-clicked(); }
+                }
+                MenuSeparator {}
+                MenuItem {
+                    text: "Power Off...";
+                    clicked => { system-popup.close(); power-off-swarm-clicked(); }
+                }
+            }
+        }
+    }
+
+    setup-popup := PopupWindow {
+        x: 248px;
+        y: root.height;
+        width: 180px;
+
+        Rectangle {
+            width: 180px;
+            height: 137px;
+            background: Palette.background;
+            border-width: 1px;
+            border-color: Palette.border;
+
+            VerticalLayout {
+                MenuItem {
+                    text: "Download TOC";
+                    enabled: !root.connected;
+                    clicked => { setup-popup.close(); download-toc-clicked(); }
+                }
+                MenuItem {
+                    text: "Upload Geometry";
+                    enabled: !root.connected;
+                    clicked => { setup-popup.close(); upload-geometry-clicked(); }
+                }
+                MenuSeparator {}
+                MenuItem {
+                    text: "Upload Params";
+                    clicked => { setup-popup.close(); upload-params-clicked(); }
+                }
+                MenuItem {
+                    text: "Tuning...";
+                    clicked => { setup-popup.close(); tuning-clicked(); }
+                }
+            }
+        }
+    }
+
+    diagnostics-popup := PopupWindow {
+        x: 308px;
+        y: root.height;
+        width: 180px;
+
+        Rectangle {
+            width: 180px;
+            height: 32px;
+            background: Palette.background;
+            border-width: 1px;
+            border-color: Palette.border;
+
+            VerticalLayout {
+                MenuItem {
+                    text: "Health Test...";
+                    enabled: !root.connected;
+                    clicked => { diagnostics-popup.close(); health-test-clicked(); }
                 }
             }
         }
@@ -198,21 +324,8 @@ component SwarmInfoBar inherits Rectangle {
     callback connect-clicked();
     callback disconnect-clicked();
     callback reconnect-clicked();
-    callback download-toc-clicked();
-    callback upload-geometry-clicked();
-    callback upload-trajectory-swarm-clicked();
-    callback fly-trajectory-swarm-clicked();
     callback land-swarm-clicked();
     callback emergency-stop-clicked();
-    callback reboot-swarm-clicked();
-    callback power-off-swarm-clicked();
-    callback sysoff-swarm-clicked();
-    callback syson-swarm-clicked();
-    callback tuning-clicked();
-    callback upload-params-clicked();
-    callback health-test-clicked();
-    callback sync-blink-clicked();
-    callback delayed-sync-blink-clicked();
 
     property <float> progress: units.length > 0 ? connected-count / units.length : 0;
     property <bool> connecting: connected && progress < 1.0;
@@ -343,90 +456,11 @@ component SwarmInfoBar inherits Rectangle {
             }
         }
 
-        if !connected: Button {
-            text: "Download TOC";
-            clicked => {
-                download-toc-clicked();
-            }
-        }
-
-        if !connected: Button {
-            text: "Upload Geometry";
-            clicked => {
-                upload-geometry-clicked();
-            }
-        }
-
-        if !connected: Button {
-            text: "Health Test";
-            clicked => {
-                health-test-clicked();
-            }
-        }
-
-        if connected: Button {
-            text: "Upload Trajectory";
-            clicked => {
-                upload-trajectory-swarm-clicked();
-            }
-        }
-
-        if connected: Button {
-            text: "Fly Trajectory";
-            clicked => {
-                fly-trajectory-swarm-clicked();
-            }
-        }
-
-        if connected: Button {
-            text: "Sync Blink";
-            clicked => {
-                sync-blink-clicked();
-            }
-        }
-
-        if connected: Button {
-            text: "Delayed Sync Blink";
-            clicked => {
-                delayed-sync-blink-clicked();
-            }
-        }
-
         if connected: Button {
             text: "Land All";
             clicked => {
                 land-swarm-clicked();
             }
-        }
-
-        Button {
-            text: "Tuning";
-            clicked => { tuning-clicked(); }
-        }
-
-        Button {
-            text: "Upload Params";
-            clicked => { upload-params-clicked(); }
-        }
-
-        Button {
-            text: "Reboot";
-            clicked => { reboot-swarm-clicked(); }
-        }
-
-        Button {
-            text: "Power Off";
-            clicked => { power-off-swarm-clicked(); }
-        }
-
-        Button {
-            text: "Sleep";
-            clicked => { sysoff-swarm-clicked(); }
-        }
-
-        Button {
-            text: "Wake Up";
-            clicked => { syson-swarm-clicked(); }
         }
 
         if connected: Rectangle {
@@ -859,8 +893,28 @@ export component AppWindow inherits Window {
             connected: root.swarm-connected;
             exit-clicked => { exit-requested(); }
             open-swarm-clicked => { open-swarm-requested(); }
+            connect-clicked => { connect-swarm(); }
+            disconnect-clicked => { disconnect-swarm(); }
+            reconnect-clicked => { reconnect-swarm(); }
             arm-all-clicked => { arm-swarm(); }
             disarm-all-clicked => { disarm-swarm(); }
+            upload-trajectory-swarm-clicked => { upload-trajectory-swarm(); }
+            fly-trajectory-swarm-clicked => { fly-trajectory-swarm(); }
+            sync-blink-clicked => { sync-blink(); }
+            delayed-sync-blink-clicked => { delayed-sync-blink(); }
+            land-swarm-clicked => { land-swarm(); }
+            reboot-swarm-clicked => { reboot-swarm(); }
+            sysoff-swarm-clicked => { sysoff-swarm(); }
+            syson-swarm-clicked => { syson-swarm(); }
+            power-off-swarm-clicked => { confirm-power-off-visible = true; }
+            download-toc-clicked => { download-toc(); }
+            upload-geometry-clicked => { upload-geometry(); }
+            upload-params-clicked => { upload-params(); }
+            tuning-clicked => { tuning-dialog-visible = true; }
+            health-test-clicked => {
+                health-test-dialog-visible = true;
+                run-health-test();
+            }
         }
 
         SwarmInfoBar {
@@ -875,24 +929,8 @@ export component AppWindow inherits Window {
             connect-clicked => { connect-swarm(); }
             disconnect-clicked => { disconnect-swarm(); }
             reconnect-clicked => { reconnect-swarm(); }
-            download-toc-clicked => { download-toc(); }
-            upload-geometry-clicked => { upload-geometry(); }
-            upload-trajectory-swarm-clicked => { upload-trajectory-swarm(); }
-            fly-trajectory-swarm-clicked => { fly-trajectory-swarm(); }
             land-swarm-clicked => { land-swarm(); }
-            sync-blink-clicked => { sync-blink(); }
-            delayed-sync-blink-clicked => { delayed-sync-blink(); }
             emergency-stop-clicked => { emergency-stop(); }
-            reboot-swarm-clicked => { reboot-swarm(); }
-            power-off-swarm-clicked => { confirm-power-off-visible = true; }
-            sysoff-swarm-clicked => { sysoff-swarm(); }
-            syson-swarm-clicked => { syson-swarm(); }
-            tuning-clicked => { tuning-dialog-visible = true; }
-            upload-params-clicked => { upload-params(); }
-            health-test-clicked => {
-                health-test-dialog-visible = true;
-                run-health-test();
-            }
         }
 
         TabWidget {
