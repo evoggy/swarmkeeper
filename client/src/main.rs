@@ -5113,8 +5113,19 @@ async fn main() {
                             }).ok();
                         }
 
-                        // Create log block for health.motorPass BEFORE starting the test
+                        // Set the PWM ratio (required for brushless motors), then start the
+                        // prop test. Create the log block for health.motorPass BEFORE starting
+                        // so we don't miss the result.
                         let motor_pass_result = async {
+                            cf.param.set("health.propTestPWMRatio", 10000u16).await
+                                .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> {
+                                    Box::new(std::io::Error::new(std::io::ErrorKind::Other, format!("{:?}", e)))
+                                })?;
+                            cf.param.set("health.propTestThreshold", 1.0f32).await
+                                .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> {
+                                    Box::new(std::io::Error::new(std::io::ErrorKind::Other, format!("{:?}", e)))
+                                })?;
+
                             let mut log_block = cf.log.create_block().await?;
                             log_block.add_variable("health.motorPass").await?;
                             let period = crazyflie_lib::subsystems::log::LogPeriod::from_millis(100)?;
@@ -5132,13 +5143,17 @@ async fn main() {
                                 async {
                                     loop {
                                         let data = log_stream.next().await?;
-                                        eprintln!("Health test {}: log data: {:?}", name, data.data);
                                         let motor_pass: u8 = data
                                             .data
                                             .get("health.motorPass")
                                             .and_then(|v| (*v).try_into().ok())
                                             .unwrap_or(0);
-                                        if motor_pass != 0 {
+                                        // Firmware sets the per-motor pass bits (0..=3)
+                                        // incrementally as it tests each motor, and sets bit 7
+                                        // (HEALTH_MOTOR_TEST_FINISHED_BIT) only when the whole
+                                        // test is done. Wait for that finished bit so we read the
+                                        // final result instead of a partial, mid-test value.
+                                        if motor_pass & 0x80 != 0 {
                                             return Ok::<u8, Box<dyn std::error::Error + Send + Sync>>(motor_pass);
                                         }
                                     }
