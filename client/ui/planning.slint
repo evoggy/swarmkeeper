@@ -54,6 +54,17 @@ export struct PlanPadData {
     radius: string,
 }
 
+// A flight area or waypoint area box volume, as edited in the planning UI.
+export struct PlanBoxVolumeData {
+    label: string,
+    min-x: string,
+    min-y: string,
+    min-z: string,
+    max-x: string,
+    max-y: string,
+    max-z: string,
+}
+
 // Simple color swatch picker
 component ColorPicker inherits Rectangle {
     in-out property <float> picked-r: 0.45;
@@ -102,6 +113,74 @@ component ColorPicker inherits Rectangle {
     }
 }
 
+// One editable row for a flight area or waypoint area box volume.
+component BoxVolumeRow inherits Rectangle {
+    in property <PlanBoxVolumeData> data;
+    in property <int> index;
+    in property <string> title-prefix;
+    in property <bool> selected;
+    callback edited(PlanBoxVolumeData);
+    callback removed();
+    callback select-clicked();
+
+    border-radius: 4px;
+    border-width: 1px;
+    border-color: Palette.border;
+    background: root.selected ? Palette.accent-background : Palette.background;
+
+    function current() -> PlanBoxVolumeData {
+        return {
+            label: label-in.text,
+            min-x: min-x.text, min-y: min-y.text, min-z: min-z.text,
+            max-x: max-x.text, max-y: max-y.text, max-z: max-z.text,
+        };
+    }
+
+    VerticalLayout {
+        padding: 8px;
+        spacing: 4px;
+
+        HorizontalLayout {
+            spacing: 4px;
+            Text {
+                text: root.title-prefix + " \{root.index + 1}";
+                font-size: 12px;
+                font-weight: 600;
+                vertical-alignment: center;
+            }
+            label-in := NumericInput {
+                text: root.data.label;
+                width: 70px;
+                edited(val) => { root.edited(root.current()); }
+            }
+            Rectangle { horizontal-stretch: 1; }
+            Button {
+                text: root.selected ? "Editing" : "Edit";
+                clicked => { root.select-clicked(); }
+            }
+            Button {
+                text: "Remove";
+                clicked => { root.removed(); }
+            }
+        }
+
+        HorizontalLayout {
+            spacing: 2px;
+            Text { text: "Min"; font-size: 11px; vertical-alignment: center; width: 28px; }
+            min-x := NumericInput { text: root.data.min-x; width: 50px; edited(val) => { root.edited(root.current()); } }
+            min-y := NumericInput { text: root.data.min-y; width: 50px; edited(val) => { root.edited(root.current()); } }
+            min-z := NumericInput { text: root.data.min-z; width: 50px; edited(val) => { root.edited(root.current()); } }
+        }
+        HorizontalLayout {
+            spacing: 2px;
+            Text { text: "Max"; font-size: 11px; vertical-alignment: center; width: 28px; }
+            max-x := NumericInput { text: root.data.max-x; width: 50px; edited(val) => { root.edited(root.current()); } }
+            max-y := NumericInput { text: root.data.max-y; width: 50px; edited(val) => { root.edited(root.current()); } }
+            max-z := NumericInput { text: root.data.max-z; width: 50px; edited(val) => { root.edited(root.current()); } }
+        }
+    }
+}
+
 export component PlanningContent inherits Rectangle {
     in-out property <image> texture;
     out property <float> viewport-width: view-area.width / 1px;
@@ -112,6 +191,7 @@ export component PlanningContent inherits Rectangle {
     property <bool> anchors-expanded: true;
     property <bool> obs-expanded: true;
     property <bool> flight-area-expanded: true;
+    property <bool> waypoint-area-expanded: true;
     property <bool> pads-expanded: false;
     property <bool> traj-expanded: false;
 
@@ -148,14 +228,9 @@ export component PlanningContent inherits Rectangle {
     in-out property <bool> show-coverage-3: true;
     in-out property <bool> show-coverage-4: true;
 
-    // Flight area
-    in-out property <bool> flight-area-enabled: false;
-    in-out property <string> flight-area-min-x: "-2.0";
-    in-out property <string> flight-area-min-y: "-2.0";
-    in-out property <string> flight-area-min-z: "0.0";
-    in-out property <string> flight-area-max-x: "2.0";
-    in-out property <string> flight-area-max-y: "2.0";
-    in-out property <string> flight-area-max-z: "2.0";
+    // Flight areas (geofence) and waypoint areas (random-waypoint volumes)
+    in-out property <[PlanBoxVolumeData]> flight-areas;
+    in-out property <[PlanBoxVolumeData]> waypoint-areas;
 
     // Takeoff pads (read-only display)
     in-out property <[PlanPadData]> takeoff-pads;
@@ -199,6 +274,9 @@ export component PlanningContent inherits Rectangle {
     in-out property <int> selected-index: -1;
     in-out property <bool> handle-active: false;
     in-out property <int> active-handle: 0;
+    // Area selected for handle editing: 0=none, 1=flight, 2=waypoint
+    in-out property <int> selected-area-kind: 0;
+    in-out property <int> selected-area-index: -1;
 
     // Callbacks
     callback save-scene();
@@ -218,6 +296,14 @@ export component PlanningContent inherits Rectangle {
     callback remove-obstacle(int);
     callback duplicate-obstacle(int);
     callback update-obstacle(int, PlanObstacleData);
+    callback add-flight-area();
+    callback remove-flight-area(int);
+    callback update-flight-area(int, PlanBoxVolumeData);
+    callback select-flight-area(int);
+    callback add-waypoint-area();
+    callback remove-waypoint-area(int);
+    callback update-waypoint-area(int, PlanBoxVolumeData);
+    callback select-waypoint-area(int);
     callback undo();
     callback recompute();
     callback view-mouse-pressed(/* x */ float, /* y */ float);
@@ -757,37 +843,59 @@ export component PlanningContent inherits Rectangle {
 
                         Rectangle { height: 1px; background: Palette.border; }
 
-                        // --- Flight Area ---
+                        // --- Flight Areas (geofence) ---
                         HorizontalLayout {
                             SectionHeader {
-                                title: "Flight Area";
-                                count: root.flight-area-enabled ? 1 : 0;
+                                title: "Flight Areas";
+                                count: root.flight-areas.length;
                                 expanded <=> flight-area-expanded;
                                 horizontal-stretch: 1;
+                            }
+                            Button {
+                                text: "Add";
+                                clicked => { root.add-flight-area(); }
                             }
                         }
 
                         if flight-area-expanded: VerticalLayout {
-                            spacing: 6px;
-
-                            CheckBox {
-                                text: "Enabled";
-                                checked <=> root.flight-area-enabled;
+                            spacing: 8px;
+                            for area[idx] in root.flight-areas: BoxVolumeRow {
+                                data: area;
+                                index: idx;
+                                title-prefix: "Flight";
+                                selected: root.selected-area-kind == 1 && root.selected-area-index == idx;
+                                edited(val) => { root.update-flight-area(idx, val); }
+                                removed() => { root.remove-flight-area(idx); }
+                                select-clicked() => { root.select-flight-area(idx); }
                             }
+                        }
 
-                            HorizontalLayout {
-                                spacing: 4px;
-                                Text { text: "Min"; font-size: 11px; vertical-alignment: center; width: 28px; }
-                                NumericInput { text <=> root.flight-area-min-x; width: 60px; }
-                                NumericInput { text <=> root.flight-area-min-y; width: 60px; }
-                                NumericInput { text <=> root.flight-area-min-z; width: 60px; }
+                        Rectangle { height: 1px; background: Palette.border; }
+
+                        // --- Waypoint Areas (random-waypoint volumes) ---
+                        HorizontalLayout {
+                            SectionHeader {
+                                title: "Waypoint Areas";
+                                count: root.waypoint-areas.length;
+                                expanded <=> waypoint-area-expanded;
+                                horizontal-stretch: 1;
                             }
-                            HorizontalLayout {
-                                spacing: 4px;
-                                Text { text: "Max"; font-size: 11px; vertical-alignment: center; width: 28px; }
-                                NumericInput { text <=> root.flight-area-max-x; width: 60px; }
-                                NumericInput { text <=> root.flight-area-max-y; width: 60px; }
-                                NumericInput { text <=> root.flight-area-max-z; width: 60px; }
+                            Button {
+                                text: "Add";
+                                clicked => { root.add-waypoint-area(); }
+                            }
+                        }
+
+                        if waypoint-area-expanded: VerticalLayout {
+                            spacing: 8px;
+                            for area[idx] in root.waypoint-areas: BoxVolumeRow {
+                                data: area;
+                                index: idx;
+                                title-prefix: "Waypoint";
+                                selected: root.selected-area-kind == 2 && root.selected-area-index == idx;
+                                edited(val) => { root.update-waypoint-area(idx, val); }
+                                removed() => { root.remove-waypoint-area(idx); }
+                                select-clicked() => { root.select-waypoint-area(idx); }
                             }
                         }
 
@@ -1067,7 +1175,7 @@ export component PlanningContent inherits Rectangle {
                     if (e.delta-y > 0) {
                         root.cam-distance = max(1.0, root.cam-distance - 0.5);
                     } else if (e.delta-y < 0) {
-                        root.cam-distance = min(30.0, root.cam-distance + 0.5);
+                        root.cam-distance = min(100.0, root.cam-distance + 0.5);
                     }
                     accept
                 }

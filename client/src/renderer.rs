@@ -143,6 +143,11 @@ pub struct FlightAreaBox {
     pub max: [f32; 3],
 }
 
+/// Wireframe color for flight areas (geofence): amber.
+pub const FLIGHT_AREA_COLOR: [f32; 3] = [0.95, 0.85, 0.20];
+/// Wireframe color for waypoint areas: green.
+pub const WAYPOINT_AREA_COLOR: [f32; 3] = [0.20, 0.85, 0.40];
+
 pub struct Scene3DRenderer {
     gl: Rc<glow::Context>,
     program: glow::Program,
@@ -233,6 +238,42 @@ impl Scene3DRenderer {
         }
     }
 
+    /// Draw an axis-aligned box as a 12-edge wireframe in the given color.
+    /// Must be called inside an active render pass (with `gl` bound).
+    unsafe fn draw_box_wireframe(
+        &self,
+        gl: &glow::Context,
+        min: [f32; 3],
+        max: [f32; 3],
+        color: [f32; 3],
+    ) {
+        let [x0, y0, z0] = min;
+        let [x1, y1, z1] = max;
+        let edges: [f32; 72] = [
+            // bottom rectangle (z0)
+            x0, y0, z0,  x1, y0, z0,
+            x1, y0, z0,  x1, y1, z0,
+            x1, y1, z0,  x0, y1, z0,
+            x0, y1, z0,  x0, y0, z0,
+            // top rectangle (z1)
+            x0, y0, z1,  x1, y0, z1,
+            x1, y0, z1,  x1, y1, z1,
+            x1, y1, z1,  x0, y1, z1,
+            x0, y1, z1,  x0, y0, z1,
+            // verticals
+            x0, y0, z0,  x0, y0, z1,
+            x1, y0, z0,  x1, y0, z1,
+            x1, y1, z0,  x1, y1, z1,
+            x0, y1, z0,  x0, y1, z1,
+        ];
+        unsafe {
+            gl.uniform_3_f32(Some(&self.u_color), color[0], color[1], color[2]);
+            gl.uniform_1_f32(Some(&self.u_point_size), 1.0);
+            upload_and_draw(gl, self.vbo, &edges, glow::LINES);
+            gl.draw_arrays(glow::LINES, 0, (edges.len() / 3) as i32);
+        }
+    }
+
     pub fn render(
         &mut self,
         width: u32,
@@ -245,7 +286,8 @@ impl Scene3DRenderer {
         units: &[UnitPos],
         fixed_points: &[UnitPos],
         trajectory_lines: &[f32],
-        flight_area: Option<FlightAreaBox>,
+        flight_areas: &[FlightAreaBox],
+        waypoint_areas: &[FlightAreaBox],
         pads: &[PadCircle],
         obstacle_triangles: &[Vec<f32>],
         obstacle_wireframes: &[Vec<f32>],
@@ -391,6 +433,8 @@ impl Scene3DRenderer {
                     }
                 }
                 gl.disable(glow::BLEND);
+                // LEQUAL so front coplanar edges show, edges behind stay hidden.
+                gl.depth_func(glow::LEQUAL);
                 for (i, wire) in obstacle_wireframes.iter().enumerate() {
                     if !wire.is_empty() {
                         let c = obstacle_colors.get(i).copied().unwrap_or([0.45, 0.45, 0.50]);
@@ -405,34 +449,16 @@ impl Scene3DRenderer {
                         gl.draw_arrays(glow::LINES, 0, wire.len() as i32 / 3);
                     }
                 }
+                gl.depth_func(glow::LESS);
                 gl.uniform_1_f32(Some(&self.u_alpha), 1.0);
             }
 
-            // Draw flight area as a wireframe box
-            if let Some(fa) = flight_area {
-                let [x0, y0, z0] = fa.min;
-                let [x1, y1, z1] = fa.max;
-                let edges: [f32; 72] = [
-                    // bottom rectangle (z0)
-                    x0, y0, z0,  x1, y0, z0,
-                    x1, y0, z0,  x1, y1, z0,
-                    x1, y1, z0,  x0, y1, z0,
-                    x0, y1, z0,  x0, y0, z0,
-                    // top rectangle (z1)
-                    x0, y0, z1,  x1, y0, z1,
-                    x1, y0, z1,  x1, y1, z1,
-                    x1, y1, z1,  x0, y1, z1,
-                    x0, y1, z1,  x0, y0, z1,
-                    // verticals
-                    x0, y0, z0,  x0, y0, z1,
-                    x1, y0, z0,  x1, y0, z1,
-                    x1, y1, z0,  x1, y1, z1,
-                    x0, y1, z0,  x0, y1, z1,
-                ];
-                gl.uniform_3_f32(Some(&self.u_color), 0.95, 0.85, 0.20); // amber
-                gl.uniform_1_f32(Some(&self.u_point_size), 1.0);
-                upload_and_draw(gl, self.vbo, &edges, glow::LINES);
-                gl.draw_arrays(glow::LINES, 0, (edges.len() / 3) as i32);
+            // Draw flight areas (amber) and waypoint areas (green) as wireframe boxes
+            for fa in flight_areas {
+                self.draw_box_wireframe(gl, fa.min, fa.max, FLIGHT_AREA_COLOR);
+            }
+            for wa in waypoint_areas {
+                self.draw_box_wireframe(gl, wa.min, wa.max, WAYPOINT_AREA_COLOR);
             }
 
             // Draw takeoff pads as circles on the floor
@@ -1423,8 +1449,12 @@ impl Scene3DRenderer {
         active_handle: i32,
         // LH trajectory overlay
         trajectories: &[Vec<[f32; 3]>],
-        // Flight area wireframe (None = not shown)
-        flight_area: Option<FlightAreaBox>,
+        // Area wireframes
+        flight_areas: &[FlightAreaBox],
+        waypoint_areas: &[FlightAreaBox],
+        // Selected area for handle editing: kind 0=none, 1=flight, 2=waypoint
+        selected_area_kind: i32,
+        selected_area_index: i32,
     ) -> slint::Image {
         let width = width.max(1);
         let height = height.max(1);
@@ -1525,30 +1555,6 @@ impl Scene3DRenderer {
                 gl.uniform_1_f32(Some(&self.u_point_size), 1.0);
             }
 
-            // --- Flight area wireframe ---
-            if let Some(fa) = flight_area {
-                let [x0, y0, z0] = fa.min;
-                let [x1, y1, z1] = fa.max;
-                let edges: [f32; 72] = [
-                    x0, y0, z0,  x1, y0, z0,
-                    x1, y0, z0,  x1, y1, z0,
-                    x1, y1, z0,  x0, y1, z0,
-                    x0, y1, z0,  x0, y0, z0,
-                    x0, y0, z1,  x1, y0, z1,
-                    x1, y0, z1,  x1, y1, z1,
-                    x1, y1, z1,  x0, y1, z1,
-                    x0, y1, z1,  x0, y0, z1,
-                    x0, y0, z0,  x0, y0, z1,
-                    x1, y0, z0,  x1, y0, z1,
-                    x1, y1, z0,  x1, y1, z1,
-                    x0, y1, z0,  x0, y1, z1,
-                ];
-                gl.uniform_3_f32(Some(&self.u_color), 0.95, 0.85, 0.20); // amber
-                gl.uniform_1_f32(Some(&self.u_point_size), 1.0);
-                upload_and_draw(gl, self.vbo, &edges, glow::LINES);
-                gl.draw_arrays(glow::LINES, 0, (edges.len() / 3) as i32);
-            }
-
             // --- Obstacles (opaque solid triangles + wireframe) ---
             for (i, tris) in obstacle_triangles.iter().enumerate() {
                 if !tris.is_empty() {
@@ -1564,7 +1570,9 @@ impl Scene3DRenderer {
                     gl.draw_arrays(glow::TRIANGLES, 0, tris.len() as i32 / 3);
                 }
             }
-            // Wireframe edges on top
+            // Wireframe edges: LEQUAL so edges coplanar with the front faces
+            // pass (visible), while edges behind the solid body stay occluded.
+            gl.depth_func(glow::LEQUAL);
             for (i, wire) in obstacle_wireframes.iter().enumerate() {
                 if !wire.is_empty() {
                     let is_selected = selected_type == 3 && selected_index == i as i32;
@@ -1580,6 +1588,39 @@ impl Scene3DRenderer {
                 }
             }
             gl.uniform_1_f32(Some(&self.u_alpha), 1.0);
+
+            // --- Flight areas (amber) and waypoint areas (green) wireframes ---
+            // Drawn after the solid obstacles, with LEQUAL, so the parts in
+            // front of an obstacle stay crisp while the parts behind it are
+            // occluded by the solid body.
+            for fa in flight_areas {
+                self.draw_box_wireframe(gl, fa.min, fa.max, FLIGHT_AREA_COLOR);
+            }
+            for wa in waypoint_areas {
+                self.draw_box_wireframe(gl, wa.min, wa.max, WAYPOINT_AREA_COLOR);
+            }
+            gl.depth_func(glow::LESS);
+
+            // --- Face-center drag handles for the selected area (always on top) ---
+            let selected_area = match selected_area_kind {
+                1 => flight_areas.get(selected_area_index as usize),
+                2 => waypoint_areas.get(selected_area_index as usize),
+                _ => None,
+            };
+            if let Some(area) = selected_area {
+                let handles = area_handle_positions(area.min, area.max);
+                gl.disable(glow::DEPTH_TEST);
+                let verts: Vec<f32> = handles.iter().flat_map(|h| *h).collect();
+                upload_and_draw(gl, self.vbo, &verts, glow::POINTS);
+                gl.uniform_3_f32(Some(&self.u_color), 0.10, 0.10, 0.10);
+                gl.uniform_1_f32(Some(&self.u_point_size), 22.0);
+                gl.draw_arrays(glow::POINTS, 0, handles.len() as i32);
+                gl.uniform_3_f32(Some(&self.u_color), 0.95, 0.55, 0.10);
+                gl.uniform_1_f32(Some(&self.u_point_size), 14.0);
+                gl.draw_arrays(glow::POINTS, 0, handles.len() as i32);
+                gl.uniform_1_f32(Some(&self.u_point_size), 1.0);
+                gl.enable(glow::DEPTH_TEST);
+            }
 
             // --- Base station axes and FOV frustum ---
             let horiz_half = (160.0_f32 / 2.0).to_radians();
@@ -2070,7 +2111,22 @@ pub fn compute_mvp(yaw: f32, pitch: f32, distance: f32, pan_x: f32, pan_y: f32, 
     build_mvp(yaw, pitch, distance, pan_x, pan_y, aspect)
 }
 
-fn build_mvp(yaw: f32, pitch: f32, distance: f32, pan_x: f32, pan_y: f32, aspect: f32) -> [f32; 16] {
+/// Order of face-center drag handles for an area box: XMin, XMax, YMin, YMax, ZMin, ZMax.
+pub fn area_handle_positions(min: [f32; 3], max: [f32; 3]) -> [[f32; 3]; 6] {
+    let cx = (min[0] + max[0]) * 0.5;
+    let cy = (min[1] + max[1]) * 0.5;
+    let cz = (min[2] + max[2]) * 0.5;
+    [
+        [min[0], cy, cz], // XMin
+        [max[0], cy, cz], // XMax
+        [cx, min[1], cz], // YMin
+        [cx, max[1], cz], // YMax
+        [cx, cy, min[2]], // ZMin
+        [cx, cy, max[2]], // ZMax
+    ]
+}
+
+pub fn build_mvp(yaw: f32, pitch: f32, distance: f32, pan_x: f32, pan_y: f32, aspect: f32) -> [f32; 16] {
     // Camera position from spherical coordinates
     let cam_x = distance * pitch.cos() * yaw.cos();
     let cam_y = distance * pitch.cos() * yaw.sin();
@@ -2081,7 +2137,9 @@ fn build_mvp(yaw: f32, pitch: f32, distance: f32, pan_x: f32, pan_y: f32, aspect
     let eye = [cam_x + pan_x, cam_y + pan_y, cam_z];
 
     let view = look_at(eye, target, [0.0, 0.0, 1.0]);
-    let proj = perspective(45.0_f32.to_radians(), aspect, 0.1, 100.0);
+    // near=0.3 keeps good depth precision even with the far range needed for
+    // zooming far out, so coplanar wireframe edges don't z-fight with faces.
+    let proj = perspective(45.0_f32.to_radians(), aspect, 0.3, 300.0);
 
     mat4_mul(&proj, &view)
 }

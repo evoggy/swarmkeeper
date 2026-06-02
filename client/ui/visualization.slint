@@ -177,7 +177,7 @@ export component VisualizationContent inherits Rectangle {
             if (e.delta-y > 0) {
                 root.cam-distance = max(1.0, root.cam-distance - 0.5);
             } else if (e.delta-y < 0) {
-                root.cam-distance = min(20.0, root.cam-distance + 0.5);
+                root.cam-distance = min(80.0, root.cam-distance + 0.5);
             }
             accept
         }

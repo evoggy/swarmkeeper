@@ -341,11 +341,33 @@ struct SceneAnchor {
     z: f32,
 }
 
+/// An axis-aligned box volume. Used both for flight areas (geofence, future)
+/// and waypoint areas (volumes inside which random waypoints are generated).
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct FlightArea {
+pub struct BoxVolume {
     pub min: [f32; 3],
     pub max: [f32; 3],
+    #[serde(default)]
+    pub label: String,
 }
+
+impl BoxVolume {
+    pub fn new(min: [f32; 3], max: [f32; 3]) -> Self {
+        Self {
+            min,
+            max,
+            label: String::new(),
+        }
+    }
+
+    /// True if `p` lies inside (inclusive) the box on all three axes.
+    /// (Used by geofence validation — see [`point_in_areas`].)
+    #[allow(dead_code)]
+    pub fn contains(&self, p: [f32; 3]) -> bool {
+        (0..3).all(|i| p[i] >= self.min[i] && p[i] <= self.max[i])
+    }
+}
+
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TakeoffPad {
@@ -370,8 +392,12 @@ pub struct PlanningScene {
     anchors: Vec<SceneAnchor>,
     #[serde(default)]
     obstacles: Vec<Obstacle>,
+    /// Geofence volumes (used for geofencing; multiple supported).
     #[serde(default)]
-    pub flight_area: Option<FlightArea>,
+    pub flight_areas: Vec<BoxVolume>,
+    /// Volumes inside which random waypoints may be generated (multiple supported).
+    #[serde(default)]
+    pub waypoint_areas: Vec<BoxVolume>,
     #[serde(default)]
     pub takeoff_pads: Vec<TakeoffPad>,
     #[serde(default = "default_true")]
@@ -422,7 +448,8 @@ impl PlanningScene {
         base_stations: &[coverage::BaseStation],
         anchors: &[tdoa3::Anchor],
         obstacles: &[Obstacle],
-        flight_area: Option<FlightArea>,
+        flight_areas: Vec<BoxVolume>,
+        waypoint_areas: Vec<BoxVolume>,
         takeoff_pads: Vec<TakeoffPad>,
         receiver_fov_enabled: bool,
         max_bs_distance: f32,
@@ -459,7 +486,8 @@ impl PlanningScene {
                 })
                 .collect(),
             obstacles: obstacles.to_vec(),
-            flight_area,
+            flight_areas,
+            waypoint_areas,
             takeoff_pads,
             receiver_fov_enabled,
             max_bs_distance,
@@ -495,6 +523,101 @@ impl PlanningScene {
     pub fn obstacles(&self) -> Vec<Obstacle> {
         self.obstacles.clone()
     }
+}
+
+// --- Random-flight sampling / validation helpers ---
+//
+// These operate on plain slices so both `PlanningScene` and the runtime scene
+// mirror (which keeps areas and obstacles separately) can use them. Obstacle
+// avoidance reuses `Obstacle::contains_point` / `Obstacle::blocks_ray`.
+
+/// True if `p` is inside any of the given box volumes.
+/// (Intended for flight-area geofence enforcement, added but not yet wired.)
+#[allow(dead_code)]
+pub fn point_in_areas(areas: &[BoxVolume], p: [f32; 3]) -> bool {
+    areas.iter().any(|a| a.contains(p))
+}
+
+/// True if `p` is inside any obstacle (obstacles are treated as no-go).
+pub fn point_blocked(p: [f32; 3], obstacles: &[Obstacle]) -> bool {
+    obstacles.iter().any(|o| o.contains_point(p))
+}
+
+/// True if the straight segment `a`→`b` passes through any obstacle.
+pub fn segment_blocked(a: [f32; 3], b: [f32; 3], obstacles: &[Obstacle]) -> bool {
+    obstacles.iter().any(|o| o.blocks_ray(a, b))
+}
+
+/// Advance a tiny xorshift PRNG state and return a float in [0, 1).
+/// Seed from system time at the call site; no external crates needed.
+pub fn rng_next_unit(state: &mut u64) -> f32 {
+    *state ^= *state << 13;
+    *state ^= *state >> 7;
+    *state ^= *state << 17;
+    ((*state >> 11) as f64 / (1u64 << 53) as f64) as f32
+}
+
+/// Pick a random point that lies inside one of `waypoint_areas` and outside
+/// every obstacle. Areas are picked weighted by volume so larger areas are
+/// proportionally more likely. Returns `None` if no valid point is found
+/// within `max_tries` attempts (or if there are no waypoint areas).
+pub fn sample_waypoint(
+    rng: &mut u64,
+    waypoint_areas: &[BoxVolume],
+    obstacles: &[Obstacle],
+    max_tries: u32,
+) -> Option<[f32; 3]> {
+    if waypoint_areas.is_empty() {
+        return None;
+    }
+    // Volume-weighted cumulative table.
+    let volumes: Vec<f32> = waypoint_areas
+        .iter()
+        .map(|a| {
+            let dx = (a.max[0] - a.min[0]).max(0.0);
+            let dy = (a.max[1] - a.min[1]).max(0.0);
+            let dz = (a.max[2] - a.min[2]).max(0.0);
+            dx * dy * dz
+        })
+        .collect();
+    let total: f32 = volumes.iter().sum();
+
+    for _ in 0..max_tries {
+        // Choose an area.
+        let area = if total > 0.0 {
+            let mut t = rng_next_unit(rng) * total;
+            let mut idx = waypoint_areas.len() - 1;
+            for (i, v) in volumes.iter().enumerate() {
+                if t < *v {
+                    idx = i;
+                    break;
+                }
+                t -= *v;
+            }
+            &waypoint_areas[idx]
+        } else {
+            // Degenerate (zero-volume) areas: just pick the first.
+            &waypoint_areas[0]
+        };
+        let p = [
+            area.min[0] + rng_next_unit(rng) * (area.max[0] - area.min[0]),
+            area.min[1] + rng_next_unit(rng) * (area.max[1] - area.min[1]),
+            area.min[2] + rng_next_unit(rng) * (area.max[2] - area.min[2]),
+        ];
+        if !point_blocked(p, obstacles) {
+            return Some(p);
+        }
+    }
+    None
+}
+
+/// Seed value for `rng_*` helpers, derived from the system clock.
+pub fn rng_seed() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0x9E3779B97F4A7C15)
+        .max(1)
 }
 
 pub fn save_scene(path: &std::path::Path, scene: &PlanningScene) -> Result<(), String> {

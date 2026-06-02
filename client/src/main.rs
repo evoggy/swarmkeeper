@@ -379,6 +379,93 @@ struct ConnectedUnit {
 
 type SwarmState = Arc<Mutex<HashMap<usize, ConnectedUnit>>>;
 
+/// Short human-readable name for a parameter value type (matches the strings
+/// understood by [`value_type_from_name`]).
+fn value_type_name(vt: crazyflie_lib::ValueType) -> &'static str {
+    use crazyflie_lib::ValueType::*;
+    match vt {
+        U8 => "u8",
+        U16 => "u16",
+        U32 => "u32",
+        U64 => "u64",
+        I8 => "i8",
+        I16 => "i16",
+        I32 => "i32",
+        I64 => "i64",
+        F16 => "f16",
+        F32 => "f32",
+        F64 => "f64",
+    }
+}
+
+/// Inverse of [`value_type_name`]: map a type name back to a `ValueType`.
+fn value_type_from_name(name: &str) -> Option<crazyflie_lib::ValueType> {
+    use crazyflie_lib::ValueType::*;
+    Some(match name {
+        "u8" => U8,
+        "u16" => U16,
+        "u32" => U32,
+        "u64" => U64,
+        "i8" => I8,
+        "i16" => I16,
+        "i32" => I32,
+        "i64" => I64,
+        "f16" => F16,
+        "f32" => F32,
+        "f64" => F64,
+        _ => return None,
+    })
+}
+
+/// Parse a user-entered string into a [`crazyflie_lib::Value`] of the given
+/// type, enforcing that the value actually fits the type (range for integers,
+/// numeric for floats). Returns `Err(message)` describing the problem otherwise.
+fn parse_param_value(
+    vt: crazyflie_lib::ValueType,
+    s: &str,
+) -> Result<crazyflie_lib::Value, String> {
+    use crazyflie_lib::{Value, ValueType};
+    let s = s.trim();
+    if s.is_empty() {
+        return Err("Enter a value".to_string());
+    }
+    macro_rules! parse_int {
+        ($variant:ident, $ty:ty) => {
+            match s.parse::<$ty>() {
+                Ok(v) => Ok(Value::$variant(v)),
+                Err(_) => Err(format!(
+                    "Expected an integer between {} and {}",
+                    <$ty>::MIN,
+                    <$ty>::MAX
+                )),
+            }
+        };
+    }
+    match vt {
+        ValueType::U8 => parse_int!(U8, u8),
+        ValueType::U16 => parse_int!(U16, u16),
+        ValueType::U32 => parse_int!(U32, u32),
+        ValueType::U64 => parse_int!(U64, u64),
+        ValueType::I8 => parse_int!(I8, i8),
+        ValueType::I16 => parse_int!(I16, i16),
+        ValueType::I32 => parse_int!(I32, i32),
+        ValueType::I64 => parse_int!(I64, i64),
+        ValueType::F16 => match s.parse::<f64>() {
+            Ok(v) if v.is_finite() => Ok(Value::from_f64_lossy(ValueType::F16, v)),
+            Ok(_) => Err("Expected a finite number".to_string()),
+            Err(_) => Err("Expected a number".to_string()),
+        },
+        ValueType::F32 => match s.parse::<f32>() {
+            Ok(v) => Ok(Value::F32(v)),
+            Err(_) => Err("Expected a number".to_string()),
+        },
+        ValueType::F64 => match s.parse::<f64>() {
+            Ok(v) => Ok(Value::F64(v)),
+            Err(_) => Err("Expected a number".to_string()),
+        },
+    }
+}
+
 /// Lazily fetch platform/firmware info for the unit at a `sorted-units` row
 /// index, updating the UI when done. Shared by the Units-table selection and
 /// the visualization click-to-select so both populate the sidebar identically.
@@ -702,7 +789,7 @@ async fn main() {
     }
 
     // Auto-load last scene so the visualizer overlay shows up on launch
-    let initial_viz_scene: Option<(Option<planning::FlightArea>, Vec<planning::TakeoffPad>, Vec<planning::Obstacle>)> = if let Some(ref path) = settings.last_scene_config {
+    let initial_viz_scene: Option<(Vec<planning::BoxVolume>, Vec<planning::BoxVolume>, Vec<planning::TakeoffPad>, Vec<planning::Obstacle>)> = if let Some(ref path) = settings.last_scene_config {
         let path_buf = std::path::PathBuf::from(path);
         match planning::load_scene(&path_buf) {
             Ok(scene) => {
@@ -711,7 +798,7 @@ async fn main() {
                     .map(|s| s.to_string())
                     .unwrap_or_default();
                 ui.set_viz_loaded_scene_name(name.into());
-                Some((scene.flight_area.clone(), scene.takeoff_pads.clone(), scene.obstacles()))
+                Some((scene.flight_areas.clone(), scene.waypoint_areas.clone(), scene.takeoff_pads.clone(), scene.obstacles()))
             }
             Err(e) => {
                 eprintln!("Failed to auto-load last scene: {}", e);
@@ -764,23 +851,27 @@ async fn main() {
     // Visualizer scene overlay (loaded scene's flight area + pads + obstacles)
     #[derive(Default)]
     struct VizSceneState {
-        flight_area: Option<planning::FlightArea>,
+        flight_areas: Vec<planning::BoxVolume>,
+        waypoint_areas: Vec<planning::BoxVolume>,
         takeoff_pads: Vec<planning::TakeoffPad>,
+        obstacles: Vec<planning::Obstacle>,
         obstacle_triangles: Vec<Vec<f32>>,
         obstacle_wireframes: Vec<Vec<f32>>,
         obstacle_colors: Vec<[f32; 3]>,
     }
     impl VizSceneState {
         fn set_obstacles(&mut self, obstacles: &[planning::Obstacle]) {
+            self.obstacles = obstacles.to_vec();
             self.obstacle_triangles = obstacles.iter().map(|o| o.triangulate()).collect();
             self.obstacle_wireframes = obstacles.iter().map(|o| o.wireframe()).collect();
             self.obstacle_colors = obstacles.iter().map(|o| o.color).collect();
         }
     }
     let viz_scene_state = Arc::new(std::sync::Mutex::new(VizSceneState::default()));
-    if let Some((fa, pads, obstacles)) = initial_viz_scene {
+    if let Some((flight_areas, waypoint_areas, pads, obstacles)) = initial_viz_scene {
         let mut s = viz_scene_state.lock().unwrap();
-        s.flight_area = fa;
+        s.flight_areas = flight_areas;
+        s.waypoint_areas = waypoint_areas;
         s.takeoff_pads = pads;
         s.set_obstacles(&obstacles);
     }
@@ -2927,38 +3018,48 @@ async fn main() {
         });
     }
 
-    // Random goto inside flight area: fills the goto X/Y/Z fields and flies there
+    // Random goto inside a waypoint area: samples a point inside the waypoint
+    // areas (avoiding obstacles), checks the straight path is clear, then flies.
     {
         let viz_scene_state = viz_scene_state.clone();
         let ui_weak = ui.as_weak();
         ui.on_random_goto(move |row_index| {
             let Some(ui) = ui_weak.upgrade() else { return };
-            let fa = {
-                let s = viz_scene_state.lock().unwrap();
-                s.flight_area.clone()
+            // Current position of the drone in this row (for path validation).
+            let from = {
+                let units = ui.get_units();
+                let indices = sort_unit_indices(&units, ui.get_sort_column(), ui.get_sort_ascending());
+                match indices.get(row_index.max(0) as usize).and_then(|&i| units.row_data(i)) {
+                    Some(u) => [u.pos_x, u.pos_y, u.pos_z],
+                    None => [0.0, 0.0, 0.0],
+                }
             };
-            let Some(fa) = fa else {
-                eprintln!("No flight area defined; load a scene with one first");
+            let (waypoint_areas, obstacles) = {
+                let s = viz_scene_state.lock().unwrap();
+                (s.waypoint_areas.clone(), s.obstacles.clone())
+            };
+            if waypoint_areas.is_empty() {
+                eprintln!("No waypoint area defined; load/save a scene with one first");
+                return;
+            }
+            // Try a number of samples; require both the point and the path clear.
+            let mut rng = planning::rng_seed();
+            let mut target = None;
+            for _ in 0..64 {
+                if let Some(p) = planning::sample_waypoint(&mut rng, &waypoint_areas, &obstacles, 16) {
+                    if !planning::segment_blocked(from, p, &obstacles) {
+                        target = Some(p);
+                        break;
+                    }
+                }
+            }
+            let Some(p) = target else {
+                eprintln!("Could not find a reachable random waypoint (all blocked by obstacles)");
                 return;
             };
-            // Tiny xorshift PRNG seeded from system time, no extra deps
-            fn next_unit(state: &mut u64) -> f32 {
-                *state ^= *state << 13;
-                *state ^= *state >> 7;
-                *state ^= *state << 17;
-                ((*state >> 11) as f64 / (1u64 << 53) as f64) as f32
-            }
-            let mut rng = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos() as u64)
-                .unwrap_or(0x9E3779B97F4A7C15)
-                .max(1);
-            let rx = fa.min[0] + next_unit(&mut rng) * (fa.max[0] - fa.min[0]);
-            let ry = fa.min[1] + next_unit(&mut rng) * (fa.max[1] - fa.min[1]);
-            let rz = fa.min[2] + next_unit(&mut rng) * (fa.max[2] - fa.min[2]);
-            let x_str: slint::SharedString = format!("{:.2}", rx).into();
-            let y_str: slint::SharedString = format!("{:.2}", ry).into();
-            let z_str: slint::SharedString = format!("{:.2}", rz).into();
+            let x_str: slint::SharedString = format!("{:.2}", p[0]).into();
+            let y_str: slint::SharedString = format!("{:.2}", p[1]).into();
+            let z_str: slint::SharedString = format!("{:.2}", p[2]).into();
             ui.set_unit_goto_x_text(x_str.clone());
             ui.set_unit_goto_y_text(y_str.clone());
             ui.set_unit_goto_z_text(z_str.clone());
@@ -2986,7 +3087,8 @@ async fn main() {
                     Ok(scene) => {
                         {
                             let mut s = viz_scene_state.lock().unwrap();
-                            s.flight_area = scene.flight_area.clone();
+                            s.flight_areas = scene.flight_areas.clone();
+                            s.waypoint_areas = scene.waypoint_areas.clone();
                             s.takeoff_pads = scene.takeoff_pads.clone();
                             let obs = scene.obstacles();
                             s.set_obstacles(&obs);
@@ -4111,7 +4213,11 @@ async fn main() {
         obstacle_colors: Vec<[f32; 3]>,
         room: [f32; 3],
         room_offset: [f32; 3],
-        flight_area: Option<planning::FlightArea>,
+        flight_areas: Vec<planning::BoxVolume>,
+        waypoint_areas: Vec<planning::BoxVolume>,
+        /// Selected area for handle editing: 0=none, 1=flight, 2=waypoint.
+        selected_area_kind: i32,
+        selected_area_index: i32,
         takeoff_pads: Vec<planning::TakeoffPad>,
         undo_stack: Vec<(Vec<coverage::BaseStation>, Vec<tdoa3::Anchor>, Vec<planning::Obstacle>)>,
         convex_hull: Option<tdoa3::ConvexHull>,
@@ -4136,7 +4242,10 @@ async fn main() {
         obstacle_colors: Vec::new(),
         room: [8.0, 8.0, 3.0],
         room_offset: [0.0; 3],
-        flight_area: None,
+        flight_areas: Vec::new(),
+        waypoint_areas: Vec::new(),
+        selected_area_kind: 0,
+        selected_area_index: -1,
         takeoff_pads: Vec::new(),
         undo_stack: Vec::new(),
         convex_hull: None,
@@ -4154,6 +4263,12 @@ async fn main() {
         drag_start_azimuth: f32,
         drag_start_elevation: f32,
         drag_start_yaw: f32,
+        // Area face-handle drag (swarmfinity-style box resize)
+        area_handle: i32, // -1 none, else 0..6 (XMin,XMax,YMin,YMax,ZMin,ZMax)
+        area_start_min: [f32; 3],
+        area_start_max: [f32; 3],
+        area_axis_screen: [f32; 2], // screen-space unit vector of the dragged axis
+        area_world_per_px: f32,     // world meters per screen pixel along that axis
     }
     let planning_gizmo_state = std::sync::Arc::new(std::sync::Mutex::new(PlanningGizmoState {
         drag_start_screen: [0.0, 0.0],
@@ -4161,6 +4276,11 @@ async fn main() {
         drag_start_azimuth: 0.0,
         drag_start_elevation: 0.0,
         drag_start_yaw: 0.0,
+        area_handle: -1,
+        area_start_min: [0.0; 3],
+        area_start_max: [0.0; 3],
+        area_axis_screen: [0.0, 0.0],
+        area_world_per_px: 0.0,
     }));
 
     // LH Wizard shared state
@@ -4333,26 +4453,26 @@ async fn main() {
                                 }
                             }
 
-                            // Scene overlay (flight area + pads + obstacles)
-                            let (flight_area, pads, obs_tris, obs_wires, obs_colors) = if app.get_viz_show_scene_overlay() {
+                            // Scene overlay (flight/waypoint areas + pads + obstacles)
+                            let (flight_areas, waypoint_areas, pads, obs_tris, obs_wires, obs_colors) = if app.get_viz_show_scene_overlay() {
                                 if let Ok(s) = viz_scene_state.try_lock() {
-                                    let fa = s.flight_area.as_ref().map(|f| renderer::FlightAreaBox {
-                                        min: f.min, max: f.max,
-                                    });
+                                    let to_box = |v: &planning::BoxVolume| renderer::FlightAreaBox { min: v.min, max: v.max };
+                                    let fas: Vec<renderer::FlightAreaBox> = s.flight_areas.iter().map(to_box).collect();
+                                    let was: Vec<renderer::FlightAreaBox> = s.waypoint_areas.iter().map(to_box).collect();
                                     let pads: Vec<renderer::PadCircle> = s.takeoff_pads.iter()
                                         .map(|p| renderer::PadCircle { x: p.x, y: p.y, radius: p.radius })
                                         .collect();
-                                    (fa, pads, s.obstacle_triangles.clone(), s.obstacle_wireframes.clone(), s.obstacle_colors.clone())
+                                    (fas, was, pads, s.obstacle_triangles.clone(), s.obstacle_wireframes.clone(), s.obstacle_colors.clone())
                                 } else {
-                                    (None, Vec::new(), Vec::new(), Vec::new(), Vec::new())
+                                    (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new())
                                 }
                             } else {
-                                (None, Vec::new(), Vec::new(), Vec::new(), Vec::new())
+                                (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new())
                             };
 
                             let texture = renderer.render(
                                 width, height, yaw, pitch, distance, pan_x, pan_y, &unit_positions, &fixed_points, &trajectory_lines,
-                                flight_area, &pads, &obs_tris, &obs_wires, &obs_colors,
+                                &flight_areas, &waypoint_areas, &pads, &obs_tris, &obs_wires, &obs_colors,
                             );
                             app.set_viz_texture(texture);
 
@@ -4738,7 +4858,7 @@ async fn main() {
                                     let pan_x = app.get_planning_cam_pan_x();
                                     let pan_y = app.get_planning_cam_pan_y();
 
-                                    let (room, room_offset, bs_render, lh_voxels, anchor_positions, tdoa3_voxels, obstacle_tris, obstacle_wires, obstacle_cols, trajectories) = {
+                                    let (room, room_offset, bs_render, lh_voxels, anchor_positions, tdoa3_voxels, obstacle_tris, obstacle_wires, obstacle_cols, trajectories, plan_flight_areas, plan_waypoint_areas, sel_area_kind, sel_area_index) = {
                                         let ps = planning_state_render.lock().unwrap();
                                         (ps.room, ps.room_offset, ps.bs_render_data.clone(),
                                          ps.lh_voxels.clone(), ps.anchor_positions.clone(),
@@ -4746,7 +4866,11 @@ async fn main() {
                                          ps.obstacle_triangles.clone(),
                                          ps.obstacle_wireframes.clone(),
                                          ps.obstacle_colors.clone(),
-                                         ps.trajectories.clone())
+                                         ps.trajectories.clone(),
+                                         ps.flight_areas.clone(),
+                                         ps.waypoint_areas.clone(),
+                                         ps.selected_area_kind,
+                                         ps.selected_area_index)
                                     };
 
                                     let traj_for_render: Vec<Vec<[f32; 3]>> = if app.get_planning_show_trajectories() {
@@ -4768,23 +4892,10 @@ async fn main() {
                                         app.get_planning_show_coverage_4(),
                                     ];
 
-                                    // Flight area read live from the UI inputs (not just on save)
-                                    let flight_area = if app.get_planning_flight_area_enabled() {
-                                        Some(renderer::FlightAreaBox {
-                                            min: [
-                                                app.get_planning_flight_area_min_x().parse().unwrap_or(-2.0),
-                                                app.get_planning_flight_area_min_y().parse().unwrap_or(-2.0),
-                                                app.get_planning_flight_area_min_z().parse().unwrap_or(0.0),
-                                            ],
-                                            max: [
-                                                app.get_planning_flight_area_max_x().parse().unwrap_or(2.0),
-                                                app.get_planning_flight_area_max_y().parse().unwrap_or(2.0),
-                                                app.get_planning_flight_area_max_z().parse().unwrap_or(2.0),
-                                            ],
-                                        })
-                                    } else {
-                                        None
-                                    };
+                                    // Areas come from planning_state (kept in sync with the UI list editors)
+                                    let to_box = |v: &planning::BoxVolume| renderer::FlightAreaBox { min: v.min, max: v.max };
+                                    let flight_area_boxes: Vec<renderer::FlightAreaBox> = plan_flight_areas.iter().map(to_box).collect();
+                                    let waypoint_area_boxes: Vec<renderer::FlightAreaBox> = plan_waypoint_areas.iter().map(to_box).collect();
 
                                     let tex = plan_renderer.render_planning(
                                         pw, ph,
@@ -4803,7 +4914,10 @@ async fn main() {
                                         app.get_planning_selected_index(),
                                         app.get_planning_active_handle(),
                                         &traj_for_render,
-                                        flight_area,
+                                        &flight_area_boxes,
+                                        &waypoint_area_boxes,
+                                        sel_area_kind,
+                                        sel_area_index,
                                     );
                                     app.set_planning_texture(tex);
 
@@ -5076,6 +5190,190 @@ async fn main() {
                         ui.set_progress_dialog_visible(false);
                     }
                 }).ok();
+            });
+        });
+    }
+
+    // ---- Set swarm parameter dialog ----
+
+    // Live validation of an entered value against the selected parameter's type.
+    ui.on_validate_param_value(|type_name, value| {
+        match value_type_from_name(type_name.as_str()) {
+            Some(vt) => match parse_param_value(vt, value.as_str()) {
+                Ok(_) => slint::SharedString::new(),
+                Err(e) => e.into(),
+            },
+            // Unknown type: don't block the user with a spurious error.
+            None => slint::SharedString::new(),
+        }
+    });
+
+    // Build the intersection of writable parameters across all connected units.
+    {
+        let swarm_state = swarm_state.clone();
+        let ui_weak = ui.as_weak();
+        ui.on_refresh_swarm_params(move || {
+            let swarm_state = swarm_state.clone();
+            let ui_weak = ui_weak.clone();
+            tokio::spawn(async move {
+                let cfs: Vec<Arc<crazyflie_lib::Crazyflie>> = {
+                    let state = swarm_state.lock().await;
+                    state.values().map(|cu| cu.cf.clone()).collect()
+                };
+                let unit_count = cfs.len() as i32;
+
+                let mut list: Vec<SwarmParamData> = Vec::new();
+                if let Some((first, rest)) = cfs.split_first() {
+                    // A parameter is offered only if every connected unit has it.
+                    let mut common: std::collections::HashSet<String> =
+                        first.param.names().into_iter().collect();
+                    for cf in rest {
+                        let names: std::collections::HashSet<String> =
+                            cf.param.names().into_iter().collect();
+                        common.retain(|n| names.contains(n));
+                    }
+                    for name in common {
+                        // Only writable params can be set; skip read-only ones.
+                        if first.param.is_writable(&name).unwrap_or(false) {
+                            if let Ok(vt) = first.param.get_type(&name) {
+                                list.push(SwarmParamData {
+                                    name: name.clone().into(),
+                                    type_name: value_type_name(vt).into(),
+                                    writable: true,
+                                });
+                            }
+                        }
+                    }
+                    list.sort_by(|a, b| a.name.as_str().cmp(b.name.as_str()));
+                }
+
+                slint::invoke_from_event_loop(move || {
+                    if let Some(ui) = ui_weak.upgrade() {
+                        ui.set_swarm_params_all(slint::ModelRc::new(slint::VecModel::from(
+                            list.clone(),
+                        )));
+                        ui.set_swarm_params(slint::ModelRc::new(slint::VecModel::from(list)));
+                        ui.set_set_param_unit_count(unit_count);
+                        ui.set_set_param_loading(false);
+                    }
+                })
+                .ok();
+            });
+        });
+    }
+
+    // Filter the cached parameter list by the search string.
+    {
+        let ui_weak = ui.as_weak();
+        ui.on_filter_swarm_params(move |search| {
+            let Some(ui) = ui_weak.upgrade() else { return };
+            let needle = search.as_str().to_lowercase();
+            let filtered: Vec<SwarmParamData> = ui
+                .get_swarm_params_all()
+                .iter()
+                .filter(|p| needle.is_empty() || p.name.as_str().to_lowercase().contains(&needle))
+                .collect();
+            ui.set_swarm_params(slint::ModelRc::new(slint::VecModel::from(filtered)));
+        });
+    }
+
+    // Set the chosen parameter on every connected unit, reporting progress.
+    {
+        let swarm_state = swarm_state.clone();
+        let ui_weak = ui.as_weak();
+        ui.on_set_swarm_param(move |name, value| {
+            let name = name.to_string();
+            let value = value.to_string();
+            let swarm_state = swarm_state.clone();
+            let ui_weak = ui_weak.clone();
+
+            if let Some(ui) = ui_weak.upgrade() {
+                ui.set_progress_dialog_title(format!("Setting {}", name).into());
+                ui.set_progress_dialog_progress(0.0);
+                ui.set_progress_dialog_status("Starting…".into());
+                ui.set_progress_dialog_visible(true);
+            }
+
+            tokio::spawn(async move {
+                let units: Vec<(usize, Arc<crazyflie_lib::Crazyflie>)> = {
+                    let state = swarm_state.lock().await;
+                    state.iter().map(|(idx, cu)| (*idx, cu.cf.clone())).collect()
+                };
+                let total = units.len();
+                if total == 0 {
+                    let ui_weak_inner = ui_weak.clone();
+                    slint::invoke_from_event_loop(move || {
+                        if let Some(ui) = ui_weak_inner.upgrade() {
+                            ui.set_progress_dialog_visible(false);
+                        }
+                    })
+                    .ok();
+                    return;
+                }
+
+                let completed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+                let failed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+                let mut join_set = tokio::task::JoinSet::new();
+                for (idx, cf) in units {
+                    let name = name.clone();
+                    let value = value.clone();
+                    let ui_weak = ui_weak.clone();
+                    let completed = completed.clone();
+                    let failed = failed.clone();
+                    join_set.spawn(async move {
+                        let result: Result<(), String> = async {
+                            let vt = cf
+                                .param
+                                .get_type(&name)
+                                .map_err(|e| format!("type lookup failed: {:?}", e))?;
+                            let parsed = parse_param_value(vt, &value)?;
+                            cf.param
+                                .set(name.as_str(), parsed)
+                                .await
+                                .map_err(|e| format!("set failed: {:?}", e))?;
+                            Ok(())
+                        }
+                        .await;
+
+                        match &result {
+                            Ok(()) => eprintln!("Set {} on unit {} OK", name, idx),
+                            Err(e) => {
+                                failed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                eprintln!("Set {} on unit {} FAILED: {}", name, idx, e);
+                            }
+                        }
+
+                        let done =
+                            completed.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                        let progress = done as f32 / total as f32;
+                        let nfailed = failed.load(std::sync::atomic::Ordering::Relaxed);
+                        let status: slint::SharedString = if nfailed > 0 {
+                            format!("{}/{} done, {} failed", done, total, nfailed).into()
+                        } else {
+                            format!("{}/{} done", done, total).into()
+                        };
+                        let ui_weak_inner = ui_weak.clone();
+                        slint::invoke_from_event_loop(move || {
+                            if let Some(ui) = ui_weak_inner.upgrade() {
+                                ui.set_progress_dialog_progress(progress);
+                                ui.set_progress_dialog_status(status);
+                            }
+                        })
+                        .ok();
+                    });
+                }
+
+                while join_set.join_next().await.is_some() {}
+
+                tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+                let ui_weak_inner = ui_weak.clone();
+                slint::invoke_from_event_loop(move || {
+                    if let Some(ui) = ui_weak_inner.upgrade() {
+                        ui.set_progress_dialog_visible(false);
+                    }
+                })
+                .ok();
             });
         });
     }
@@ -6829,6 +7127,39 @@ async fn main() {
             ps.obstacle_colors = ps.obstacles.iter().map(|o| o.color).collect();
         }
 
+        // Build the Slint model rows for a list of area box volumes.
+        fn area_models(areas: &[planning::BoxVolume]) -> Vec<PlanBoxVolumeData> {
+            areas
+                .iter()
+                .map(|a| PlanBoxVolumeData {
+                    label: a.label.clone().into(),
+                    min_x: format!("{:.2}", a.min[0]).into(),
+                    min_y: format!("{:.2}", a.min[1]).into(),
+                    min_z: format!("{:.2}", a.min[2]).into(),
+                    max_x: format!("{:.2}", a.max[0]).into(),
+                    max_y: format!("{:.2}", a.max[1]).into(),
+                    max_z: format!("{:.2}", a.max[2]).into(),
+                })
+                .collect()
+        }
+
+        // Parse a Slint area row back into a BoxVolume.
+        fn box_volume_from_model(d: &PlanBoxVolumeData) -> planning::BoxVolume {
+            planning::BoxVolume {
+                min: [
+                    d.min_x.parse().unwrap_or(0.0),
+                    d.min_y.parse().unwrap_or(0.0),
+                    d.min_z.parse().unwrap_or(0.0),
+                ],
+                max: [
+                    d.max_x.parse().unwrap_or(0.0),
+                    d.max_y.parse().unwrap_or(0.0),
+                    d.max_z.parse().unwrap_or(0.0),
+                ],
+                label: d.label.to_string(),
+            }
+        }
+
         // Compute the displayed TDoA3 voxels + two stats lines for a given metric.
         // Ported from the standalone TDoA3 Coverage tab so Planning supports the
         // full set of metrics (DOP / error / sensitivity / pair sensitivity).
@@ -7076,24 +7407,9 @@ async fn main() {
                 let path = handle.path().to_path_buf();
                 let Some(ui) = uw2.upgrade() else { return };
 
-                let mut pstate = ps.lock().unwrap();
-                // Sync flight area from UI inputs into state before saving
-                if ui.get_planning_flight_area_enabled() {
-                    pstate.flight_area = Some(planning::FlightArea {
-                        min: [
-                            ui.get_planning_flight_area_min_x().parse().unwrap_or(-2.0),
-                            ui.get_planning_flight_area_min_y().parse().unwrap_or(-2.0),
-                            ui.get_planning_flight_area_min_z().parse().unwrap_or(0.0),
-                        ],
-                        max: [
-                            ui.get_planning_flight_area_max_x().parse().unwrap_or(2.0),
-                            ui.get_planning_flight_area_max_y().parse().unwrap_or(2.0),
-                            ui.get_planning_flight_area_max_z().parse().unwrap_or(2.0),
-                        ],
-                    });
-                } else {
-                    pstate.flight_area = None;
-                }
+                let pstate = ps.lock().unwrap();
+                // Areas are kept in sync with the UI list editors via their
+                // update/add/remove callbacks, so just save what's in state.
                 let scene = planning::PlanningScene::new(
                     ui.get_planning_room_x().parse().unwrap_or(8.0),
                     ui.get_planning_room_y().parse().unwrap_or(8.0),
@@ -7108,7 +7424,8 @@ async fn main() {
                     &pstate.base_stations,
                     &pstate.anchors,
                     &pstate.obstacles,
-                    pstate.flight_area.clone(),
+                    pstate.flight_areas.clone(),
+                    pstate.waypoint_areas.clone(),
                     pstate.takeoff_pads.clone(),
                     ui.get_planning_receiver_fov_enabled(),
                     ui.get_planning_max_bs_distance().parse().unwrap_or(5.0),
@@ -7135,7 +7452,8 @@ async fn main() {
                     }
                     // Sync the visualizer overlay so it reflects the saved scene
                     let mut s = viz_scene_state.lock().unwrap();
-                    s.flight_area = pstate.flight_area.clone();
+                    s.flight_areas = pstate.flight_areas.clone();
+                    s.waypoint_areas = pstate.waypoint_areas.clone();
                     s.takeoff_pads = pstate.takeoff_pads.clone();
                     s.set_obstacles(&pstate.obstacles);
                 }
@@ -7166,12 +7484,16 @@ async fn main() {
                         ps.base_stations = scene.base_stations();
                         ps.anchors = scene.anchors();
                         ps.obstacles = scene.obstacles();
-                        ps.flight_area = scene.flight_area.clone();
+                        ps.flight_areas = scene.flight_areas.clone();
+                        ps.waypoint_areas = scene.waypoint_areas.clone();
+                        ps.selected_area_kind = 0;
+                        ps.selected_area_index = -1;
                         ps.takeoff_pads = scene.takeoff_pads.clone();
                         // Sync visualizer overlay
                         {
                             let mut s = viz_scene_state.lock().unwrap();
-                            s.flight_area = ps.flight_area.clone();
+                            s.flight_areas = ps.flight_areas.clone();
+                            s.waypoint_areas = ps.waypoint_areas.clone();
                             s.takeoff_pads = ps.takeoff_pads.clone();
                             s.set_obstacles(&ps.obstacles);
                         }
@@ -7252,18 +7574,11 @@ async fn main() {
                         }).collect();
                         ui.set_planning_obstacles(slint::ModelRc::new(slint::VecModel::from(obs_model)));
 
-                        // Flight area
-                        if let Some(fa) = &ps.flight_area {
-                            ui.set_planning_flight_area_enabled(true);
-                            ui.set_planning_flight_area_min_x(format!("{:.2}", fa.min[0]).into());
-                            ui.set_planning_flight_area_min_y(format!("{:.2}", fa.min[1]).into());
-                            ui.set_planning_flight_area_min_z(format!("{:.2}", fa.min[2]).into());
-                            ui.set_planning_flight_area_max_x(format!("{:.2}", fa.max[0]).into());
-                            ui.set_planning_flight_area_max_y(format!("{:.2}", fa.max[1]).into());
-                            ui.set_planning_flight_area_max_z(format!("{:.2}", fa.max[2]).into());
-                        } else {
-                            ui.set_planning_flight_area_enabled(false);
-                        }
+                        // Flight + waypoint areas
+                        ui.set_planning_flight_areas(slint::ModelRc::new(slint::VecModel::from(area_models(&ps.flight_areas))));
+                        ui.set_planning_waypoint_areas(slint::ModelRc::new(slint::VecModel::from(area_models(&ps.waypoint_areas))));
+                        ui.set_planning_selected_area_kind(0);
+                        ui.set_planning_selected_area_index(-1);
 
                         // Takeoff pads (read-only display)
                         let pads_model: Vec<PlanPadData> = ps.takeoff_pads.iter().map(|p| PlanPadData {
@@ -7729,6 +8044,134 @@ async fn main() {
             }
         });
 
+        // --- Flight / waypoint area editing callbacks ---
+        // A new area defaults to a 2x2x1.3 m box near the floor.
+        fn default_area() -> planning::BoxVolume {
+            planning::BoxVolume::new([-1.0, -1.0, 0.2], [1.0, 1.0, 1.5])
+        }
+
+        // Add flight area
+        let ps = planning_state.clone();
+        let uw = ui_weak.clone();
+        let vss = viz_scene_state.clone();
+        ui.on_planning_add_flight_area(move || {
+            let Some(ui) = uw.upgrade() else { return };
+            let mut ps = ps.lock().unwrap();
+            ps.flight_areas.push(default_area());
+            ui.set_planning_flight_areas(slint::ModelRc::new(slint::VecModel::from(area_models(&ps.flight_areas))));
+            vss.lock().unwrap().flight_areas = ps.flight_areas.clone();
+        });
+
+        // Remove flight area
+        let ps = planning_state.clone();
+        let uw = ui_weak.clone();
+        let vss = viz_scene_state.clone();
+        ui.on_planning_remove_flight_area(move |idx| {
+            let Some(ui) = uw.upgrade() else { return };
+            let mut ps = ps.lock().unwrap();
+            if (idx as usize) < ps.flight_areas.len() {
+                ps.flight_areas.remove(idx as usize);
+                if ps.selected_area_kind == 1 {
+                    ps.selected_area_kind = 0;
+                    ps.selected_area_index = -1;
+                    ui.set_planning_selected_area_kind(0);
+                    ui.set_planning_selected_area_index(-1);
+                }
+                ui.set_planning_flight_areas(slint::ModelRc::new(slint::VecModel::from(area_models(&ps.flight_areas))));
+                vss.lock().unwrap().flight_areas = ps.flight_areas.clone();
+            }
+        });
+
+        // Update flight area
+        let ps = planning_state.clone();
+        let vss = viz_scene_state.clone();
+        ui.on_planning_update_flight_area(move |idx, data| {
+            let mut ps = ps.lock().unwrap();
+            if let Some(area) = ps.flight_areas.get_mut(idx as usize) {
+                *area = box_volume_from_model(&data);
+                vss.lock().unwrap().flight_areas = ps.flight_areas.clone();
+            }
+        });
+
+        // Select flight area (for handle editing)
+        let ps = planning_state.clone();
+        let uw = ui_weak.clone();
+        ui.on_planning_select_flight_area(move |idx| {
+            let Some(ui) = uw.upgrade() else { return };
+            let mut ps = ps.lock().unwrap();
+            let toggle = ps.selected_area_kind == 1 && ps.selected_area_index == idx;
+            if toggle {
+                ps.selected_area_kind = 0;
+                ps.selected_area_index = -1;
+            } else {
+                ps.selected_area_kind = 1;
+                ps.selected_area_index = idx;
+            }
+            ui.set_planning_selected_area_kind(ps.selected_area_kind);
+            ui.set_planning_selected_area_index(ps.selected_area_index);
+        });
+
+        // Add waypoint area
+        let ps = planning_state.clone();
+        let uw = ui_weak.clone();
+        let vss = viz_scene_state.clone();
+        ui.on_planning_add_waypoint_area(move || {
+            let Some(ui) = uw.upgrade() else { return };
+            let mut ps = ps.lock().unwrap();
+            ps.waypoint_areas.push(default_area());
+            ui.set_planning_waypoint_areas(slint::ModelRc::new(slint::VecModel::from(area_models(&ps.waypoint_areas))));
+            vss.lock().unwrap().waypoint_areas = ps.waypoint_areas.clone();
+        });
+
+        // Remove waypoint area
+        let ps = planning_state.clone();
+        let uw = ui_weak.clone();
+        let vss = viz_scene_state.clone();
+        ui.on_planning_remove_waypoint_area(move |idx| {
+            let Some(ui) = uw.upgrade() else { return };
+            let mut ps = ps.lock().unwrap();
+            if (idx as usize) < ps.waypoint_areas.len() {
+                ps.waypoint_areas.remove(idx as usize);
+                if ps.selected_area_kind == 2 {
+                    ps.selected_area_kind = 0;
+                    ps.selected_area_index = -1;
+                    ui.set_planning_selected_area_kind(0);
+                    ui.set_planning_selected_area_index(-1);
+                }
+                ui.set_planning_waypoint_areas(slint::ModelRc::new(slint::VecModel::from(area_models(&ps.waypoint_areas))));
+                vss.lock().unwrap().waypoint_areas = ps.waypoint_areas.clone();
+            }
+        });
+
+        // Update waypoint area
+        let ps = planning_state.clone();
+        let vss = viz_scene_state.clone();
+        ui.on_planning_update_waypoint_area(move |idx, data| {
+            let mut ps = ps.lock().unwrap();
+            if let Some(area) = ps.waypoint_areas.get_mut(idx as usize) {
+                *area = box_volume_from_model(&data);
+                vss.lock().unwrap().waypoint_areas = ps.waypoint_areas.clone();
+            }
+        });
+
+        // Select waypoint area (for handle editing)
+        let ps = planning_state.clone();
+        let uw = ui_weak.clone();
+        ui.on_planning_select_waypoint_area(move |idx| {
+            let Some(ui) = uw.upgrade() else { return };
+            let mut ps = ps.lock().unwrap();
+            let toggle = ps.selected_area_kind == 2 && ps.selected_area_index == idx;
+            if toggle {
+                ps.selected_area_kind = 0;
+                ps.selected_area_index = -1;
+            } else {
+                ps.selected_area_kind = 2;
+                ps.selected_area_index = idx;
+            }
+            ui.set_planning_selected_area_kind(ps.selected_area_kind);
+            ui.set_planning_selected_area_index(ps.selected_area_index);
+        });
+
         // Recompute coverage (background thread with timer polling)
         type CoverageComputeResult = (
             Vec<(f32, f32, f32, u8)>,   // lh_voxels
@@ -7895,6 +8338,54 @@ async fn main() {
             let sel_type = ui.get_planning_selected_type();
             let sel_idx = ui.get_planning_selected_index();
 
+            // If an area is selected for editing, check its face handles first.
+            let area_kind = ui.get_planning_selected_area_kind();
+            let area_idx = ui.get_planning_selected_area_index();
+            if area_kind != 0 && area_idx >= 0 {
+                let area = match area_kind {
+                    1 => ps_lock.flight_areas.get(area_idx as usize),
+                    2 => ps_lock.waypoint_areas.get(area_idx as usize),
+                    _ => None,
+                };
+                if let Some(area) = area {
+                    let handles = renderer::area_handle_positions(area.min, area.max);
+                    let mut best: Option<(usize, f32)> = None;
+                    for (i, h) in handles.iter().enumerate() {
+                        if let Some((sx, sy)) = renderer::project_to_screen(*h, &mvp, pw, ph) {
+                            let d = ((mx - sx).powi(2) + (my - sy).powi(2)).sqrt();
+                            if d < 28.0 && best.map(|(_, bd)| d < bd).unwrap_or(true) {
+                                best = Some((i, d));
+                            }
+                        }
+                    }
+                    if let Some((hi, _)) = best {
+                        // World axis the handle slides along.
+                        let axis = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]][hi / 2];
+                        let h = handles[hi];
+                        let h2 = [h[0] + axis[0] * 0.5, h[1] + axis[1] * 0.5, h[2] + axis[2] * 0.5];
+                        let (s1, s2) = (
+                            renderer::project_to_screen(h, &mvp, pw, ph),
+                            renderer::project_to_screen(h2, &mvp, pw, ph),
+                        );
+                        if let (Some(s1), Some(s2)) = (s1, s2) {
+                            let dvec = [s2.0 - s1.0, s2.1 - s1.1];
+                            let len = (dvec[0] * dvec[0] + dvec[1] * dvec[1]).sqrt();
+                            if len > 0.01 {
+                                let mut gs = gs.lock().unwrap();
+                                gs.area_handle = hi as i32;
+                                gs.area_start_min = area.min;
+                                gs.area_start_max = area.max;
+                                gs.area_axis_screen = [dvec[0] / len, dvec[1] / len];
+                                gs.area_world_per_px = 0.5 / len;
+                                gs.drag_start_screen = [mx, my];
+                                ui.set_planning_handle_active(true);
+                                return;
+                            }
+                        }
+                    }
+                }
+            }
+
             // If something is selected, check gizmo handles first
             if sel_idx >= 0 {
                 let handle = match sel_type {
@@ -8033,6 +8524,46 @@ async fn main() {
         ui.on_planning_view_mouse_moved(move |mx, my| {
             let Some(ui) = uw.upgrade() else { return };
             if !ui.get_planning_handle_active() { return; }
+
+            // Area face-handle drag (swarmfinity-style box resize).
+            {
+                let (handle, start_min, start_max, axis, wpp, start_screen) = {
+                    let gs = gs.lock().unwrap();
+                    (gs.area_handle, gs.area_start_min, gs.area_start_max,
+                     gs.area_axis_screen, gs.area_world_per_px, gs.drag_start_screen)
+                };
+                if handle >= 0 {
+                    let area_kind = ui.get_planning_selected_area_kind();
+                    let area_idx = ui.get_planning_selected_area_index();
+                    if area_kind != 0 && area_idx >= 0 {
+                        // World delta along the handle's axis.
+                        let dpx = (mx - start_screen[0]) * axis[0] + (my - start_screen[1]) * axis[1];
+                        let delta = dpx * wpp;
+                        let mut min = start_min;
+                        let mut max = start_max;
+                        let comp = (handle as usize) / 2; // 0=X,1=Y,2=Z
+                        let is_max = (handle as usize) % 2 == 1;
+                        const MIN_SPAN: f32 = 0.2;
+                        if is_max {
+                            max[comp] = (start_max[comp] + delta).max(min[comp] + MIN_SPAN);
+                        } else {
+                            min[comp] = (start_min[comp] + delta).min(max[comp] - MIN_SPAN);
+                            if comp == 2 { min[comp] = min[comp].max(0.05); }
+                        }
+                        let mut ps = ps.lock().unwrap();
+                        let area = match area_kind {
+                            1 => ps.flight_areas.get_mut(area_idx as usize),
+                            2 => ps.waypoint_areas.get_mut(area_idx as usize),
+                            _ => None,
+                        };
+                        if let Some(area) = area {
+                            area.min = min;
+                            area.max = max;
+                        }
+                    }
+                    return;
+                }
+            }
 
             let sel_type = ui.get_planning_selected_type();
             let sel_idx = ui.get_planning_selected_index() as usize;
@@ -8185,12 +8716,30 @@ async fn main() {
         });
 
         // Mouse released (end drag)
-        let _ps = planning_state.clone();
+        let ps = planning_state.clone();
+        let gs = planning_gizmo_state.clone();
+        let vss = viz_scene_state.clone();
         let uw = ui_weak.clone();
         ui.on_planning_view_mouse_released(move || {
             let Some(ui) = uw.upgrade() else { return };
             ui.set_planning_handle_active(false);
             ui.set_planning_active_handle(0);
+            // If we were dragging an area handle, finalize: refresh the list
+            // editor rows and the visualizer overlay, then clear the drag.
+            let was_area = {
+                let mut gs = gs.lock().unwrap();
+                let h = gs.area_handle;
+                gs.area_handle = -1;
+                h >= 0
+            };
+            if was_area {
+                let ps = ps.lock().unwrap();
+                ui.set_planning_flight_areas(slint::ModelRc::new(slint::VecModel::from(area_models(&ps.flight_areas))));
+                ui.set_planning_waypoint_areas(slint::ModelRc::new(slint::VecModel::from(area_models(&ps.waypoint_areas))));
+                let mut s = vss.lock().unwrap();
+                s.flight_areas = ps.flight_areas.clone();
+                s.waypoint_areas = ps.waypoint_areas.clone();
+            }
         });
 
         // View pan

@@ -6,7 +6,7 @@ import { RadioTestContent, ChannelResult } from "radio-test.slint";
 import { LhBaseStationData } from "lh-coverage.slint";
 import { Tdoa3AnchorData } from "tdoa3-coverage.slint";
 import { LhWizardContent, WizardSampleData, WizardBsData } from "lh-wizard.slint";
-import { PlanningContent, PlanObstacleData, PlanPadData } from "planning.slint";
+import { PlanningContent, PlanObstacleData, PlanPadData, PlanBoxVolumeData } from "planning.slint";
 
 export struct HealthTestResult {
     name: string,
@@ -15,6 +15,12 @@ export struct HealthTestResult {
     m2-pass: bool,
     m3-pass: bool,
     m4-pass: bool,
+}
+
+export struct SwarmParamData {
+    name: string,
+    type-name: string,
+    writable: bool,
 }
 
 component MenuItem inherits Rectangle {
@@ -88,6 +94,7 @@ component MenuBar inherits Rectangle {
     callback upload-geometry-clicked();
     callback upload-params-clicked();
     callback tuning-clicked();
+    callback set-param-clicked();
     callback health-test-clicked();
 
     in property <bool> connected;
@@ -260,7 +267,7 @@ component MenuBar inherits Rectangle {
 
         Rectangle {
             width: 180px;
-            height: 137px;
+            height: 169px;
             background: Palette.background;
             border-width: 1px;
             border-color: Palette.border;
@@ -280,6 +287,11 @@ component MenuBar inherits Rectangle {
                 MenuItem {
                     text: "Upload Params";
                     clicked => { setup-popup.close(); upload-params-clicked(); }
+                }
+                MenuItem {
+                    text: "Set Parameter...";
+                    enabled: root.connected;
+                    clicked => { setup-popup.close(); set-param-clicked(); }
                 }
                 MenuItem {
                     text: "Tuning...";
@@ -622,6 +634,21 @@ export component AppWindow inherits Window {
     in-out property <string> tuning-prop-test-pwm-ratio;
     callback set-tuning-params(string, string, string, string, string);
 
+    // Set swarm parameter
+    in-out property <bool> set-param-dialog-visible: false;
+    in-out property <[SwarmParamData]> swarm-params;       // filtered list shown in the picker
+    in-out property <[SwarmParamData]> swarm-params-all;   // full intersection across connected units
+    in-out property <int> set-param-unit-count;            // number of connected units
+    in-out property <bool> set-param-loading;
+    in-out property <string> set-param-search-text;
+    in-out property <string> set-param-value-text;
+    in-out property <string> set-param-selected-name;
+    in-out property <string> set-param-selected-type;
+    callback refresh-swarm-params();
+    callback filter-swarm-params(/* search */ string);
+    pure callback validate-param-value(/* type */ string, /* value */ string) -> string;
+    callback set-swarm-param(/* name */ string, /* value */ string);
+
     // Confirmation dialog
     private property <bool> confirm-power-off-visible: false;
     private property <bool> tuning-dialog-visible: false;
@@ -825,13 +852,10 @@ export component AppWindow inherits Window {
     in-out property <bool> planning-show-coverage-3 <=> planning-content.show-coverage-3;
     in-out property <bool> planning-show-coverage-4 <=> planning-content.show-coverage-4;
     in-out property <string> planning-max-range <=> planning-content.max-range;
-    in-out property <bool> planning-flight-area-enabled <=> planning-content.flight-area-enabled;
-    in-out property <string> planning-flight-area-min-x <=> planning-content.flight-area-min-x;
-    in-out property <string> planning-flight-area-min-y <=> planning-content.flight-area-min-y;
-    in-out property <string> planning-flight-area-min-z <=> planning-content.flight-area-min-z;
-    in-out property <string> planning-flight-area-max-x <=> planning-content.flight-area-max-x;
-    in-out property <string> planning-flight-area-max-y <=> planning-content.flight-area-max-y;
-    in-out property <string> planning-flight-area-max-z <=> planning-content.flight-area-max-z;
+    in-out property <[PlanBoxVolumeData]> planning-flight-areas;
+    in-out property <[PlanBoxVolumeData]> planning-waypoint-areas;
+    in-out property <int> planning-selected-area-kind <=> planning-content.selected-area-kind;
+    in-out property <int> planning-selected-area-index <=> planning-content.selected-area-index;
     in-out property <[PlanPadData]> planning-takeoff-pads <=> planning-content.takeoff-pads;
     in-out property <float> planning-tdoa3-scale-min <=> planning-content.tdoa3-scale-min;
     in-out property <float> planning-tdoa3-scale-max <=> planning-content.tdoa3-scale-max;
@@ -878,6 +902,14 @@ export component AppWindow inherits Window {
     callback planning-remove-obstacle(int);
     callback planning-duplicate-obstacle(int);
     callback planning-update-obstacle(int, PlanObstacleData);
+    callback planning-add-flight-area();
+    callback planning-remove-flight-area(int);
+    callback planning-update-flight-area(int, PlanBoxVolumeData);
+    callback planning-select-flight-area(int);
+    callback planning-add-waypoint-area();
+    callback planning-remove-waypoint-area(int);
+    callback planning-update-waypoint-area(int, PlanBoxVolumeData);
+    callback planning-select-waypoint-area(int);
     callback planning-undo();
     callback planning-recompute();
     callback planning-view-mouse-pressed(float, float);
@@ -911,6 +943,17 @@ export component AppWindow inherits Window {
             upload-geometry-clicked => { upload-geometry(); }
             upload-params-clicked => { upload-params(); }
             tuning-clicked => { tuning-dialog-visible = true; }
+            set-param-clicked => {
+                set-param-selected-name = "";
+                set-param-selected-type = "";
+                set-param-search-text = "";
+                set-param-value-text = "";
+                swarm-params = [];
+                swarm-params-all = [];
+                set-param-loading = true;
+                set-param-dialog-visible = true;
+                refresh-swarm-params();
+            }
             health-test-clicked => {
                 health-test-dialog-visible = true;
                 run-health-test();
@@ -1071,6 +1114,8 @@ export component AppWindow inherits Window {
                     base-stations <=> root.planning-base-stations;
                     anchors <=> root.planning-anchors;
                     obstacles <=> root.planning-obstacles;
+                    flight-areas <=> root.planning-flight-areas;
+                    waypoint-areas <=> root.planning-waypoint-areas;
                     selected-type <=> root.planning-selected-type;
                     selected-index <=> root.planning-selected-index;
                     handle-active <=> root.planning-handle-active;
@@ -1097,6 +1142,14 @@ export component AppWindow inherits Window {
                     remove-obstacle(idx) => { root.planning-remove-obstacle(idx); }
                     duplicate-obstacle(idx) => { root.planning-duplicate-obstacle(idx); }
                     update-obstacle(idx, data) => { root.planning-update-obstacle(idx, data); }
+                    add-flight-area => { root.planning-add-flight-area(); }
+                    remove-flight-area(idx) => { root.planning-remove-flight-area(idx); }
+                    update-flight-area(idx, data) => { root.planning-update-flight-area(idx, data); }
+                    select-flight-area(idx) => { root.planning-select-flight-area(idx); }
+                    add-waypoint-area => { root.planning-add-waypoint-area(); }
+                    remove-waypoint-area(idx) => { root.planning-remove-waypoint-area(idx); }
+                    update-waypoint-area(idx, data) => { root.planning-update-waypoint-area(idx, data); }
+                    select-waypoint-area(idx) => { root.planning-select-waypoint-area(idx); }
                     undo => { root.planning-undo(); }
                     recompute => { root.planning-recompute(); }
                     error-metric-changed(idx) => { root.planning-error-metric-changed(idx); }
@@ -1251,6 +1304,163 @@ export component AppWindow inherits Window {
                                 tuning-prop-test-pwm-ratio-input.text,
                             );
                             tuning-dialog-visible = false;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Set swarm parameter dialog
+    if set-param-dialog-visible: Rectangle {
+        width: 100%;
+        height: 100%;
+        background: black.transparentize(0.5);
+
+        TouchArea {
+            clicked => { set-param-dialog-visible = false; }
+        }
+
+        Rectangle {
+            width: 480px;
+            height: 560px;
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            background: Palette.background;
+            border-radius: 8px;
+            border-width: 1px;
+            border-color: Palette.border;
+
+            TouchArea {}
+
+            VerticalLayout {
+                padding: 24px;
+                spacing: 12px;
+
+                Text {
+                    text: "Set Swarm Parameter";
+                    font-size: 16px;
+                    font-weight: 600;
+                }
+
+                Text {
+                    text: root.set-param-loading
+                        ? "Reading parameter tables…"
+                        : root.set-param-unit-count == 0
+                            ? "No connected units — connect the swarm first."
+                            : "Will be set on " + root.set-param-unit-count + " connected unit(s). Only parameters present in every unit are listed.";
+                    font-size: 12px;
+                    color: Palette.foreground.transparentize(0.3);
+                    wrap: word-wrap;
+                }
+
+                search-input := LineEdit {
+                    placeholder-text: "Search parameter…";
+                    enabled: root.set-param-unit-count > 0;
+                    text <=> root.set-param-search-text;
+                    edited => { filter-swarm-params(self.text); }
+                }
+
+                // Parameter list
+                Rectangle {
+                    vertical-stretch: 1;
+                    border-radius: 4px;
+                    border-width: 1px;
+                    border-color: Palette.border;
+                    background: Palette.alternate-background;
+
+                    ScrollView {
+                        VerticalLayout {
+                            padding: 2px;
+                            spacing: 1px;
+
+                            for param in root.swarm-params: Rectangle {
+                                height: 26px;
+                                border-radius: 3px;
+                                background: param.name == root.set-param-selected-name
+                                    ? Palette.accent-background
+                                    : row-touch.has-hover ? Palette.background : transparent;
+
+                                HorizontalLayout {
+                                    padding-left: 8px;
+                                    padding-right: 8px;
+                                    spacing: 8px;
+
+                                    Text {
+                                        text: param.name;
+                                        font-size: 12px;
+                                        vertical-alignment: center;
+                                        horizontal-stretch: 1;
+                                        overflow: elide;
+                                    }
+
+                                    Text {
+                                        text: param.type-name;
+                                        font-size: 11px;
+                                        color: Palette.foreground.transparentize(0.4);
+                                        vertical-alignment: center;
+                                    }
+                                }
+
+                                row-touch := TouchArea {
+                                    clicked => {
+                                        root.set-param-selected-name = param.name;
+                                        root.set-param-selected-type = param.type-name;
+                                    }
+                                    mouse-cursor: pointer;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                Text {
+                    text: root.set-param-selected-name == ""
+                        ? "No parameter selected"
+                        : root.set-param-selected-name + "  (" + root.set-param-selected-type + ")";
+                    font-size: 13px;
+                    font-weight: 600;
+                    overflow: elide;
+                }
+
+                HorizontalLayout {
+                    spacing: 8px;
+                    Text { text: "Value"; vertical-alignment: center; width: 60px; }
+                    value-input := LineEdit {
+                        placeholder-text: "Enter value…";
+                        enabled: root.set-param-selected-name != "";
+                        text <=> root.set-param-value-text;
+                        horizontal-stretch: 1;
+                    }
+                }
+
+                Text {
+                    // Live type-validation feedback (empty when valid or nothing entered)
+                    text: (root.set-param-selected-name == "" || root.set-param-value-text == "")
+                        ? ""
+                        : root.validate-param-value(root.set-param-selected-type, root.set-param-value-text);
+                    font-size: 11px;
+                    color: red;
+                    wrap: word-wrap;
+                }
+
+                HorizontalLayout {
+                    alignment: end;
+                    spacing: 8px;
+
+                    Button {
+                        text: "Cancel";
+                        clicked => { set-param-dialog-visible = false; }
+                    }
+
+                    Button {
+                        text: "Set on Swarm";
+                        enabled: root.set-param-selected-name != ""
+                            && root.set-param-value-text != ""
+                            && root.validate-param-value(root.set-param-selected-type, root.set-param-value-text) == "";
+                        clicked => {
+                            set-swarm-param(root.set-param-selected-name, root.set-param-value-text);
+                            set-param-dialog-visible = false;
                         }
                     }
                 }
