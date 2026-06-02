@@ -79,6 +79,47 @@ fn load_swarm_config(path: &std::path::Path) -> Result<SwarmConfig, String> {
         .map_err(|e| format!("Failed to parse swarm config {:?}: {}", path, e))
 }
 
+/// A single entry in a persistent parameter state file.
+#[derive(Deserialize)]
+struct PersistentParamEntry {
+    #[serde(default)]
+    is_stored: bool,
+    stored_value: Option<serde_yaml::Value>,
+}
+
+/// Format produced by the persistent parameter dump (`type: persistent_param_state`).
+#[derive(Deserialize)]
+struct PersistentParamState {
+    params: std::collections::BTreeMap<String, PersistentParamEntry>,
+}
+
+/// Load a persistent parameter file and return the list of `(name, value)` pairs
+/// that have a stored value to upload.
+fn load_persistent_params(path: &std::path::Path) -> Result<Vec<(String, f64)>, String> {
+    let contents = std::fs::read_to_string(path)
+        .map_err(|e| format!("Failed to read params file {:?}: {}", path, e))?;
+    let state: PersistentParamState = serde_yaml::from_str(&contents)
+        .map_err(|e| format!("Failed to parse params file {:?}: {}", path, e))?;
+
+    let mut params: Vec<(String, f64)> = Vec::new();
+    for (name, entry) in state.params {
+        if !entry.is_stored {
+            continue;
+        }
+        let Some(value) = entry.stored_value.as_ref() else { continue };
+        let num = match value {
+            serde_yaml::Value::Number(n) => n.as_f64(),
+            serde_yaml::Value::Bool(b) => Some(if *b { 1.0 } else { 0.0 }),
+            _ => None,
+        };
+        match num {
+            Some(v) => params.push((name, v)),
+            None => eprintln!("Skipping param {} with non-numeric stored value", name),
+        }
+    }
+    Ok(params)
+}
+
 /// Ensure a radio URI has a default `timeout` query parameter.
 /// If the URI already contains a `timeout` parameter, it is left unchanged.
 /// Otherwise, `timeout=2000` (2 seconds) is appended.
@@ -1818,6 +1859,58 @@ async fn main() {
                         eprintln!("Unit {}: disarm failed: {:?}", idx, e);
                     }
                 }
+            });
+        });
+    }
+
+    // Arm all connected units (Swarm menu)
+    {
+        let swarm_state = swarm_state.clone();
+        ui.on_arm_swarm(move || {
+            let swarm_state = swarm_state.clone();
+
+            tokio::spawn(async move {
+                let connected_units: Vec<(usize, Arc<crazyflie_lib::Crazyflie>)> = {
+                    let state = swarm_state.lock().await;
+                    state.iter().map(|(idx, cu)| (*idx, cu.cf.clone())).collect()
+                };
+
+                eprintln!("Arming {} units...", connected_units.len());
+                let mut join_set = tokio::task::JoinSet::new();
+                for (idx, cf) in connected_units {
+                    join_set.spawn(async move {
+                        if let Err(e) = cf.platform.send_arming_request(true).await {
+                            eprintln!("Unit {}: arm failed: {:?}", idx, e);
+                        }
+                    });
+                }
+                while join_set.join_next().await.is_some() {}
+            });
+        });
+    }
+
+    // Disarm all connected units (Swarm menu)
+    {
+        let swarm_state = swarm_state.clone();
+        ui.on_disarm_swarm(move || {
+            let swarm_state = swarm_state.clone();
+
+            tokio::spawn(async move {
+                let connected_units: Vec<(usize, Arc<crazyflie_lib::Crazyflie>)> = {
+                    let state = swarm_state.lock().await;
+                    state.iter().map(|(idx, cu)| (*idx, cu.cf.clone())).collect()
+                };
+
+                eprintln!("Disarming {} units...", connected_units.len());
+                let mut join_set = tokio::task::JoinSet::new();
+                for (idx, cf) in connected_units {
+                    join_set.spawn(async move {
+                        if let Err(e) = cf.platform.send_arming_request(false).await {
+                            eprintln!("Unit {}: disarm failed: {:?}", idx, e);
+                        }
+                    });
+                }
+                while join_set.join_next().await.is_some() {}
             });
         });
     }
@@ -4975,6 +5068,176 @@ async fn main() {
                 while join_set.join_next().await.is_some() {}
 
                 eprintln!("All tuning params set, closing dialog");
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+                let ui_weak_inner = ui_weak.clone();
+                slint::invoke_from_event_loop(move || {
+                    if let Some(ui) = ui_weak_inner.upgrade() {
+                        ui.set_progress_dialog_visible(false);
+                    }
+                }).ok();
+            });
+        });
+    }
+
+    // Upload persistent parameters from a file to all units
+    {
+        let swarm_state = swarm_state.clone();
+        let link_context = link_context.clone();
+        let toc_cache = toc_cache.clone();
+        let ui_weak = ui.as_weak();
+        ui.on_upload_params(move || {
+            // Collect unit URIs and names from the UI
+            let Some(ui_ref) = ui_weak.upgrade() else { return };
+            let units = ui_ref.get_units();
+            let unit_count = units.row_count();
+            let mut unit_info: Vec<(String, String)> = Vec::new();
+            for i in 0..unit_count {
+                if let Some(unit) = units.row_data(i) {
+                    unit_info.push((unit.uri.to_string(), unit.name.to_string()));
+                }
+            }
+
+            let swarm_state = swarm_state.clone();
+            let link_context = link_context.clone();
+            let toc_cache = toc_cache.clone();
+            let ui_weak = ui_weak.clone();
+
+            tokio::spawn(async move {
+                // Open file dialog
+                let Some(handle) = rfd::AsyncFileDialog::new()
+                    .add_filter("YAML", &["yaml", "yml"])
+                    .pick_file()
+                    .await
+                else { return };
+                let path = handle.path().to_path_buf();
+
+                // Parse the persistent parameter file
+                let params = match load_persistent_params(&path) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        eprintln!("Failed to load params file: {}", e);
+                        return;
+                    }
+                };
+                if params.is_empty() {
+                    eprintln!("No stored parameters found in {:?}", path);
+                    return;
+                }
+                eprintln!("Loaded {} stored params from {:?}", params.len(), path);
+                let params = Arc::new(params);
+
+                let total = unit_info.len();
+                if total == 0 {
+                    eprintln!("No units configured for parameter upload");
+                    return;
+                }
+
+                // Show progress dialog
+                let ui_weak_inner = ui_weak.clone();
+                slint::invoke_from_event_loop(move || {
+                    if let Some(ui) = ui_weak_inner.upgrade() {
+                        ui.set_progress_dialog_title("Uploading Parameters".into());
+                        ui.set_progress_dialog_progress(0.0);
+                        ui.set_progress_dialog_status("Starting...".into());
+                        ui.set_progress_dialog_visible(true);
+                    }
+                }).ok();
+
+                // Check if units are already connected
+                let connected_units: HashMap<usize, Arc<crazyflie_lib::Crazyflie>> = {
+                    let state = swarm_state.lock().await;
+                    state.iter().map(|(idx, cu)| (*idx, cu.cf.clone())).collect()
+                };
+                let swarm_connected = !connected_units.is_empty();
+                eprintln!("Param upload: {} units, swarm connected: {}", total, swarm_connected);
+
+                let completed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+                let mut join_set = tokio::task::JoinSet::new();
+                for (idx, (uri, name)) in unit_info.into_iter().enumerate() {
+                    let ui_weak = ui_weak.clone();
+                    let completed = completed.clone();
+                    let existing_cf = connected_units.get(&idx).cloned();
+                    let link_context = link_context.clone();
+                    let toc_cache = toc_cache.clone();
+                    let params = params.clone();
+
+                    join_set.spawn(async move {
+                        // Use existing connection or connect temporarily
+                        let (cf, temp_connection) = if let Some(cf) = existing_cf {
+                            eprintln!("Param upload {}: using existing connection", name);
+                            (cf, false)
+                        } else {
+                            eprintln!("Param upload {}: connecting to {}...", name, uri);
+                            match tokio::time::timeout(
+                                std::time::Duration::from_secs(30),
+                                crazyflie_lib::Crazyflie::connect_from_uri(link_context.as_ref(), &uri, toc_cache),
+                            ).await {
+                                Ok(Ok(cf)) => (Arc::new(cf), true),
+                                Ok(Err(e)) => {
+                                    eprintln!("Param upload {}: connect FAILED: {:?}", name, e);
+                                    let done = completed.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                                    let progress = done as f32 / total as f32;
+                                    let status: slint::SharedString = format!("{} failed ({}/{})", name, done, total).into();
+                                    let ui_weak_inner = ui_weak.clone();
+                                    slint::invoke_from_event_loop(move || {
+                                        if let Some(ui) = ui_weak_inner.upgrade() {
+                                            ui.set_progress_dialog_progress(progress);
+                                            ui.set_progress_dialog_status(status);
+                                        }
+                                    }).ok();
+                                    return;
+                                }
+                                Err(_) => {
+                                    eprintln!("Param upload {}: connect timed out", name);
+                                    let done = completed.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                                    let progress = done as f32 / total as f32;
+                                    let status: slint::SharedString = format!("{} timed out ({}/{})", name, done, total).into();
+                                    let ui_weak_inner = ui_weak.clone();
+                                    slint::invoke_from_event_loop(move || {
+                                        if let Some(ui) = ui_weak_inner.upgrade() {
+                                            ui.set_progress_dialog_progress(progress);
+                                            ui.set_progress_dialog_status(status);
+                                        }
+                                    }).ok();
+                                    return;
+                                }
+                            }
+                        };
+
+                        for (param_name, value) in params.iter() {
+                            match cf.param.set_lossy(param_name, *value).await {
+                                Ok(()) => eprintln!("  {} {} = {} OK", name, param_name, value),
+                                Err(e) => eprintln!("  {} {} set FAILED: {:?}", name, param_name, e),
+                            }
+                            match cf.param.persistent_store(param_name).await {
+                                Ok(()) => eprintln!("  {} {} stored OK", name, param_name),
+                                Err(e) => eprintln!("  {} {} persistent_store FAILED: {:?}", name, param_name, e),
+                            }
+                        }
+
+                        if temp_connection {
+                            cf.disconnect().await;
+                            eprintln!("Param upload {}: disconnected", name);
+                        }
+
+                        let done = completed.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                        let progress = done as f32 / total as f32;
+                        let status: slint::SharedString = format!("Done ({}/{})", done, total).into();
+                        let ui_weak_inner = ui_weak.clone();
+                        slint::invoke_from_event_loop(move || {
+                            if let Some(ui) = ui_weak_inner.upgrade() {
+                                ui.set_progress_dialog_progress(progress);
+                                ui.set_progress_dialog_status(status);
+                            }
+                        }).ok();
+                    });
+                }
+
+                while join_set.join_next().await.is_some() {}
+
+                eprintln!("All params uploaded, closing dialog");
                 tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
                 let ui_weak_inner = ui_weak.clone();

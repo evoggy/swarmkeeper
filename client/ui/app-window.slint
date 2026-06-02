@@ -20,6 +20,10 @@ export struct HealthTestResult {
 component MenuBar inherits Rectangle {
     callback exit-clicked();
     callback open-swarm-clicked();
+    callback arm-all-clicked();
+    callback disarm-all-clicked();
+
+    in property <bool> connected;
 
     height: 30px;
 
@@ -42,6 +46,83 @@ component MenuBar inherits Rectangle {
             TouchArea {
                 clicked => { file-popup.show(); }
                 mouse-cursor: pointer;
+            }
+        }
+
+        Rectangle {
+            width: 60px;
+            height: parent.height;
+
+            Text {
+                text: "Swarm";
+                font-size: 13px;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+
+            TouchArea {
+                clicked => { swarm-popup.show(); }
+                mouse-cursor: pointer;
+            }
+        }
+    }
+
+    swarm-popup := PopupWindow {
+        x: 60px;
+        y: root.height;
+        width: 140px;
+
+        Rectangle {
+            width: 140px;
+            height: 64px;
+            background: Palette.background;
+            border-width: 1px;
+            border-color: Palette.border;
+
+            VerticalLayout {
+                Rectangle {
+                    height: 32px;
+                    background: (root.connected && arm-touch.has-hover) ? Palette.accent-background : transparent;
+
+                    Text {
+                        text: "Arm All";
+                        font-size: 13px;
+                        color: root.connected ? Palette.foreground : Palette.foreground.with-alpha(0.4);
+                        vertical-alignment: center;
+                        x: 16px;
+                    }
+
+                    arm-touch := TouchArea {
+                        enabled: root.connected;
+                        clicked => {
+                            swarm-popup.close();
+                            arm-all-clicked();
+                        }
+                        mouse-cursor: root.connected ? pointer : default;
+                    }
+                }
+
+                Rectangle {
+                    height: 32px;
+                    background: (root.connected && disarm-touch.has-hover) ? Palette.accent-background : transparent;
+
+                    Text {
+                        text: "Disarm All";
+                        font-size: 13px;
+                        color: root.connected ? Palette.foreground : Palette.foreground.with-alpha(0.4);
+                        vertical-alignment: center;
+                        x: 16px;
+                    }
+
+                    disarm-touch := TouchArea {
+                        enabled: root.connected;
+                        clicked => {
+                            swarm-popup.close();
+                            disarm-all-clicked();
+                        }
+                        mouse-cursor: root.connected ? pointer : default;
+                    }
+                }
             }
         }
     }
@@ -128,6 +209,7 @@ component SwarmInfoBar inherits Rectangle {
     callback sysoff-swarm-clicked();
     callback syson-swarm-clicked();
     callback tuning-clicked();
+    callback upload-params-clicked();
     callback health-test-clicked();
     callback sync-blink-clicked();
     callback delayed-sync-blink-clicked();
@@ -323,6 +405,11 @@ component SwarmInfoBar inherits Rectangle {
         }
 
         Button {
+            text: "Upload Params";
+            clicked => { upload-params-clicked(); }
+        }
+
+        Button {
             text: "Reboot";
             clicked => { reboot-swarm-clicked(); }
         }
@@ -446,11 +533,14 @@ export component AppWindow inherits Window {
 
     callback exit-requested();
     callback open-swarm-requested();
+    callback arm-swarm();
+    callback disarm-swarm();
     callback connect-swarm();
     callback disconnect-swarm();
     callback reconnect-swarm();
     callback download-toc();
     callback upload-geometry();
+    callback upload-params();
     callback upload-trajectory-swarm();
     callback fly-trajectory-swarm();
     callback land-swarm();
@@ -766,8 +856,11 @@ export component AppWindow inherits Window {
         spacing: 0px;
 
         MenuBar {
+            connected: root.swarm-connected;
             exit-clicked => { exit-requested(); }
             open-swarm-clicked => { open-swarm-requested(); }
+            arm-all-clicked => { arm-swarm(); }
+            disarm-all-clicked => { disarm-swarm(); }
         }
 
         SwarmInfoBar {
@@ -795,6 +888,7 @@ export component AppWindow inherits Window {
             sysoff-swarm-clicked => { sysoff-swarm(); }
             syson-swarm-clicked => { syson-swarm(); }
             tuning-clicked => { tuning-dialog-visible = true; }
+            upload-params-clicked => { upload-params(); }
             health-test-clicked => {
                 health-test-dialog-visible = true;
                 run-health-test();
