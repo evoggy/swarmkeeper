@@ -159,6 +159,7 @@ fn apply_swarm_config(ui: &AppWindow, config: &SwarmConfig) {
             supervisor_info: 0,
             supervisor_state: "".into(),
             journal_entry_count: 0,
+            console_line_count: 0,
             platform_type: "".into(),
             firmware_version: "".into(),
             link_quality: 0.0,
@@ -651,6 +652,34 @@ async fn send_bootloader_command(
     Ok(())
 }
 
+/// Clear the persistent TLV/KVE storage on a connected Crazyflie by writing a
+/// freshly-formatted empty KVE table (0x01, 0xFF, 0xFF) at the partition start
+/// (EEPROM offset 1024 / 0x0400). The radio config block (0x0000-0x0014) is left
+/// untouched, so no checksum recompute is needed. The firmware sees a valid,
+/// empty store on the next boot. Mirrors `scripts/erase-tlv.sh` /
+/// `cfcli mem write EEPROMConfig --offset 1024 --data 1,255,255`.
+/// Power-cycle the unit afterwards so storage-backed subsystems re-read it.
+async fn clear_tlv_storage(
+    cf: &crazyflie_lib::Crazyflie,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    use crazyflie_lib::subsystems::memory::{MemoryType, RawMemory};
+    const KVE_PARTITION_START: usize = 1024; // 0x0400, fixed offset in the EEPROM
+    const EMPTY_KVE: [u8; 3] = [0x01, 0xFF, 0xFF];
+
+    let memories = cf.memory.get_memories(Some(MemoryType::EEPROMConfig));
+    if memories.len() != 1 {
+        return Err(format!("expected 1 EEPROMConfig memory, found {}", memories.len()).into());
+    }
+    let raw = match cf.memory.open_memory::<RawMemory>(memories[0].clone()).await {
+        Some(Ok(m)) => m,
+        Some(Err(e)) => return Err(format!("could not open EEPROM as raw memory: {}", e).into()),
+        None => return Err("EEPROM memory not found".into()),
+    };
+    let result = raw.write(KVE_PARTITION_START, &EMPTY_KVE).await;
+    cf.memory.close_memory(raw).await.ok();
+    result.map_err(|e| format!("EEPROM write failed: {}", e).into())
+}
+
 // Lighthouse geometry YAML file format (compatible with crazyflie-lib-python)
 #[derive(Deserialize)]
 struct LighthouseConfigFile {
@@ -774,6 +803,40 @@ fn save_journal(store: &JournalStore) {
     }
 }
 
+/// Console history captured for every unit, keyed by CPU serial so it survives
+/// reconnects and app restarts (persisted to disk, like the journal). Each unit
+/// keeps at most [`CONSOLE_MAX_LINES`] lines; older lines are dropped.
+type ConsoleStore = HashMap<String, Vec<String>>;
+type SharedConsoleStore = Arc<Mutex<ConsoleStore>>;
+
+/// Maximum number of console lines retained per unit. Console output is
+/// high-rate, so this caps both memory use and the on-disk file size.
+const CONSOLE_MAX_LINES: usize = 5000;
+
+fn console_path() -> std::path::PathBuf {
+    std::path::PathBuf::from("journals/console.yaml")
+}
+
+fn load_console() -> ConsoleStore {
+    let path = console_path();
+    if path.exists() {
+        let contents = std::fs::read_to_string(&path).unwrap_or_default();
+        serde_yaml::from_str(&contents).unwrap_or_default()
+    } else {
+        HashMap::new()
+    }
+}
+
+fn save_console(store: &ConsoleStore) {
+    let path = console_path();
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).ok();
+    }
+    if let Ok(yaml) = serde_yaml::to_string(store) {
+        std::fs::write(&path, yaml).ok();
+    }
+}
+
 #[tokio::main]
 async fn main() {
     slint::BackendSelector::new()
@@ -852,6 +915,7 @@ async fn main() {
     let positioning_source: Arc<Mutex<Option<usize>>> = Arc::new(Mutex::new(None));
     let positioning_data: SharedPositioningData = Arc::new(Mutex::new(PositioningData::default()));
     let journal_store: SharedJournalStore = Arc::new(Mutex::new(load_journal()));
+    let console_store: SharedConsoleStore = Arc::new(Mutex::new(load_console()));
 
     // Visualizer scene overlay (loaded scene's flight area + pads + obstacles)
     #[derive(Default)]
@@ -897,6 +961,7 @@ async fn main() {
         let positioning_source = positioning_source.clone();
         let positioning_data = positioning_data.clone();
         let journal_store = journal_store.clone();
+        let console_store = console_store.clone();
         ui.on_connect_swarm(move || {
             let Some(ui_ref) = ui_weak.upgrade() else { return };
             let units = ui_ref.get_units();
@@ -913,6 +978,7 @@ async fn main() {
                 let positioning_source = positioning_source.clone();
                 let positioning_data = positioning_data.clone();
                 let journal_store = journal_store.clone();
+                let console_store = console_store.clone();
 
                 tokio::spawn(async move {
                     eprintln!("Connecting to {} ...", uri);
@@ -970,6 +1036,19 @@ async fn main() {
                         store.get(&serial).map_or(0, |entries| entries.len()) as i32
                     };
 
+                    let console_count = {
+                        let store = console_store.lock().await;
+                        store.get(&serial).map_or(0, |lines| lines.len()) as i32
+                    };
+
+                    start_console_capture(
+                        serial.clone(),
+                        i,
+                        cf.clone(),
+                        ui_weak.clone(),
+                        console_store.clone(),
+                    );
+
                     update_unit(&ui_weak, i, move |u| {
                         u.state = UnitState::Connected;
                         u.deck_lighthouse = deck_lighthouse != 0;
@@ -979,6 +1058,7 @@ async fn main() {
                         u.serial = serial.into();
                         u.selftest_passed = selftest_passed != 0;
                         u.journal_entry_count = journal_count;
+                        u.console_line_count = console_count;
                     });
 
                     // Update swarm-connected flag
@@ -1073,6 +1153,7 @@ async fn main() {
         let positioning_source = positioning_source.clone();
         let positioning_data = positioning_data.clone();
         let journal_store = journal_store.clone();
+        let console_store = console_store.clone();
 
         ui.on_reconnect_swarm(move || {
             let Some(ui_ref) = ui_weak.upgrade() else { return };
@@ -1093,6 +1174,7 @@ async fn main() {
                 let positioning_source = positioning_source.clone();
                 let positioning_data = positioning_data.clone();
                 let journal_store = journal_store.clone();
+                let console_store = console_store.clone();
 
                 tokio::spawn(async move {
                     eprintln!("Reconnecting to {} ...", uri);
@@ -1145,6 +1227,19 @@ async fn main() {
                         store.get(&serial).map_or(0, |entries| entries.len()) as i32
                     };
 
+                    let console_count = {
+                        let store = console_store.lock().await;
+                        store.get(&serial).map_or(0, |lines| lines.len()) as i32
+                    };
+
+                    start_console_capture(
+                        serial.clone(),
+                        i,
+                        cf.clone(),
+                        ui_weak.clone(),
+                        console_store.clone(),
+                    );
+
                     update_unit(&ui_weak, i, move |u| {
                         u.state = UnitState::Connected;
                         u.deck_lighthouse = deck_lighthouse != 0;
@@ -1154,6 +1249,7 @@ async fn main() {
                         u.serial = serial.into();
                         u.selftest_passed = selftest_passed != 0;
                         u.journal_entry_count = journal_count;
+                        u.console_line_count = console_count;
                     });
 
                     // Auto-select as positioning source if none selected
@@ -2728,6 +2824,143 @@ async fn main() {
         });
     }
 
+    // Open console for selected unit (loads captured lines into the dialog)
+    {
+        let console_store = console_store.clone();
+        let ui_weak = ui.as_weak();
+
+        ui.on_open_console(move |row_index| {
+            if row_index < 0 {
+                return;
+            }
+
+            let serial = {
+                let Some(ui) = ui_weak.upgrade() else { return };
+                let units = ui.get_units();
+                let col = ui.get_sort_column();
+                let ascending = ui.get_sort_ascending();
+                let indices = sort_unit_indices(&units, col, ascending);
+                let row = row_index as usize;
+                if row >= indices.len() {
+                    return;
+                }
+                let original = indices[row];
+                match units.row_data(original) {
+                    Some(u) => u.serial.to_string(),
+                    None => return,
+                }
+            };
+
+            let console_store = console_store.clone();
+            let ui_weak = ui_weak.clone();
+
+            tokio::spawn(async move {
+                let lines = {
+                    let store = console_store.lock().await;
+                    store.get(&serial).cloned().unwrap_or_default()
+                };
+
+                let slint_lines: Vec<slint::SharedString> =
+                    lines.iter().map(|l| l.clone().into()).collect();
+
+                slint::invoke_from_event_loop(move || {
+                    if let Some(ui) = ui_weak.upgrade() {
+                        ui.set_console_lines(slint::ModelRc::new(slint::VecModel::from(slint_lines)));
+                    }
+                }).ok();
+            });
+        });
+    }
+
+    // Clear console for selected unit
+    {
+        let console_store = console_store.clone();
+        let ui_weak = ui.as_weak();
+
+        ui.on_clear_console(move |row_index| {
+            if row_index < 0 {
+                return;
+            }
+
+            let (serial, original_index) = {
+                let Some(ui) = ui_weak.upgrade() else { return };
+                let units = ui.get_units();
+                let col = ui.get_sort_column();
+                let ascending = ui.get_sort_ascending();
+                let indices = sort_unit_indices(&units, col, ascending);
+                let row = row_index as usize;
+                if row >= indices.len() {
+                    return;
+                }
+                let original = indices[row];
+                match units.row_data(original) {
+                    Some(u) => (u.serial.to_string(), original),
+                    None => return,
+                }
+            };
+
+            if serial.is_empty() {
+                return;
+            }
+
+            let console_store = console_store.clone();
+            let ui_weak = ui_weak.clone();
+
+            tokio::spawn(async move {
+                {
+                    let mut store = console_store.lock().await;
+                    store.remove(&serial);
+                    save_console(&store);
+                }
+
+                let ui_weak_count = ui_weak.clone();
+                update_unit(&ui_weak_count, original_index, move |u| {
+                    u.console_line_count = 0;
+                });
+
+                slint::invoke_from_event_loop(move || {
+                    if let Some(ui) = ui_weak.upgrade() {
+                        ui.set_console_lines(slint::ModelRc::new(slint::VecModel::from(Vec::<slint::SharedString>::new())));
+                    }
+                }).ok();
+            });
+        });
+    }
+
+    // Clear console for the whole swarm
+    {
+        let console_store = console_store.clone();
+        let ui_weak = ui.as_weak();
+
+        ui.on_clear_all_console(move || {
+            let console_store = console_store.clone();
+            let ui_weak = ui_weak.clone();
+
+            tokio::spawn(async move {
+                {
+                    let mut store = console_store.lock().await;
+                    store.clear();
+                    save_console(&store);
+                }
+
+                slint::invoke_from_event_loop(move || {
+                    if let Some(ui) = ui_weak.upgrade() {
+                        // Reset every unit's console line count.
+                        let units = ui.get_units();
+                        for i in 0..units.row_count() {
+                            if let Some(mut u) = units.row_data(i) {
+                                u.console_line_count = 0;
+                                units.set_row_data(i, u);
+                            }
+                        }
+                        ui.set_console_lines(slint::ModelRc::new(slint::VecModel::from(Vec::<slint::SharedString>::new())));
+                        rebuild_table_rows(&ui);
+                    }
+                }).ok();
+            });
+        });
+    }
+
     // Upload trajectory
     {
         let swarm_state = swarm_state.clone();
@@ -3602,6 +3835,7 @@ async fn main() {
         let positioning_source = positioning_source.clone();
         let positioning_data = positioning_data.clone();
         let journal_store = journal_store.clone();
+        let console_store = console_store.clone();
 
         ui.on_connect_unit(move |row_index| {
             if row_index < 0 {
@@ -3635,6 +3869,7 @@ async fn main() {
             let positioning_source = positioning_source.clone();
             let positioning_data = positioning_data.clone();
             let journal_store = journal_store.clone();
+            let console_store = console_store.clone();
 
             tokio::spawn(async move {
                 eprintln!("Connecting to {} ...", uri);
@@ -3687,6 +3922,19 @@ async fn main() {
                     store.get(&serial).map_or(0, |entries| entries.len()) as i32
                 };
 
+                let console_count = {
+                    let store = console_store.lock().await;
+                    store.get(&serial).map_or(0, |lines| lines.len()) as i32
+                };
+
+                start_console_capture(
+                    serial.clone(),
+                    original_index,
+                    cf.clone(),
+                    ui_weak.clone(),
+                    console_store.clone(),
+                );
+
                 update_unit(&ui_weak, original_index, move |u| {
                     u.state = UnitState::Connected;
                     u.deck_lighthouse = deck_lighthouse != 0;
@@ -3696,6 +3944,7 @@ async fn main() {
                     u.serial = serial.into();
                     u.selftest_passed = selftest_passed != 0;
                     u.journal_entry_count = journal_count;
+                    u.console_line_count = console_count;
                 });
 
                 let ui_weak_inner = ui_weak.clone();
@@ -4197,6 +4446,90 @@ async fn main() {
                     u.platform_type = "".into(); u.firmware_version = "".into();
                     u.journal_entry_count = 0;
                 });
+            });
+        });
+    }
+
+    // Clear TLV (persistent storage) on a single unit
+    {
+        let link_context = link_context.clone();
+        let swarm_state = swarm_state.clone();
+        let toc_cache = toc_cache.clone();
+        let ui_weak = ui.as_weak();
+        ui.on_clear_tlv_unit(move |row_index| {
+            if row_index < 0 { return; }
+
+            let (original_index, uri, name) = {
+                let Some(ui) = ui_weak.upgrade() else { return };
+                let units = ui.get_units();
+                let col = ui.get_sort_column();
+                let ascending = ui.get_sort_ascending();
+                let indices = sort_unit_indices(&units, col, ascending);
+                let row = row_index as usize;
+                if row >= indices.len() { return; }
+                let idx = indices[row];
+                let Some(unit) = units.row_data(idx) else { return };
+                (idx, unit.uri.to_string(), unit.name.to_string())
+            };
+
+            let link_context = link_context.clone();
+            let swarm_state = swarm_state.clone();
+            let toc_cache = toc_cache.clone();
+            let ui_weak = ui_weak.clone();
+
+            tokio::spawn(async move {
+                // Reuse the existing connection if the unit is connected, else
+                // connect temporarily for the duration of the operation.
+                let existing_cf = {
+                    let state = swarm_state.lock().await;
+                    state.get(&original_index).map(|cu| cu.cf.clone())
+                };
+
+                let (cf, temp_connection) = if let Some(cf) = existing_cf {
+                    eprintln!("Clear TLV {}: using existing connection", name);
+                    (cf, false)
+                } else {
+                    eprintln!("Clear TLV {}: connecting to {}...", name, uri);
+                    match tokio::time::timeout(
+                        std::time::Duration::from_secs(30),
+                        crazyflie_lib::Crazyflie::connect_from_uri(link_context.as_ref(), &uri, toc_cache),
+                    ).await {
+                        Ok(Ok(cf)) => (Arc::new(cf), true),
+                        Ok(Err(e)) => {
+                            eprintln!("Clear TLV {}: connect FAILED: {:?}", name, e);
+                            let msg = format!("Clear TLV connect failed: {}", e);
+                            update_unit(&ui_weak, original_index, move |u| {
+                                u.state = UnitState::Error;
+                                u.error_message = msg.into();
+                            });
+                            return;
+                        }
+                        Err(_) => {
+                            eprintln!("Clear TLV {}: connect timed out", name);
+                            update_unit(&ui_weak, original_index, move |u| {
+                                u.state = UnitState::Error;
+                                u.error_message = "Clear TLV connection timed out".into();
+                            });
+                            return;
+                        }
+                    }
+                };
+
+                match clear_tlv_storage(&cf).await {
+                    Ok(()) => eprintln!("Clear TLV {}: OK (power-cycle to apply)", name),
+                    Err(e) => {
+                        eprintln!("Clear TLV {}: FAILED: {}", name, e);
+                        let msg = format!("Clear TLV failed: {}", e);
+                        update_unit(&ui_weak, original_index, move |u| {
+                            u.error_message = msg.into();
+                        });
+                    }
+                }
+
+                if temp_connection {
+                    cf.disconnect().await;
+                    eprintln!("Clear TLV {}: disconnected", name);
+                }
             });
         });
     }
@@ -5780,6 +6113,154 @@ async fn main() {
 
                 eprintln!("All params uploaded, closing dialog");
                 tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+                let ui_weak_inner = ui_weak.clone();
+                slint::invoke_from_event_loop(move || {
+                    if let Some(ui) = ui_weak_inner.upgrade() {
+                        ui.set_progress_dialog_visible(false);
+                    }
+                }).ok();
+            });
+        });
+    }
+
+    // Clear TLV (persistent storage) across the whole swarm
+    {
+        let swarm_state = swarm_state.clone();
+        let link_context = link_context.clone();
+        let toc_cache = toc_cache.clone();
+        let ui_weak = ui.as_weak();
+        ui.on_clear_tlv(move || {
+            // Collect (index, uri, name) for every configured unit.
+            let Some(ui_ref) = ui_weak.upgrade() else { return };
+            let units = ui_ref.get_units();
+            let unit_count = units.row_count();
+            let mut unit_info: Vec<(usize, String, String)> = Vec::new();
+            for i in 0..unit_count {
+                if let Some(unit) = units.row_data(i) {
+                    unit_info.push((i, unit.uri.to_string(), unit.name.to_string()));
+                }
+            }
+
+            let swarm_state = swarm_state.clone();
+            let link_context = link_context.clone();
+            let toc_cache = toc_cache.clone();
+            let ui_weak = ui_weak.clone();
+
+            tokio::spawn(async move {
+                let total = unit_info.len();
+                if total == 0 {
+                    eprintln!("No units configured for clear TLV");
+                    return;
+                }
+
+                // Show progress dialog (shared with TOC/params)
+                let ui_weak_inner = ui_weak.clone();
+                slint::invoke_from_event_loop(move || {
+                    if let Some(ui) = ui_weak_inner.upgrade() {
+                        ui.set_progress_dialog_title("Clearing TLV".into());
+                        ui.set_progress_dialog_progress(0.0);
+                        ui.set_progress_dialog_status("Starting...".into());
+                        ui.set_progress_dialog_visible(true);
+                    }
+                }).ok();
+
+                // Reuse existing connections where present, connect temporarily otherwise.
+                let connected_units: HashMap<usize, Arc<crazyflie_lib::Crazyflie>> = {
+                    let state = swarm_state.lock().await;
+                    state.iter().map(|(idx, cu)| (*idx, cu.cf.clone())).collect()
+                };
+                let swarm_connected = !connected_units.is_empty();
+                eprintln!("Clear TLV: {} units, swarm connected: {}", total, swarm_connected);
+
+                let completed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+                let mut join_set = tokio::task::JoinSet::new();
+                for (idx, uri, name) in unit_info.into_iter() {
+                    let ui_weak = ui_weak.clone();
+                    let completed = completed.clone();
+                    let existing_cf = connected_units.get(&idx).cloned();
+                    let link_context = link_context.clone();
+                    let toc_cache = toc_cache.clone();
+
+                    join_set.spawn(async move {
+                        // mem write uses the normal shared-radio connection (not
+                        // cfloader), so concurrent access across the swarm is safe.
+                        let (cf, temp_connection) = if let Some(cf) = existing_cf {
+                            (cf, false)
+                        } else {
+                            match tokio::time::timeout(
+                                std::time::Duration::from_secs(30),
+                                crazyflie_lib::Crazyflie::connect_from_uri(link_context.as_ref(), &uri, toc_cache),
+                            ).await {
+                                Ok(Ok(cf)) => (Arc::new(cf), true),
+                                Ok(Err(e)) => {
+                                    eprintln!("Clear TLV {}: connect FAILED: {:?}", name, e);
+                                    let done = completed.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                                    let progress = done as f32 / total as f32;
+                                    let status: slint::SharedString = format!("{} failed ({}/{})", name, done, total).into();
+                                    let ui_weak_inner = ui_weak.clone();
+                                    slint::invoke_from_event_loop(move || {
+                                        if let Some(ui) = ui_weak_inner.upgrade() {
+                                            ui.set_progress_dialog_progress(progress);
+                                            ui.set_progress_dialog_status(status);
+                                        }
+                                    }).ok();
+                                    return;
+                                }
+                                Err(_) => {
+                                    eprintln!("Clear TLV {}: connect timed out", name);
+                                    let done = completed.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                                    let progress = done as f32 / total as f32;
+                                    let status: slint::SharedString = format!("{} timed out ({}/{})", name, done, total).into();
+                                    let ui_weak_inner = ui_weak.clone();
+                                    slint::invoke_from_event_loop(move || {
+                                        if let Some(ui) = ui_weak_inner.upgrade() {
+                                            ui.set_progress_dialog_progress(progress);
+                                            ui.set_progress_dialog_status(status);
+                                        }
+                                    }).ok();
+                                    return;
+                                }
+                            }
+                        };
+
+                        let ok = match clear_tlv_storage(&cf).await {
+                            Ok(()) => { eprintln!("Clear TLV {}: OK", name); true }
+                            Err(e) => { eprintln!("Clear TLV {}: FAILED: {}", name, e); false }
+                        };
+
+                        if temp_connection {
+                            cf.disconnect().await;
+                        }
+
+                        let done = completed.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                        let progress = done as f32 / total as f32;
+                        let status: slint::SharedString = if ok {
+                            format!("Cleared {} ({}/{})", name, done, total).into()
+                        } else {
+                            format!("{} failed ({}/{})", name, done, total).into()
+                        };
+                        let ui_weak_inner = ui_weak.clone();
+                        slint::invoke_from_event_loop(move || {
+                            if let Some(ui) = ui_weak_inner.upgrade() {
+                                ui.set_progress_dialog_progress(progress);
+                                ui.set_progress_dialog_status(status);
+                            }
+                        }).ok();
+                    });
+                }
+
+                while join_set.join_next().await.is_some() {}
+
+                eprintln!("Clear TLV complete");
+                let ui_weak_inner = ui_weak.clone();
+                slint::invoke_from_event_loop(move || {
+                    if let Some(ui) = ui_weak_inner.upgrade() {
+                        ui.set_progress_dialog_status("Done — power-cycle units to apply".into());
+                    }
+                }).ok();
+                tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
 
                 let ui_weak_inner = ui_weak.clone();
                 slint::invoke_from_event_loop(move || {
@@ -9626,6 +10107,61 @@ async fn run_radio_channel_test(
             ui.set_radio_test_results(slint::ModelRc::new(slint::VecModel::from(results)));
         }
     }).ok();
+}
+
+/// Spawn a background task that continuously captures the console output of a
+/// connected unit into the persistent [`ConsoleStore`], keyed by `serial`. The
+/// `line_stream` first replays the firmware's console history since connection
+/// (so the boot banner is captured) and then yields live lines. The task ends
+/// when the connection drops and the stream closes.
+fn start_console_capture(
+    serial: String,
+    index: usize,
+    cf: Arc<crazyflie_lib::Crazyflie>,
+    ui_weak: slint::Weak<AppWindow>,
+    console_store: SharedConsoleStore,
+) {
+    if serial.is_empty() {
+        return;
+    }
+    tokio::spawn(async move {
+        use futures::StreamExt;
+        let mut stream = cf.console.line_stream().await;
+        // Save to disk periodically rather than per line, since console output
+        // can be bursty/high-rate.
+        let mut lines_since_save = 0u32;
+
+        while let Some(line) = stream.next().await {
+            let new_count = {
+                let mut store = console_store.lock().await;
+                let entry = store.entry(serial.clone()).or_default();
+                entry.push(line);
+                // Enforce the per-unit cap, dropping the oldest lines.
+                if entry.len() > CONSOLE_MAX_LINES {
+                    let overflow = entry.len() - CONSOLE_MAX_LINES;
+                    entry.drain(0..overflow);
+                }
+                let count = entry.len() as i32;
+
+                lines_since_save += 1;
+                if lines_since_save >= 50 {
+                    save_console(&store);
+                    lines_since_save = 0;
+                }
+                count
+            };
+
+            update_unit(&ui_weak, index, move |u| {
+                u.console_line_count = new_count;
+            });
+        }
+
+        // Stream closed (connection lost) — flush any unsaved lines.
+        if lines_since_save > 0 {
+            let store = console_store.lock().await;
+            save_console(&store);
+        }
+    });
 }
 
 async fn start_telemetry(

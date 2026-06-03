@@ -90,9 +90,11 @@ component MenuBar inherits Rectangle {
     callback sysoff-swarm-clicked();
     callback syson-swarm-clicked();
     callback power-off-swarm-clicked();
+    callback clear-all-console-clicked();
     callback download-toc-clicked();
     callback upload-geometry-clicked();
     callback upload-params-clicked();
+    callback clear-tlv-clicked();
     callback tuning-clicked();
     callback set-param-clicked();
     callback health-test-clicked();
@@ -234,7 +236,7 @@ component MenuBar inherits Rectangle {
 
         Rectangle {
             width: 180px;
-            height: 202px;
+            height: 243px;
             background: Palette.background;
             border-width: 1px;
             border-color: Palette.border;
@@ -262,6 +264,11 @@ component MenuBar inherits Rectangle {
                     text: "Power Off...";
                     clicked => { system-popup.close(); power-off-swarm-clicked(); }
                 }
+                MenuSeparator {}
+                MenuItem {
+                    text: "Clear All Console";
+                    clicked => { system-popup.close(); clear-all-console-clicked(); }
+                }
             }
         }
     }
@@ -273,7 +280,7 @@ component MenuBar inherits Rectangle {
 
         Rectangle {
             width: 180px;
-            height: 169px;
+            height: 201px;
             background: Palette.background;
             border-width: 1px;
             border-color: Palette.border;
@@ -293,6 +300,10 @@ component MenuBar inherits Rectangle {
                 MenuItem {
                     text: "Upload Params";
                     clicked => { setup-popup.close(); upload-params-clicked(); }
+                }
+                MenuItem {
+                    text: "Clear TLV...";
+                    clicked => { setup-popup.close(); clear-tlv-clicked(); }
                 }
                 MenuItem {
                     text: "Set Parameter...";
@@ -541,6 +552,7 @@ export component AppWindow inherits Window {
     in-out property <bool> sort-ascending: true;
     in-out property <image> viz-texture;
     in-out property <[JournalEntryData]> journal-entries;
+    in-out property <[string]> console-lines;
     out property <float> viz-width: viz-content.viewport-width;
     out property <float> viz-height: viz-content.viewport-height;
     out property <float> cam-yaw: viz-content.cam-yaw;
@@ -593,6 +605,7 @@ export component AppWindow inherits Window {
     callback download-toc();
     callback upload-geometry();
     callback upload-params();
+    callback clear-tlv();
     callback upload-trajectory-swarm();
     callback fly-trajectory-swarm();
     callback land-swarm();
@@ -606,6 +619,9 @@ export component AppWindow inherits Window {
     callback sort-units(/* column */ int, /* ascending */ bool);
     callback open-journal(/* row index */ int);
     callback add-journal-entry(/* row index */ int, /* text */ string);
+    callback open-console(/* row index */ int);
+    callback clear-console(/* row index */ int);
+    callback clear-all-console();
     callback upload-trajectory(/* row index */ int);
     callback fly-trajectory(/* row index */ int);
     callback clear-trajectory(/* row index */ int);
@@ -631,6 +647,7 @@ export component AppWindow inherits Window {
     callback power-off-unit(/* row index */ int);
     callback sysoff-unit(/* row index */ int);
     callback syson-unit(/* row index */ int);
+    callback clear-tlv-unit(/* row index */ int);
 
     // Tuning parameters
     in-out property <string> tuning-thrust-base;
@@ -668,6 +685,7 @@ export component AppWindow inherits Window {
 
     // Confirmation dialog
     private property <bool> confirm-power-off-visible: false;
+    private property <bool> confirm-clear-tlv-visible: false;
     private property <bool> tuning-dialog-visible: false;
 
     // Radio test
@@ -956,9 +974,11 @@ export component AppWindow inherits Window {
             sysoff-swarm-clicked => { sysoff-swarm(); }
             syson-swarm-clicked => { syson-swarm(); }
             power-off-swarm-clicked => { confirm-power-off-visible = true; }
+            clear-all-console-clicked => { clear-all-console(); }
             download-toc-clicked => { download-toc(); }
             upload-geometry-clicked => { upload-geometry(); }
             upload-params-clicked => { upload-params(); }
+            clear-tlv-clicked => { confirm-clear-tlv-visible = true; }
             tuning-clicked => { tuning-dialog-visible = true; }
             set-param-clicked => {
                 set-param-selected-name = "";
@@ -1006,12 +1026,15 @@ export component AppWindow inherits Window {
                     sort-column: root.sort-column;
                     sort-ascending: root.sort-ascending;
                     journal-entries: root.journal-entries;
+                    console-lines: root.console-lines;
                     goto-x-text <=> root.unit-goto-x-text;
                     goto-y-text <=> root.unit-goto-y-text;
                     goto-z-text <=> root.unit-goto-z-text;
                     sort-requested(col, ascending) => { sort-units(col, ascending); }
                     open-journal-requested(row) => { open-journal(row); }
                     add-journal-entry-requested(row, text) => { add-journal-entry(row, text); }
+                    open-console-requested(row) => { open-console(row); }
+                    clear-console-requested(row) => { clear-console(row); }
                     upload-trajectory-requested(row) => { upload-trajectory(row); }
                     fly-trajectory-requested(row) => { fly-trajectory(row); }
                     clear-trajectory-requested(row) => { clear-trajectory(row); }
@@ -1040,6 +1063,7 @@ export component AppWindow inherits Window {
                     power-off-requested(row) => { power-off-unit(row); }
                     sysoff-requested(row) => { sysoff-unit(row); }
                     syson-requested(row) => { syson-unit(row); }
+                    clear-tlv-requested(row) => { clear-tlv-unit(row); }
                 }
             }
             Tab {
@@ -1085,6 +1109,8 @@ export component AppWindow inherits Window {
                     viz-unit-clicked(x, y) => { root.viz-unit-clicked(x, y); }
                     open-journal-requested(row) => { open-journal(row); }
                     add-journal-entry-requested(row, text) => { add-journal-entry(row, text); }
+                    open-console-requested(row) => { open-console(row); }
+                    clear-console-requested(row) => { clear-console(row); }
                     upload-trajectory-requested(row) => { upload-trajectory(row); }
                     fly-trajectory-requested(row) => { fly-trajectory(row); }
                     clear-trajectory-requested(row) => { clear-trajectory(row); }
@@ -1106,6 +1132,7 @@ export component AppWindow inherits Window {
                     power-off-requested(row) => { power-off-unit(row); }
                     sysoff-requested(row) => { sysoff-unit(row); }
                     syson-requested(row) => { syson-unit(row); }
+                    clear-tlv-requested(row) => { clear-tlv-unit(row); }
                 }
             }
             Tab {
@@ -1233,6 +1260,68 @@ export component AppWindow inherits Window {
                         clicked => {
                             power-off-swarm();
                             confirm-power-off-visible = false;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Clear TLV (whole swarm) confirmation dialog
+    if confirm-clear-tlv-visible: Rectangle {
+        width: 100%;
+        height: 100%;
+        background: black.transparentize(0.5);
+
+        TouchArea {
+            clicked => { confirm-clear-tlv-visible = false; }
+        }
+
+        Rectangle {
+            width: 380px;
+            height: 180px;
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            background: Palette.background;
+            border-radius: 8px;
+            border-width: 1px;
+            border-color: Palette.border;
+
+            TouchArea {
+                // Block clicks from closing the dialog
+            }
+
+            VerticalLayout {
+                padding: 24px;
+                spacing: 16px;
+
+                Text {
+                    text: "Clear persistent TLV storage on all " + root.units.length + " units?";
+                    font-size: 15px;
+                    font-weight: 600;
+                }
+
+                Text {
+                    text: "Wipes persistent params and Lighthouse geometry/calibration on every unit. Radio config is preserved. Power-cycle afterward.";
+                    font-size: 12px;
+                    color: Palette.foreground.transparentize(0.3);
+                    wrap: word-wrap;
+                }
+
+                HorizontalLayout {
+                    alignment: end;
+                    spacing: 8px;
+
+                    Button {
+                        text: "Cancel";
+                        clicked => { confirm-clear-tlv-visible = false; }
+                    }
+
+                    Button {
+                        text: "Clear TLV";
+                        clicked => {
+                            clear-tlv();
+                            confirm-clear-tlv-visible = false;
                         }
                     }
                 }

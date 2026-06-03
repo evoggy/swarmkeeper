@@ -50,6 +50,7 @@ export component VisualizationContent inherits Rectangle {
     in property <[UnitData]> sorted-units;
     in-out property <int> selected-unit: -1;
     in property <[JournalEntryData]> journal-entries;
+    in property <[string]> console-lines;
     in property <[string]> joystick-names;
     in property <float> stick-lx;
     in property <float> stick-ly;
@@ -67,6 +68,8 @@ export component VisualizationContent inherits Rectangle {
     // same shared AppWindow callbacks the Units tab uses.
     callback open-journal-requested(/* row index */ int);
     callback add-journal-entry-requested(/* row index */ int, /* text */ string);
+    callback open-console-requested(/* row index */ int);
+    callback clear-console-requested(/* row index */ int);
     callback upload-trajectory-requested(/* row index */ int);
     callback fly-trajectory-requested(/* row index */ int);
     callback clear-trajectory-requested(/* row index */ int);
@@ -88,10 +91,13 @@ export component VisualizationContent inherits Rectangle {
     callback power-off-requested(/* row index */ int);
     callback sysoff-requested(/* row index */ int);
     callback syson-requested(/* row index */ int);
+    callback clear-tlv-requested(/* row index */ int);
 
     private property <bool> journal-open: false;
+    private property <bool> console-open: false;
     private property <bool> manual-control-open: false;
     private property <bool> confirm-power-off-open: false;
+    private property <bool> confirm-clear-tlv-open: false;
     private property <length> sidebar-width: 360px;
 
     Image {
@@ -362,6 +368,8 @@ export component VisualizationContent inherits Rectangle {
             goto-z-text <=> root.goto-z-text;
             journal-clicked => { open-journal-requested(selected-unit); journal-open = true; }
             add-journal-entry(text) => { add-journal-entry-requested(selected-unit, text); }
+            console-clicked => { open-console-requested(selected-unit); console-open = true; }
+            clear-console-clicked => { clear-console-requested(selected-unit); }
             upload-trajectory-clicked => { upload-trajectory-requested(selected-unit); }
             fly-trajectory-clicked => { fly-trajectory-requested(selected-unit); }
             clear-trajectory-clicked => { clear-trajectory-requested(selected-unit); }
@@ -379,6 +387,7 @@ export component VisualizationContent inherits Rectangle {
             power-off-clicked => { confirm-power-off-open = true; }
             sysoff-clicked => { sysoff-requested(selected-unit); }
             syson-clicked => { syson-requested(selected-unit); }
+            clear-tlv-clicked => { confirm-clear-tlv-open = true; }
             close-clicked => { root.selected-unit = -1; }
         }
     }
@@ -388,6 +397,7 @@ export component VisualizationContent inherits Rectangle {
         selected-row: root.selected-unit;
         sorted-units: root.sorted-units;
         journal-entries: root.journal-entries;
+        console-lines: root.console-lines;
         joystick-names: root.joystick-names;
         stick-lx: root.stick-lx;
         stick-ly: root.stick-ly;
@@ -396,12 +406,16 @@ export component VisualizationContent inherits Rectangle {
         manual-control-armed: root.manual-control-armed;
         manual-control-open <=> root.manual-control-open;
         confirm-power-off-open <=> root.confirm-power-off-open;
+        confirm-clear-tlv-open <=> root.confirm-clear-tlv-open;
         journal-open <=> root.journal-open;
+        console-open <=> root.console-open;
         manual-control-stopped(row) => { root.manual-control-stopped(row); }
         joystick-selected(row, idx) => { root.joystick-selected(row, idx); }
         arm-requested(row, arm) => { root.arm-requested(row, arm); }
         power-off-requested(row) => { root.power-off-requested(row); }
+        clear-tlv-requested(row) => { root.clear-tlv-requested(row); }
         add-journal-entry-requested(row, text) => { root.add-journal-entry-requested(row, text); }
         delete-journal-entry-requested(row, entry) => { root.delete-journal-entry-requested(row, entry); }
+        clear-console-requested(row) => { root.clear-console-requested(row); }
     }
 }

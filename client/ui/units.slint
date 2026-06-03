@@ -348,6 +348,8 @@ export component UnitSidebar inherits Rectangle {
     callback close-clicked();
     callback journal-clicked();
     callback add-journal-entry(string);
+    callback console-clicked();
+    callback clear-console-clicked();
     callback upload-trajectory-clicked();
     callback fly-trajectory-clicked();
     callback clear-trajectory-clicked();
@@ -365,6 +367,7 @@ export component UnitSidebar inherits Rectangle {
     callback power-off-clicked();
     callback sysoff-clicked();
     callback syson-clicked();
+    callback clear-tlv-clicked();
 
     // Collapsible info section state (Status expanded by default)
     property <bool> status-expanded: true;
@@ -789,6 +792,17 @@ export component UnitSidebar inherits Rectangle {
                         text: unit.journal-entry-count > 0 ? "Journal (\{unit.journal-entry-count})" : "Journal";
                         clicked => { journal-clicked(); }
                     }
+
+                    Button {
+                        text: unit.console-line-count > 0 ? "Console (\{unit.console-line-count})" : "Console";
+                        clicked => { console-clicked(); }
+                    }
+
+                    Button {
+                        text: "Clear Console";
+                        enabled: unit.console-line-count > 0;
+                        clicked => { clear-console-clicked(); }
+                    }
                 }
 
                 // Power & System
@@ -819,6 +833,11 @@ export component UnitSidebar inherits Rectangle {
                         text: "Power Off";
                         clicked => { power-off-clicked(); }
                     }
+
+                    Button {
+                        text: "Clear TLV";
+                        clicked => { clear-tlv-clicked(); }
+                    }
                 }
             }
             }
@@ -832,6 +851,7 @@ export component UnitActionPopups inherits Rectangle {
     in property <int> selected-row: -1;
     in property <[UnitData]> sorted-units;
     in property <[JournalEntryData]> journal-entries;
+    in property <[string]> console-lines;
     in property <[string]> joystick-names;
     in property <float> stick-lx;
     in property <float> stick-ly;
@@ -841,14 +861,18 @@ export component UnitActionPopups inherits Rectangle {
 
     in-out property <bool> manual-control-open: false;
     in-out property <bool> confirm-power-off-open: false;
+    in-out property <bool> confirm-clear-tlv-open: false;
     in-out property <bool> journal-open: false;
+    in-out property <bool> console-open: false;
 
     callback manual-control-stopped(/* row index */ int);
     callback joystick-selected(/* row index */ int, /* joystick index */ int);
     callback arm-requested(/* row index */ int, /* arm */ bool);
     callback power-off-requested(/* row index */ int);
+    callback clear-tlv-requested(/* row index */ int);
     callback add-journal-entry-requested(/* row index */ int, /* text */ string);
     callback delete-journal-entry-requested(/* row index */ int, /* entry index */ int);
+    callback clear-console-requested(/* row index */ int);
 
     // Manual control popup overlay
     if manual-control-open: Rectangle {
@@ -1041,6 +1065,65 @@ export component UnitActionPopups inherits Rectangle {
         }
     }
 
+    // Clear TLV confirm overlay
+    if confirm-clear-tlv-open: Rectangle {
+        background: #00000080;
+
+        TouchArea {
+            clicked => { confirm-clear-tlv-open = false; }
+        }
+
+        Rectangle {
+            width: 360px;
+            background: Palette.background;
+            border-radius: 8px;
+            border-width: 1px;
+            border-color: Palette.border;
+
+            TouchArea {
+                // Block clicks from closing the dialog
+            }
+
+            VerticalLayout {
+                padding: 24px;
+                spacing: 16px;
+
+                Text {
+                    text: selected-row >= 0 && selected-row < sorted-units.length
+                        ? "Clear persistent TLV storage on " + sorted-units[selected-row].name + "?"
+                        : "Clear persistent TLV storage on this unit?";
+                    font-size: 15px;
+                    font-weight: 600;
+                }
+
+                Text {
+                    text: "Wipes persistent params and Lighthouse geometry/calibration. Radio config is preserved. Power-cycle afterward.";
+                    font-size: 12px;
+                    color: Palette.foreground.transparentize(0.3);
+                    wrap: word-wrap;
+                }
+
+                HorizontalLayout {
+                    alignment: end;
+                    spacing: 8px;
+
+                    Button {
+                        text: "Cancel";
+                        clicked => { confirm-clear-tlv-open = false; }
+                    }
+
+                    Button {
+                        text: "Clear TLV";
+                        clicked => {
+                            clear-tlv-requested(selected-row);
+                            confirm-clear-tlv-open = false;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     // Journal popup overlay
     if journal-open: Rectangle {
         background: #00000080;
@@ -1181,6 +1264,112 @@ export component UnitActionPopups inherits Rectangle {
             }
         }
     }
+
+    // Console popup overlay (read-only captured console output)
+    if console-open: Rectangle {
+        TouchArea {
+            // Dim background; click outside closes
+            clicked => { console-open = false; }
+        }
+
+        Rectangle {
+            width: min(640px, root.width - 40px);
+            max-height: root.height - 40px;
+            background: Palette.background;
+            border-radius: 8px;
+            border-width: 1px;
+            border-color: Palette.border;
+
+            TouchArea {
+                // Block clicks from closing the popup
+            }
+
+            VerticalLayout {
+                spacing: 0px;
+
+                // Header
+                Rectangle {
+                    height: 44px;
+
+                    HorizontalLayout {
+                        padding-left: 16px;
+                        padding-right: 8px;
+                        spacing: 8px;
+
+                        Text {
+                            text: selected-row >= 0 && selected-row < sorted-units.length
+                                ? "Console — " + sorted-units[selected-row].name
+                                : "Console";
+                            font-size: 15px;
+                            font-weight: 700;
+                            vertical-alignment: center;
+                            horizontal-stretch: 1;
+                        }
+
+                        Button {
+                            text: "Clear";
+                            height: 28px;
+                            enabled: console-lines.length > 0;
+                            clicked => { clear-console-requested(selected-row); }
+                        }
+
+                        Button {
+                            text: "✕";
+                            height: 28px;
+                            width: 28px;
+                            clicked => { console-open = false; }
+                        }
+                    }
+                }
+
+                Rectangle {
+                    height: 1px;
+                    background: Palette.border;
+                }
+
+                // Console lines
+                ScrollView {
+                    min-height: 200px;
+                    VerticalLayout {
+                        alignment: start;
+                        padding: 12px;
+                        spacing: 0px;
+
+                        if console-lines.length == 0: Text {
+                            text: "No console output captured yet.";
+                            font-size: 12px;
+                            color: Palette.foreground.transparentize(0.5);
+                            horizontal-alignment: center;
+                        }
+
+                        for line in console-lines: Text {
+                            text: line;
+                            font-size: 12px;
+                            font-family: "monospace";
+                            wrap: no-wrap;
+                        }
+                    }
+                }
+
+                Rectangle {
+                    height: 1px;
+                    background: Palette.border;
+                }
+
+                // Footer
+                Rectangle {
+                    height: 28px;
+                    Text {
+                        text: "Showing up to 5000 most recent lines · captured continuously";
+                        font-size: 10px;
+                        color: Palette.foreground.transparentize(0.5);
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+        }
+    }
 }
 
 export component UnitsContent inherits Rectangle {
@@ -1190,6 +1379,7 @@ export component UnitsContent inherits Rectangle {
     in property <int> sort-column: -1;
     in property <bool> sort-ascending: true;
     in property <[JournalEntryData]> journal-entries;
+    in property <[string]> console-lines;
     in-out property <string> goto-x-text: "0";
     in-out property <string> goto-y-text: "0";
     in-out property <string> goto-z-text: "0";
@@ -1197,6 +1387,8 @@ export component UnitsContent inherits Rectangle {
     callback sort-requested(/* column */ int, /* ascending */ bool);
     callback open-journal-requested(/* row index */ int);
     callback add-journal-entry-requested(/* row index */ int, /* text */ string);
+    callback open-console-requested(/* row index */ int);
+    callback clear-console-requested(/* row index */ int);
     callback upload-trajectory-requested(/* row index */ int);
     callback fly-trajectory-requested(/* row index */ int);
     callback clear-trajectory-requested(/* row index */ int);
@@ -1219,6 +1411,7 @@ export component UnitsContent inherits Rectangle {
     callback power-off-requested(/* row index */ int);
     callback sysoff-requested(/* row index */ int);
     callback syson-requested(/* row index */ int);
+    callback clear-tlv-requested(/* row index */ int);
 
     in property <[string]> joystick-names;
     in property <float> stick-lx;
@@ -1230,8 +1423,10 @@ export component UnitsContent inherits Rectangle {
     private property <int> selected-row: -1;
     private property <bool> sidebar-open: false;
     private property <bool> journal-open: false;
+    private property <bool> console-open: false;
     private property <bool> manual-control-open: false;
     private property <bool> confirm-power-off-open: false;
+    private property <bool> confirm-clear-tlv-open: false;
     private property <length> sidebar-width: 360px;
 
     // Column widths (shared between header and data rows for alignment)
@@ -1391,6 +1586,13 @@ export component UnitsContent inherits Rectangle {
             add-journal-entry(text) => {
                 add-journal-entry-requested(selected-row, text);
             }
+            console-clicked => {
+                open-console-requested(selected-row);
+                console-open = true;
+            }
+            clear-console-clicked => {
+                clear-console-requested(selected-row);
+            }
             upload-trajectory-clicked => { upload-trajectory-requested(selected-row); }
             fly-trajectory-clicked => { fly-trajectory-requested(selected-row); }
             clear-trajectory-clicked => { clear-trajectory-requested(selected-row); }
@@ -1411,6 +1613,7 @@ export component UnitsContent inherits Rectangle {
             power-off-clicked => { confirm-power-off-open = true; }
             sysoff-clicked => { sysoff-requested(selected-row); }
             syson-clicked => { syson-requested(selected-row); }
+            clear-tlv-clicked => { confirm-clear-tlv-open = true; }
             close-clicked => {
                 sidebar-open = false;
                 selected-row = -1;
@@ -1423,6 +1626,7 @@ export component UnitsContent inherits Rectangle {
         selected-row: root.selected-row;
         sorted-units: root.sorted-units;
         journal-entries: root.journal-entries;
+        console-lines: root.console-lines;
         joystick-names: root.joystick-names;
         stick-lx: root.stick-lx;
         stick-ly: root.stick-ly;
@@ -1431,12 +1635,16 @@ export component UnitsContent inherits Rectangle {
         manual-control-armed: root.manual-control-armed;
         manual-control-open <=> root.manual-control-open;
         confirm-power-off-open <=> root.confirm-power-off-open;
+        confirm-clear-tlv-open <=> root.confirm-clear-tlv-open;
         journal-open <=> root.journal-open;
+        console-open <=> root.console-open;
         manual-control-stopped(row) => { root.manual-control-stopped(row); }
         joystick-selected(row, idx) => { root.joystick-selected(row, idx); }
         arm-requested(row, arm) => { root.arm-requested(row, arm); }
         power-off-requested(row) => { root.power-off-requested(row); }
+        clear-tlv-requested(row) => { root.clear-tlv-requested(row); }
         add-journal-entry-requested(row, text) => { root.add-journal-entry-requested(row, text); }
         delete-journal-entry-requested(row, entry) => { root.delete-journal-entry-requested(row, entry); }
+        clear-console-requested(row) => { root.clear-console-requested(row); }
     }
 }
