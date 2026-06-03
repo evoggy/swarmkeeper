@@ -1,4 +1,4 @@
-import { VerticalBox, HorizontalBox, TabWidget, Palette, Button, LineEdit, ScrollView, ComboBox } from "std-widgets.slint";
+import { VerticalBox, HorizontalBox, TabWidget, Palette, Button, LineEdit, ScrollView, ComboBox, CheckBox } from "std-widgets.slint";
 import { UnitsContent } from "units.slint";
 import { VisualizationContent, VizLabel } from "visualization.slint";
 import { UnitData, UnitState, JournalEntryData } from "unit-card.slint";
@@ -667,10 +667,11 @@ export component AppWindow inherits Window {
     in-out property <string> set-param-value-text;
     in-out property <string> set-param-selected-name;
     in-out property <string> set-param-selected-type;
+    in-out property <bool> set-param-persist: false;       // also store to flash (EEPROM) so it survives reboot
     callback refresh-swarm-params();
     callback filter-swarm-params(/* search */ string);
     pure callback validate-param-value(/* type */ string, /* value */ string) -> string;
-    callback set-swarm-param(/* name */ string, /* value */ string);
+    callback set-swarm-param(/* name */ string, /* value */ string, /* persist */ bool);
 
     // Flash firmware (bootloader)
     in-out property <bool> flash-dialog-visible: false;
@@ -985,6 +986,7 @@ export component AppWindow inherits Window {
                 set-param-selected-type = "";
                 set-param-search-text = "";
                 set-param-value-text = "";
+                set-param-persist = false;
                 swarm-params = [];
                 swarm-params-all = [];
                 set-param-loading = true;
@@ -1553,6 +1555,12 @@ export component AppWindow inherits Window {
                     wrap: word-wrap;
                 }
 
+                CheckBox {
+                    text: "Persist to flash (survives reboot)";
+                    enabled: root.set-param-selected-name != "";
+                    checked <=> root.set-param-persist;
+                }
+
                 HorizontalLayout {
                     alignment: end;
                     spacing: 8px;
@@ -1568,7 +1576,7 @@ export component AppWindow inherits Window {
                             && root.set-param-value-text != ""
                             && root.validate-param-value(root.set-param-selected-type, root.set-param-value-text) == "";
                         clicked => {
-                            set-swarm-param(root.set-param-selected-name, root.set-param-value-text);
+                            set-swarm-param(root.set-param-selected-name, root.set-param-value-text, root.set-param-persist);
                             set-param-dialog-visible = false;
                         }
                     }

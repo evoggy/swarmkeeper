@@ -5857,14 +5857,19 @@ async fn main() {
     {
         let swarm_state = swarm_state.clone();
         let ui_weak = ui.as_weak();
-        ui.on_set_swarm_param(move |name, value| {
+        ui.on_set_swarm_param(move |name, value, persist| {
             let name = name.to_string();
             let value = value.to_string();
             let swarm_state = swarm_state.clone();
             let ui_weak = ui_weak.clone();
 
             if let Some(ui) = ui_weak.upgrade() {
-                ui.set_progress_dialog_title(format!("Setting {}", name).into());
+                let title = if persist {
+                    format!("Setting {} (persist)", name)
+                } else {
+                    format!("Setting {}", name)
+                };
+                ui.set_progress_dialog_title(title.into());
                 ui.set_progress_dialog_progress(0.0);
                 ui.set_progress_dialog_status("Starting…".into());
                 ui.set_progress_dialog_visible(true);
@@ -5908,6 +5913,27 @@ async fn main() {
                                 .set(name.as_str(), parsed)
                                 .await
                                 .map_err(|e| format!("set failed: {:?}", e))?;
+                            // Optionally store to flash so the value survives reboot.
+                            // Only persistent params can be stored; skip the rest
+                            // (the live value above is still applied).
+                            if persist {
+                                match cf.param.is_persistent(&name).await {
+                                    Ok(true) => cf
+                                        .param
+                                        .persistent_store(name.as_str())
+                                        .await
+                                        .map_err(|e| format!("persist failed: {:?}", e))?,
+                                    Ok(false) => {
+                                        eprintln!(
+                                            "Persist {} on unit {}: not a persistent param, skipped",
+                                            name, idx
+                                        );
+                                    }
+                                    Err(e) => {
+                                        return Err(format!("persist check failed: {:?}", e))
+                                    }
+                                }
+                            }
                             Ok(())
                         }
                         .await;
@@ -6081,13 +6107,22 @@ async fn main() {
                         };
 
                         for (param_name, value) in params.iter() {
+                            // Apply the live value first; only persist to flash if
+                            // that succeeded and the param actually supports it.
                             match cf.param.set_lossy(param_name, *value).await {
                                 Ok(()) => eprintln!("  {} {} = {} OK", name, param_name, value),
-                                Err(e) => eprintln!("  {} {} set FAILED: {:?}", name, param_name, e),
+                                Err(e) => {
+                                    eprintln!("  {} {} set FAILED: {:?}", name, param_name, e);
+                                    continue;
+                                }
                             }
-                            match cf.param.persistent_store(param_name).await {
-                                Ok(()) => eprintln!("  {} {} stored OK", name, param_name),
-                                Err(e) => eprintln!("  {} {} persistent_store FAILED: {:?}", name, param_name, e),
+                            match cf.param.is_persistent(param_name).await {
+                                Ok(true) => match cf.param.persistent_store(param_name).await {
+                                    Ok(()) => eprintln!("  {} {} stored OK", name, param_name),
+                                    Err(e) => eprintln!("  {} {} persistent_store FAILED: {:?}", name, param_name, e),
+                                },
+                                Ok(false) => eprintln!("  {} {} not persistent, skipped store", name, param_name),
+                                Err(e) => eprintln!("  {} {} persist check FAILED: {:?}", name, param_name, e),
                             }
                         }
 
