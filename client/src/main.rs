@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use slint::{Model, StandardListViewItem};
 use tokio::sync::Mutex;
 
+mod bootloader_flash;
 mod coverage;
 mod lh_geo;
 mod lh_wizard;
@@ -170,6 +171,8 @@ fn apply_swarm_config(ui: &AppWindow, config: &SwarmConfig) {
             error_message: "".into(),
             identifying: false,
             selftest_passed: false,
+            flash_progress: 0.0,
+            flash_status: "".into(),
         })
         .collect();
 
@@ -844,6 +847,8 @@ async fn main() {
     let link_context = Arc::new(crazyflie_link::LinkContext::new());
     let toc_cache = FileTocCache::new();
     let swarm_state: SwarmState = Arc::new(Mutex::new(HashMap::new()));
+    // Firmware binary selected in the Flash Firmware dialog (path on disk).
+    let flash_binary: Arc<Mutex<Option<std::path::PathBuf>>> = Arc::new(Mutex::new(None));
     let positioning_source: Arc<Mutex<Option<usize>>> = Arc::new(Mutex::new(None));
     let positioning_data: SharedPositioningData = Arc::new(Mutex::new(PositioningData::default()));
     let journal_store: SharedJournalStore = Arc::new(Mutex::new(load_journal()));
@@ -1252,6 +1257,244 @@ async fn main() {
                 slint::invoke_from_event_loop(move || {
                     if let Some(ui) = ui_weak_inner.upgrade() {
                         ui.set_progress_dialog_visible(false);
+                    }
+                }).ok();
+            });
+        });
+    }
+
+    // Flash firmware (bootloader) dialog
+    {
+        // Populate the target dropdown with the same hardcoded list cfcli uses.
+        let target_names: Vec<slint::SharedString> = bootloader_flash::target_list()
+            .iter()
+            .map(|t| (*t).into())
+            .collect();
+        ui.set_flash_target_names(slint::ModelRc::new(slint::VecModel::from(target_names)));
+        ui.set_flash_selected_target(0);
+    }
+
+    // Select firmware binary via file picker
+    {
+        let flash_binary = flash_binary.clone();
+        let ui_weak = ui.as_weak();
+        ui.on_flash_select_binary(move || {
+            let flash_binary = flash_binary.clone();
+            let ui_weak = ui_weak.clone();
+            tokio::spawn(async move {
+                let Some(handle) = rfd::AsyncFileDialog::new()
+                    .add_filter("Firmware binary", &["bin"])
+                    .add_filter("All files", &["*"])
+                    .set_title("Select firmware binary")
+                    .pick_file()
+                    .await
+                else {
+                    return;
+                };
+
+                let path = handle.path().to_path_buf();
+                let name: slint::SharedString = path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_default()
+                    .into();
+
+                *flash_binary.lock().await = Some(path);
+
+                slint::invoke_from_event_loop(move || {
+                    if let Some(ui) = ui_weak.upgrade() {
+                        ui.set_flash_binary_name(name);
+                        ui.set_flash_binary_selected(true);
+                    }
+                }).ok();
+            });
+        });
+    }
+
+    // Flash the selected binary to the whole swarm, one unit at a time
+    {
+        let link_context = link_context.clone();
+        let toc_cache = toc_cache.clone();
+        let swarm_state = swarm_state.clone();
+        let flash_binary = flash_binary.clone();
+        let positioning_source = positioning_source.clone();
+        let ui_weak = ui.as_weak();
+
+        ui.on_flash_start(move || {
+            let Some(ui_ref) = ui_weak.upgrade() else { return };
+
+            // Resolve the chosen target name from the dropdown index.
+            let targets = bootloader_flash::target_list();
+            let target_idx = ui_ref.get_flash_selected_target().max(0) as usize;
+            let Some(target) = targets.get(target_idx).copied() else { return };
+            let target = target.to_string();
+
+            // Collect (model index, uri, name) for every unit up front.
+            let units = ui_ref.get_units();
+            let mut unit_info: Vec<(usize, String, String)> = Vec::new();
+            for i in 0..units.row_count() {
+                if let Some(unit) = units.row_data(i) {
+                    unit_info.push((i, unit.uri.to_string(), unit.name.to_string()));
+                }
+            }
+
+            ui_ref.set_flashing(true);
+            ui_ref.set_flash_overall_status("Preparing…".into());
+
+            let link_context = link_context.clone();
+            let toc_cache = toc_cache.clone();
+            let swarm_state = swarm_state.clone();
+            let flash_binary = flash_binary.clone();
+            let positioning_source = positioning_source.clone();
+            let ui_weak = ui_weak.clone();
+
+            tokio::spawn(async move {
+                // Load the firmware binary from disk.
+                let data = {
+                    let path = flash_binary.lock().await.clone();
+                    match path {
+                        Some(p) => match tokio::fs::read(&p).await {
+                            Ok(d) => d,
+                            Err(e) => {
+                                let msg: slint::SharedString =
+                                    format!("Failed to read binary: {}", e).into();
+                                let ui_weak_inner = ui_weak.clone();
+                                slint::invoke_from_event_loop(move || {
+                                    if let Some(ui) = ui_weak_inner.upgrade() {
+                                        ui.set_flash_overall_status(msg);
+                                        ui.set_flashing(false);
+                                    }
+                                }).ok();
+                                return;
+                            }
+                        },
+                        None => {
+                            let ui_weak_inner = ui_weak.clone();
+                            slint::invoke_from_event_loop(move || {
+                                if let Some(ui) = ui_weak_inner.upgrade() {
+                                    ui.set_flash_overall_status("No binary selected".into());
+                                    ui.set_flashing(false);
+                                }
+                            }).ok();
+                            return;
+                        }
+                    }
+                };
+
+                // Flashing needs exclusive radio access (and a clean state), so
+                // disconnect the whole swarm first.
+                {
+                    let mut ps = positioning_source.lock().await;
+                    *ps = None;
+                }
+                let connected: Vec<(usize, ConnectedUnit)> = {
+                    let mut state = swarm_state.lock().await;
+                    state.drain().collect()
+                };
+                for (index, unit) in connected {
+                    unit.cf.disconnect().await;
+                    update_unit(&ui_weak, index, |u| {
+                        u.state = UnitState::Disconnected;
+                    });
+                }
+                {
+                    let ui_weak_inner = ui_weak.clone();
+                    slint::invoke_from_event_loop(move || {
+                        if let Some(ui) = ui_weak_inner.upgrade() {
+                            ui.set_swarm_connected(false);
+                        }
+                    }).ok();
+                }
+                // Give the radio a moment to settle after disconnecting.
+                tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+                // Mark every unit as queued.
+                for (idx, _, _) in &unit_info {
+                    let idx = *idx;
+                    update_unit(&ui_weak, idx, |u| {
+                        u.flash_progress = 0.0;
+                        u.flash_status = "Queued".into();
+                    });
+                }
+
+                let total = unit_info.len();
+                let mut ok_count = 0usize;
+                for (n, (idx, uri, name)) in unit_info.iter().enumerate() {
+                    let idx = *idx;
+                    let overall: slint::SharedString =
+                        format!("Flashing {} ({}/{}) — {}", name, n + 1, total, target).into();
+                    {
+                        let ui_weak_inner = ui_weak.clone();
+                        slint::invoke_from_event_loop(move || {
+                            if let Some(ui) = ui_weak_inner.upgrade() {
+                                ui.set_flash_overall_status(overall);
+                            }
+                        }).ok();
+                    }
+                    update_unit(&ui_weak, idx, |u| {
+                        u.flash_progress = 0.0;
+                        u.flash_status = "Flashing…".into();
+                    });
+
+                    // Per-chunk progress callback, throttled to whole-percent steps.
+                    let ui_for_progress = ui_weak.clone();
+                    let mut last_pct: i32 = -1;
+                    let progress = move |written: usize, total_bytes: usize| {
+                        let frac = if total_bytes > 0 {
+                            written as f32 / total_bytes as f32
+                        } else {
+                            0.0
+                        };
+                        let pct = (frac * 100.0) as i32;
+                        if pct != last_pct {
+                            last_pct = pct;
+                            let status: slint::SharedString = format!("Flashing… {}%", pct).into();
+                            update_unit(&ui_for_progress, idx, move |u| {
+                                u.flash_progress = frac;
+                                u.flash_status = status;
+                            });
+                        }
+                    };
+
+                    let result = bootloader_flash::flash_target(
+                        link_context.as_ref(),
+                        uri,
+                        toc_cache.clone(),
+                        &target,
+                        &data,
+                        progress,
+                    )
+                    .await;
+
+                    match result {
+                        Ok(()) => {
+                            ok_count += 1;
+                            update_unit(&ui_weak, idx, |u| {
+                                u.flash_progress = 1.0;
+                                u.flash_status = "Done".into();
+                            });
+                        }
+                        Err(e) => {
+                            let msg: slint::SharedString = format!("Error: {}", e).into();
+                            eprintln!("Flashing {} failed: {:?}", uri, e);
+                            update_unit(&ui_weak, idx, move |u| {
+                                u.flash_status = msg;
+                            });
+                        }
+                    }
+
+                    // Let the radio fully release (cfloader closes the USB device
+                    // on a background thread) before the next unit reopens it.
+                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                }
+
+                let summary: slint::SharedString =
+                    format!("Finished: {}/{} succeeded", ok_count, total).into();
+                let ui_weak_inner = ui_weak.clone();
+                slint::invoke_from_event_loop(move || {
+                    if let Some(ui) = ui_weak_inner.upgrade() {
+                        ui.set_flash_overall_status(summary);
+                        ui.set_flashing(false);
                     }
                 }).ok();
             });

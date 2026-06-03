@@ -1,4 +1,4 @@
-import { VerticalBox, HorizontalBox, TabWidget, Palette, Button, LineEdit, ScrollView } from "std-widgets.slint";
+import { VerticalBox, HorizontalBox, TabWidget, Palette, Button, LineEdit, ScrollView, ComboBox } from "std-widgets.slint";
 import { UnitsContent } from "units.slint";
 import { VisualizationContent, VizLabel } from "visualization.slint";
 import { UnitData, UnitState, JournalEntryData } from "unit-card.slint";
@@ -96,6 +96,7 @@ component MenuBar inherits Rectangle {
     callback tuning-clicked();
     callback set-param-clicked();
     callback health-test-clicked();
+    callback flash-firmware-clicked();
 
     in property <bool> connected;
 
@@ -233,7 +234,7 @@ component MenuBar inherits Rectangle {
 
         Rectangle {
             width: 180px;
-            height: 137px;
+            height: 202px;
             background: Palette.background;
             border-width: 1px;
             border-color: Palette.border;
@@ -250,6 +251,11 @@ component MenuBar inherits Rectangle {
                 MenuItem {
                     text: "Wake Up";
                     clicked => { system-popup.close(); syson-swarm-clicked(); }
+                }
+                MenuSeparator {}
+                MenuItem {
+                    text: "Flash Firmware...";
+                    clicked => { system-popup.close(); flash-firmware-clicked(); }
                 }
                 MenuSeparator {}
                 MenuItem {
@@ -649,6 +655,17 @@ export component AppWindow inherits Window {
     pure callback validate-param-value(/* type */ string, /* value */ string) -> string;
     callback set-swarm-param(/* name */ string, /* value */ string);
 
+    // Flash firmware (bootloader)
+    in-out property <bool> flash-dialog-visible: false;
+    in-out property <[string]> flash-target-names;
+    in-out property <int> flash-selected-target: 0;
+    in-out property <string> flash-binary-name;       // basename shown to the user
+    in-out property <bool> flash-binary-selected: false;
+    in-out property <bool> flashing: false;            // a flash run is in progress
+    in-out property <string> flash-overall-status;
+    callback flash-select-binary();
+    callback flash-start();
+
     // Confirmation dialog
     private property <bool> confirm-power-off-visible: false;
     private property <bool> tuning-dialog-visible: false;
@@ -957,6 +974,9 @@ export component AppWindow inherits Window {
             health-test-clicked => {
                 health-test-dialog-visible = true;
                 run-health-test();
+            }
+            flash-firmware-clicked => {
+                flash-dialog-visible = true;
             }
         }
 
@@ -1462,6 +1482,162 @@ export component AppWindow inherits Window {
                             set-swarm-param(root.set-param-selected-name, root.set-param-value-text);
                             set-param-dialog-visible = false;
                         }
+                    }
+                }
+            }
+        }
+    }
+
+    // Flash firmware dialog
+    if flash-dialog-visible: Rectangle {
+        width: 100%;
+        height: 100%;
+        background: black.transparentize(0.5);
+
+        TouchArea {
+            clicked => { if (!root.flashing) { flash-dialog-visible = false; } }
+        }
+
+        Rectangle {
+            width: 520px;
+            height: 600px;
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            background: Palette.background;
+            border-radius: 8px;
+            border-width: 1px;
+            border-color: Palette.border;
+
+            TouchArea {}
+
+            VerticalLayout {
+                padding: 24px;
+                spacing: 12px;
+
+                Text {
+                    text: "Flash Firmware";
+                    font-size: 16px;
+                    font-weight: 600;
+                }
+
+                Text {
+                    text: "Select a target and a binary, then flash every unit in the swarm one at a time. Flashing stm32-fw / nrf51-fw disconnects the swarm and uses the radio exclusively.";
+                    font-size: 12px;
+                    color: Palette.foreground.transparentize(0.3);
+                    wrap: word-wrap;
+                }
+
+                HorizontalLayout {
+                    spacing: 8px;
+                    Text { text: "Target"; vertical-alignment: center; width: 70px; }
+                    ComboBox {
+                        model: root.flash-target-names;
+                        current-index <=> root.flash-selected-target;
+                        enabled: !root.flashing;
+                        horizontal-stretch: 1;
+                    }
+                }
+
+                HorizontalLayout {
+                    spacing: 8px;
+                    Text { text: "Binary"; vertical-alignment: center; width: 70px; }
+                    Text {
+                        text: root.flash-binary-selected ? root.flash-binary-name : "No file selected";
+                        font-size: 12px;
+                        vertical-alignment: center;
+                        horizontal-stretch: 1;
+                        overflow: elide;
+                        color: root.flash-binary-selected ? Palette.foreground : Palette.foreground.transparentize(0.4);
+                    }
+                    Button {
+                        text: "Select Binary...";
+                        enabled: !root.flashing;
+                        clicked => { flash-select-binary(); }
+                    }
+                }
+
+                // Per-Crazyflie progress list
+                Rectangle {
+                    vertical-stretch: 1;
+                    border-radius: 4px;
+                    border-width: 1px;
+                    border-color: Palette.border;
+                    background: Palette.alternate-background;
+
+                    ScrollView {
+                        VerticalLayout {
+                            padding: 4px;
+                            spacing: 3px;
+
+                            for unit in root.units: Rectangle {
+                                height: 46px;
+                                border-radius: 3px;
+                                background: Palette.background;
+
+                                VerticalLayout {
+                                    padding-left: 8px;
+                                    padding-right: 8px;
+                                    padding-top: 5px;
+                                    padding-bottom: 5px;
+                                    spacing: 4px;
+
+                                    HorizontalLayout {
+                                        spacing: 8px;
+                                        Text {
+                                            text: unit.name;
+                                            font-size: 12px;
+                                            font-weight: 600;
+                                            vertical-alignment: center;
+                                            horizontal-stretch: 1;
+                                            overflow: elide;
+                                        }
+                                        Text {
+                                            text: unit.flash-status == "" ? "Idle" : unit.flash-status;
+                                            font-size: 11px;
+                                            color: Palette.foreground.transparentize(0.3);
+                                            vertical-alignment: center;
+                                        }
+                                    }
+
+                                    Rectangle {
+                                        height: 6px;
+                                        border-radius: 3px;
+                                        background: Palette.border;
+
+                                        Rectangle {
+                                            x: 0px;
+                                            width: parent.width * unit.flash-progress;
+                                            height: parent.height;
+                                            border-radius: 3px;
+                                            background: dodgerblue;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                Text {
+                    text: root.flash-overall-status;
+                    font-size: 12px;
+                    color: Palette.foreground.transparentize(0.3);
+                    wrap: word-wrap;
+                }
+
+                HorizontalLayout {
+                    alignment: end;
+                    spacing: 8px;
+
+                    Button {
+                        text: "Close";
+                        enabled: !root.flashing;
+                        clicked => { flash-dialog-visible = false; }
+                    }
+                    Button {
+                        text: "Flash Swarm";
+                        enabled: root.flash-binary-selected && !root.flashing;
+                        clicked => { flash-start(); }
                     }
                 }
             }
