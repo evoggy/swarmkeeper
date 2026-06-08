@@ -375,6 +375,59 @@ fn update_unit(ui_weak: &slint::Weak<AppWindow>, index: usize, f: impl FnOnce(&m
     }).ok();
 }
 
+/// Human-readable name for a `loco.mode` log value.
+fn loco_mode_text(mode: u8) -> &'static str {
+    match mode {
+        0 => "Auto",
+        1 => "TWR",
+        2 => "TDoA2",
+        3 => "TDoA3",
+        _ => "Unknown",
+    }
+}
+
+/// Build the Loco anchor status list from the shared positioning data and push
+/// it to the UI (the "Loco" debug tab). Shows every anchor that has either a
+/// stored position or is currently being received, marking which are active.
+fn update_loco_anchors(ui_weak: &slint::Weak<AppWindow>, pd: &PositioningData) {
+    use std::collections::BTreeSet;
+
+    let active: std::collections::HashSet<u8> = pd.loco_active_ids.iter().copied().collect();
+    // Union of anchors we have a position for and anchors currently heard.
+    let mut ids: BTreeSet<u8> = pd.loco_seen.keys().copied().collect();
+    ids.extend(active.iter().copied());
+
+    let anchors: Vec<LocoAnchorStatus> = ids
+        .iter()
+        .map(|id| {
+            let pos = pd.loco_seen.get(id);
+            LocoAnchorStatus {
+                id: *id as i32,
+                x: pos.map(|p| p[0]).unwrap_or(0.0),
+                y: pos.map(|p| p[1]).unwrap_or(0.0),
+                z: pos.map(|p| p[2]).unwrap_or(0.0),
+                has_position: pos.is_some(),
+                receiving: active.contains(id),
+            }
+        })
+        .collect();
+
+    let total = anchors.len() as i32;
+    let active_count = active.len() as i32;
+    let mode_text = loco_mode_text(pd.loco_mode).to_string();
+
+    let ui_weak = ui_weak.clone();
+    slint::invoke_from_event_loop(move || {
+        if let Some(ui) = ui_weak.upgrade() {
+            ui.set_loco_anchors(slint::ModelRc::new(slint::VecModel::from(anchors)));
+            ui.set_loco_mode_text(mode_text.into());
+            ui.set_loco_active_count(active_count);
+            ui.set_loco_total_count(total);
+        }
+    })
+    .ok();
+}
+
 struct ConnectedUnit {
     cf: Arc<crazyflie_lib::Crazyflie>,
     identify_stop: Option<Arc<AtomicBool>>,
@@ -525,6 +578,8 @@ struct PositioningData {
     lighthouse_bs: Vec<(u8, [f32; 3])>,  // (base station ID, position)
     loco_anchors: Vec<(u8, [f32; 3])>,   // (anchor ID, position)
     loco_seen: HashMap<u8, [f32; 3]>,    // all loco anchors ever seen (ID -> position)
+    loco_active_ids: Vec<u8>,            // anchor IDs currently being received (firmware active list)
+    loco_mode: u8,                       // 0=unknown/auto, 1=TWR, 2=TDoA2, 3=TDoA3 (loco.mode log)
     lighthouse_active: u16,
     loco_active: u16,
 }
@@ -2546,6 +2601,7 @@ async fn main() {
         let swarm_state = swarm_state.clone();
         let positioning_data = positioning_data.clone();
         let positioning_source = positioning_source.clone();
+        let ui_weak = ui.as_weak();
 
         tokio::spawn(async move {
             loop {
@@ -2591,22 +2647,66 @@ async fn main() {
                     }
                 }
 
-                // Read Loco anchor positions
+                // Read Loco anchor positions and the list of currently-received anchors.
+                // We read the Loco2 memory raw rather than via LocoMemory2::read_all(),
+                // because that helper rejects anchor IDs >= 16, while TDoA3 anchor IDs
+                // can be any byte value (0-255). Layout matches the firmware:
+                //   0x0000: id list      (count byte + ids)
+                //   0x1000: active list  (count byte + ids)
+                //   0x2000 + id*0x100: 3x f32 LE position + 1 valid byte
+                let mut loco_active_ids: Vec<u8> = Vec::new();
                 let loco_mems = cf.memory.get_memories(Some(MemoryType::Loco2));
                 if let Some(mem) = loco_mems.first() {
-                    use crazyflie_lib::subsystems::memory::LocoMemory2;
-                    if let Some(Ok(loco)) = cf.memory.open_memory::<LocoMemory2>((*mem).clone()).await {
-                        match loco.read_all().await {
-                            Ok(data) => {
-                                for (id, anchor) in &data.anchors {
-                                    if anchor.is_valid {
-                                        loco_positions.push((*id as u8, anchor.position));
+                    use crazyflie_lib::subsystems::memory::RawMemory;
+                    if let Some(Ok(raw)) = cf.memory.open_memory::<RawMemory>((*mem).clone()).await {
+                        const ADR_ID_LIST: usize = 0x0000;
+                        const ADR_ACTIVE_ID_LIST: usize = 0x1000;
+                        const ADR_ANCHOR_BASE: usize = 0x2000;
+                        const ANCHOR_PAGE_SIZE: usize = 0x0100;
+                        const MAX_ANCHORS: usize = 16;
+
+                        let parse_id_list = |buf: Vec<u8>| -> Vec<u8> {
+                            if buf.is_empty() {
+                                return Vec::new();
+                            }
+                            let count = (buf[0] as usize)
+                                .min(MAX_ANCHORS)
+                                .min(buf.len().saturating_sub(1));
+                            buf[1..1 + count].to_vec()
+                        };
+
+                        let all_ids = match raw.read(ADR_ID_LIST, 1 + MAX_ANCHORS).await {
+                            Ok(buf) => parse_id_list(buf),
+                            Err(e) => {
+                                eprintln!("Failed to read loco id list: {:?}", e);
+                                Vec::new()
+                            }
+                        };
+                        loco_active_ids = match raw.read(ADR_ACTIVE_ID_LIST, 1 + MAX_ANCHORS).await {
+                            Ok(buf) => parse_id_list(buf),
+                            Err(e) => {
+                                eprintln!("Failed to read loco active list: {:?}", e);
+                                Vec::new()
+                            }
+                        };
+
+                        for id in all_ids {
+                            let addr = ADR_ANCHOR_BASE + ANCHOR_PAGE_SIZE * id as usize;
+                            match raw.read(addr, 13).await {
+                                Ok(b) if b.len() >= 13 => {
+                                    let x = f32::from_le_bytes([b[0], b[1], b[2], b[3]]);
+                                    let y = f32::from_le_bytes([b[4], b[5], b[6], b[7]]);
+                                    let z = f32::from_le_bytes([b[8], b[9], b[10], b[11]]);
+                                    let is_valid = b[12] != 0;
+                                    if is_valid {
+                                        loco_positions.push((id, [x, y, z]));
                                     }
                                 }
+                                Ok(_) => {}
+                                Err(e) => eprintln!("Failed to read loco anchor {}: {:?}", id, e),
                             }
-                            Err(e) => eprintln!("Failed to read loco data: {:?}", e),
                         }
-                        cf.memory.close_memory(loco).await.ok();
+                        cf.memory.close_memory(raw).await.ok();
                     }
                 }
 
@@ -2619,6 +2719,8 @@ async fn main() {
                         pd.loco_seen.insert(id, pos);
                     }
                     pd.loco_anchors = loco_positions;
+                    pd.loco_active_ids = loco_active_ids;
+                    update_loco_anchors(&ui_weak, &pd);
                 }
             }
         });
@@ -3406,7 +3508,7 @@ async fn main() {
                 return;
             }
 
-            let original_index = {
+            let (original_index, pos_z) = {
                 let Some(ui) = ui_weak.upgrade() else { return };
                 let units = ui.get_units();
                 let col = ui.get_sort_column();
@@ -3416,8 +3518,14 @@ async fn main() {
                 if row >= indices.len() {
                     return;
                 }
-                indices[row]
+                let idx = indices[row];
+                let z = units.row_data(idx).map(|u| u.pos_z).unwrap_or(0.0);
+                (idx, z)
             };
+
+            // Landing duration scales with current height at 2 seconds per meter,
+            // with a 1 second floor so a near-zero reading still descends gently.
+            let duration: f32 = (pos_z * 2.0).max(1.0);
 
             let swarm_state = swarm_state.clone();
 
@@ -3433,8 +3541,8 @@ async fn main() {
                     }
                 };
 
-                eprintln!("Landing unit {}...", original_index);
-                if let Err(e) = cf.high_level_commander.land(0.0, None, 2.0, None).await {
+                eprintln!("Landing unit {} from {:.2}m over {:.1}s...", original_index, pos_z, duration);
+                if let Err(e) = cf.high_level_commander.land(0.0, None, duration, None).await {
                     eprintln!("Land failed: {:?}", e);
                 }
             });
@@ -10238,6 +10346,7 @@ async fn start_telemetry(
     let has_supervisor_info = log_block.add_variable("supervisor.info").await.is_ok();
     let has_lh_active = log_block.add_variable("lighthouse.bsActive").await.is_ok();
     let has_ranging_state = log_block.add_variable("ranging.state").await.is_ok();
+    let has_loco_mode = log_block.add_variable("loco.mode").await.is_ok();
     eprintln!("Telemetry {}: has_supervisor_info={}, has_lh_active={}, has_ranging_state={}", uri, has_supervisor_info, has_lh_active, has_ranging_state);
 
     let period = match crazyflie_lib::subsystems::log::LogPeriod::from_millis(100) {
@@ -10352,9 +10461,17 @@ async fn start_telemetry(
             } else {
                 0
             };
+            let loco_mode: u8 = if has_loco_mode {
+                data.data.get("loco.mode")
+                    .and_then(|v| (*v).try_into().ok())
+                    .unwrap_or(0)
+            } else {
+                0
+            };
             if let Ok(mut pd) = positioning_data.try_lock() {
                 pd.lighthouse_active = lh_active;
                 pd.loco_active = ranging_active;
+                pd.loco_mode = loco_mode;
             }
         }
 

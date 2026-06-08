@@ -212,17 +212,23 @@ export component VisualizationContent inherits Rectangle {
         }
 
         moved => {
+            // NOTE: Slint's TouchArea only sets `pressed` for the left button, but `moved`
+            // (and mouse-x/-y) fire for any grabbed button. So we gate on `dragging`, not
+            // `pressed`, otherwise middle/right-button panning would never run.
             if (self.dragging) {
-                if (self.pressed) {
-                    if (self.right-button) {
-                        self.right-click-moved = true;
-                        root.cam-pan-x += (self.mouse-x / 1px - self.prev-x) * 0.01;
-                        root.cam-pan-y -= (self.mouse-y / 1px - self.prev-y) * 0.01;
-                    } else {
-                        self.left-click-moved = true;
-                        root.cam-yaw -= (self.mouse-x / 1px - self.prev-x) * 0.01;
-                        root.cam-pitch = clamp(root.cam-pitch + (self.mouse-y / 1px - self.prev-y) * 0.01, 0.1, 1.5);
-                    }
+                if (self.right-button) {
+                    self.right-click-moved = true;
+                    // The camera orbits by yaw, so a screen-space drag must be projected onto
+                    // the camera's ground axes (screen-right and forward) for the model to
+                    // follow the cursor regardless of orientation.
+                    root.cam-pan-x += ((self.mouse-x / 1px - self.prev-x) * Math.sin(root.cam-yaw * 1rad)
+                        - (self.mouse-y / 1px - self.prev-y) * Math.cos(root.cam-yaw * 1rad)) * 0.01;
+                    root.cam-pan-y += (-(self.mouse-x / 1px - self.prev-x) * Math.cos(root.cam-yaw * 1rad)
+                        - (self.mouse-y / 1px - self.prev-y) * Math.sin(root.cam-yaw * 1rad)) * 0.01;
+                } else {
+                    self.left-click-moved = true;
+                    root.cam-yaw -= (self.mouse-x / 1px - self.prev-x) * 0.01;
+                    root.cam-pitch = clamp(root.cam-pitch + (self.mouse-y / 1px - self.prev-y) * 0.01, 0.1, 1.5);
                 }
                 self.prev-x = self.mouse-x / 1px;
                 self.prev-y = self.mouse-y / 1px;

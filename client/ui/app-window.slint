@@ -3,6 +3,7 @@ import { UnitsContent } from "units.slint";
 import { VisualizationContent, VizLabel } from "visualization.slint";
 import { UnitData, UnitState, JournalEntryData } from "unit-card.slint";
 import { RadioTestContent, ChannelResult } from "radio-test.slint";
+import { LocoContent, LocoAnchorStatus } from "loco.slint";
 import { LhBaseStationData } from "lh-coverage.slint";
 import { Tdoa3AnchorData } from "tdoa3-coverage.slint";
 import { LhWizardContent, WizardSampleData, WizardBsData } from "lh-wizard.slint";
@@ -698,6 +699,12 @@ export component AppWindow inherits Window {
     in-out property <[ChannelResult]> radio-test-results;
     callback run-radio-test(/* unit index */ int);
 
+    // Loco anchor status (debug view)
+    in-out property <[LocoAnchorStatus]> loco-anchors;
+    in-out property <string> loco-mode-text: "Unknown";
+    in-out property <int> loco-active-count;
+    in-out property <int> loco-total-count;
+
     // Health test
     in-out property <bool> health-test-dialog-visible: false;
     in-out property <bool> health-test-running: false;
@@ -1079,6 +1086,18 @@ export component AppWindow inherits Window {
                     status-text: root.radio-test-status;
                     results: root.radio-test-results;
                     run-test(idx) => { run-radio-test(idx); }
+                }
+            }
+            Tab {
+                title: "Loco";
+                LocoContent {
+                    positioning-source-names: root.positioning-source-names;
+                    positioning-source-index <=> root.positioning-source-index;
+                    positioning-source-changed(idx) => { root.positioning-source-changed(idx); }
+                    mode-text: root.loco-mode-text;
+                    anchors: root.loco-anchors;
+                    active-count: root.loco-active-count;
+                    total-count: root.loco-total-count;
                 }
             }
             Tab {

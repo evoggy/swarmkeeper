@@ -1,0 +1,128 @@
+import { VerticalBox, HorizontalBox, ScrollView, ComboBox, Palette } from "std-widgets.slint";
+
+// One row in the Loco anchor status list.
+export struct LocoAnchorStatus {
+    id: int,
+    x: float,
+    y: float,
+    z: float,
+    has-position: bool,
+    // True if the Crazyflie is currently receiving packets from this anchor
+    // (present in the firmware's active anchor list, i.e. heard within ~2 s).
+    receiving: bool,
+}
+
+// Debug view listing every Loco anchor the positioning-source Crazyflie knows
+// about and whether it is currently being received. Mirrors the anchor status
+// in the Crazyflie Python client's Loco Positioning tab.
+export component LocoContent inherits Rectangle {
+    in property <[string]> positioning-source-names;
+    in-out property <int> positioning-source-index;
+    callback positioning-source-changed(int);
+
+    in property <string> mode-text: "Unknown";
+    in property <[LocoAnchorStatus]> anchors;
+    in property <int> active-count;
+    in property <int> total-count;
+
+    VerticalBox {
+        padding: 16px;
+        spacing: 12px;
+
+        HorizontalBox {
+            alignment: start;
+            spacing: 12px;
+
+            Text {
+                text: "Positioning source:";
+                vertical-alignment: center;
+                font-size: 14px;
+            }
+            ComboBox {
+                width: 220px;
+                model: root.positioning-source-names;
+                current-index <=> root.positioning-source-index;
+                selected(value) => {
+                    root.positioning-source-changed(self.current-index);
+                }
+            }
+            Rectangle { width: 16px; }
+            Text {
+                text: "Mode: " + root.mode-text;
+                vertical-alignment: center;
+                font-size: 14px;
+                font-weight: 700;
+            }
+            Text {
+                text: root.active-count + " / " + root.total-count + " receiving";
+                vertical-alignment: center;
+                font-size: 14px;
+                color: #888;
+            }
+        }
+
+        // Column headers
+        HorizontalBox {
+            spacing: 0;
+            padding-left: 4px;
+            Text { text: "Anchor"; width: 90px; font-weight: 700; }
+            Text { text: "Receiving"; width: 120px; font-weight: 700; }
+            Text { text: "Position (x, y, z) [m]"; font-weight: 700; }
+        }
+
+        ScrollView {
+            VerticalBox {
+                alignment: start;
+                spacing: 2px;
+
+                for a in root.anchors: Rectangle {
+                    height: 28px;
+                    background: touch.has-hover ? Palette.alternate-background : transparent;
+                    border-radius: 4px;
+                    touch := TouchArea { }
+
+                    HorizontalBox {
+                        padding-left: 4px;
+                        spacing: 0;
+
+                        Text {
+                            text: "A" + a.id;
+                            width: 90px;
+                            vertical-alignment: center;
+                        }
+
+                        HorizontalBox {
+                            width: 120px;
+                            alignment: start;
+                            spacing: 8px;
+                            Rectangle {
+                                width: 12px;
+                                height: 12px;
+                                border-radius: 6px;
+                                background: a.receiving ? #2ecc40 : #ff4136;
+                            }
+                            Text {
+                                text: a.receiving ? "Yes" : "No";
+                                vertical-alignment: center;
+                            }
+                        }
+
+                        Text {
+                            vertical-alignment: center;
+                            text: a.has-position
+                                ? (Math.round(a.x * 100) / 100) + ",  " + (Math.round(a.y * 100) / 100) + ",  " + (Math.round(a.z * 100) / 100)
+                                : "(no stored position)";
+                            color: a.has-position ? Palette.foreground : #888;
+                        }
+                    }
+                }
+
+                if root.anchors.length == 0: Text {
+                    text: "No anchors seen. Select a positioning-source unit with a Loco deck in TDoA/TWR range of the anchors.";
+                    color: #888;
+                    wrap: word-wrap;
+                }
+            }
+        }
+    }
+}
