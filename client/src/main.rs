@@ -10,7 +10,9 @@ mod coverage;
 mod lh_geo;
 mod lh_wizard;
 mod planning;
+mod plot;
 mod renderer;
+mod sniffer;
 mod tdoa3;
 
 slint::include_modules!();
@@ -393,14 +395,26 @@ fn update_loco_anchors(ui_weak: &slint::Weak<AppWindow>, pd: &PositioningData) {
     use std::collections::BTreeSet;
 
     let active: std::collections::HashSet<u8> = pd.loco_active_ids.iter().copied().collect();
-    // Union of anchors we have a position for and anchors currently heard.
+    // Union of anchors we have a position for, anchors currently heard, and
+    // anchors we have a loaded target for (so pending uploads are visible even
+    // before the anchor has been heard).
     let mut ids: BTreeSet<u8> = pd.loco_seen.keys().copied().collect();
     ids.extend(active.iter().copied());
+    ids.extend(pd.loco_targets.keys().copied());
 
+    let mut confirmed_count = 0usize;
     let anchors: Vec<LocoAnchorStatus> = ids
         .iter()
         .map(|id| {
             let pos = pd.loco_seen.get(id);
+            let target = pd.loco_targets.get(id);
+            let confirmed = match (pos, target) {
+                (Some(p), Some(t)) => anchor_pos_matches(p, t),
+                _ => false,
+            };
+            if confirmed {
+                confirmed_count += 1;
+            }
             LocoAnchorStatus {
                 id: *id as i32,
                 x: pos.map(|p| p[0]).unwrap_or(0.0),
@@ -408,6 +422,11 @@ fn update_loco_anchors(ui_weak: &slint::Weak<AppWindow>, pd: &PositioningData) {
                 z: pos.map(|p| p[2]).unwrap_or(0.0),
                 has_position: pos.is_some(),
                 receiving: active.contains(id),
+                has_target: target.is_some(),
+                target_x: target.map(|t| t[0]).unwrap_or(0.0),
+                target_y: target.map(|t| t[1]).unwrap_or(0.0),
+                target_z: target.map(|t| t[2]).unwrap_or(0.0),
+                confirmed,
             }
         })
         .collect();
@@ -416,6 +435,16 @@ fn update_loco_anchors(ui_weak: &slint::Weak<AppWindow>, pd: &PositioningData) {
     let active_count = active.len() as i32;
     let mode_text = loco_mode_text(pd.loco_mode).to_string();
 
+    let target_count = pd.loco_targets.len();
+    let upload_active = pd.loco_upload_active;
+    let upload_status = if target_count == 0 {
+        String::new()
+    } else if upload_active {
+        format!("Uploading anchor positions: {} / {} confirmed", confirmed_count, target_count)
+    } else {
+        format!("All {} anchor positions confirmed", target_count)
+    };
+
     let ui_weak = ui_weak.clone();
     slint::invoke_from_event_loop(move || {
         if let Some(ui) = ui_weak.upgrade() {
@@ -423,6 +452,8 @@ fn update_loco_anchors(ui_weak: &slint::Weak<AppWindow>, pd: &PositioningData) {
             ui.set_loco_mode_text(mode_text.into());
             ui.set_loco_active_count(active_count);
             ui.set_loco_total_count(total);
+            ui.set_loco_upload_status(upload_status.into());
+            ui.set_loco_upload_active(upload_active);
         }
     })
     .ok();
@@ -432,6 +463,10 @@ struct ConnectedUnit {
     cf: Arc<crazyflie_lib::Crazyflie>,
     identify_stop: Option<Arc<AtomicBool>>,
     home_position: Option<[f32; 3]>,
+    // World-frame Z of the surface the unit launched from, captured at takeoff.
+    // Landing descends back to this height; the world origin may be non-zero
+    // (even negative), so a hard-coded 0.0 land target is unsafe.
+    launch_z: Option<f32>,
 }
 
 type SwarmState = Arc<Mutex<HashMap<usize, ConnectedUnit>>>;
@@ -582,6 +617,33 @@ struct PositioningData {
     loco_mode: u8,                       // 0=unknown/auto, 1=TWR, 2=TDoA2, 3=TDoA3 (loco.mode log)
     lighthouse_active: u16,
     loco_active: u16,
+    // Anchor positions loaded from file to upload to the anchors over UWB.
+    // The telemetry loop keeps (re)sending these until the read-back position
+    // matches (the LPP anchor-position protocol is best-effort).
+    loco_targets: HashMap<u8, [f32; 3]>, // desired anchor positions (ID -> position)
+    loco_upload_active: bool,            // true while still pushing targets to the anchors
+}
+
+/// Tolerance (in meters, per axis) for considering a read-back anchor position
+/// to match its loaded target — i.e. the upload "stuck".
+const ANCHOR_POS_TOLERANCE: f32 = 0.02;
+
+/// LPP short-packet type for setting an anchor's position (firmware
+/// `LPP_SHORT_ANCHORPOS`). Payload is this byte followed by 3x little-endian f32.
+const LPP_TYPE_ANCHOR_POSITION: u8 = 0x01;
+
+/// One anchor entry in an anchor-positions YAML file (`{ id: {x, y, z} }`).
+#[derive(serde::Deserialize, serde::Serialize)]
+struct AnchorPositionEntry {
+    x: f32,
+    y: f32,
+    z: f32,
+}
+
+fn anchor_pos_matches(a: &[f32; 3], b: &[f32; 3]) -> bool {
+    (a[0] - b[0]).abs() <= ANCHOR_POS_TOLERANCE
+        && (a[1] - b[1]).abs() <= ANCHOR_POS_TOLERANCE
+        && (a[2] - b[2]).abs() <= ANCHOR_POS_TOLERANCE
 }
 
 type SharedPositioningData = Arc<Mutex<PositioningData>>;
@@ -825,6 +887,432 @@ struct TrajectoryData {
 
 type SharedTrajectoryData = Arc<Mutex<HashMap<usize, TrajectoryData>>>;
 
+/// Active HLC goto targets per unit index (absolute world coords). Set when a
+/// goto is issued and removed once the unit reaches the point, so the
+/// visualization can render a marker only while the move is in progress.
+type SharedGotoTargets = Arc<Mutex<HashMap<usize, [f32; 3]>>>;
+
+/// Nominal path speed (m/s) used to time the generated primitive trajectories.
+const PRIMITIVE_SPEED: f32 = 0.5;
+
+/// A minimum-jerk (rest-to-rest) polynomial segment from `start` to `end` over
+/// `duration` seconds. Velocity and acceleration are zero at both ends, so chained
+/// segments trace straight edges with smooth stops at the corners. Coefficients are
+/// in the monomial basis expected by `eval_poly` / the firmware (position in t).
+fn min_jerk_segment(start: [f32; 3], end: [f32; 3], duration: f32) -> TrajectorySegmentYaml {
+    let t = duration.max(0.001);
+    let axis = |s: f32, e: f32| -> Vec<f32> {
+        let d = e - s;
+        vec![
+            s,
+            0.0,
+            0.0,
+            10.0 * d / t.powi(3),
+            -15.0 * d / t.powi(4),
+            6.0 * d / t.powi(5),
+        ]
+    };
+    TrajectorySegmentYaml {
+        duration,
+        x: axis(start[0], end[0]),
+        y: axis(start[1], end[1]),
+        z: axis(start[2], end[2]),
+        yaw: vec![0.0],
+    }
+}
+
+/// A cubic Bézier arc (XY plane, constant `z`) expressed as monomial polynomial
+/// coefficients over `duration` seconds. Four quarter-arc Béziers stitch into a
+/// smooth, velocity-continuous circle.
+fn bezier_segment(
+    p0: [f32; 2],
+    p1: [f32; 2],
+    p2: [f32; 2],
+    p3: [f32; 2],
+    z: f32,
+    duration: f32,
+) -> TrajectorySegmentYaml {
+    let t = duration.max(0.001);
+    let axis = |a: f32, b: f32, c: f32, d: f32| -> Vec<f32> {
+        // Bézier basis -> monomial in tau, then rescale tau = t / T.
+        let c0 = a;
+        let c1 = 3.0 * (b - a);
+        let c2 = 3.0 * (a - 2.0 * b + c);
+        let c3 = -a + 3.0 * b - 3.0 * c + d;
+        vec![c0, c1 / t, c2 / (t * t), c3 / (t * t * t)]
+    };
+    TrajectorySegmentYaml {
+        duration,
+        x: axis(p0[0], p1[0], p2[0], p3[0]),
+        y: axis(p0[1], p1[1], p2[1], p3[1]),
+        z: vec![z],
+        yaw: vec![0.0],
+    }
+}
+
+/// Circle of the given radius in the horizontal plane, built from four
+/// quarter-arc cubic Béziers (starts and ends at (r, 0), traversed CCW).
+fn generate_circle(radius: f32, speed: f32) -> TrajectoryConfig {
+    let r = radius.max(0.05);
+    // Control-point offset for a 90° cubic-Bézier circle approximation.
+    let kappa = 0.552_284_75 * r;
+    let dur = (std::f32::consts::FRAC_PI_2 * r / speed.max(0.05)).max(0.4);
+    let mut segments = Vec::new();
+    for q in 0..4 {
+        let a0 = q as f32 * std::f32::consts::FRAC_PI_2;
+        let a1 = a0 + std::f32::consts::FRAC_PI_2;
+        let s = [r * a0.cos(), r * a0.sin()];
+        let e = [r * a1.cos(), r * a1.sin()];
+        let ts = [-a0.sin(), a0.cos()]; // unit tangent, CCW
+        let te = [-a1.sin(), a1.cos()];
+        let p1 = [s[0] + kappa * ts[0], s[1] + kappa * ts[1]];
+        let p2 = [e[0] - kappa * te[0], e[1] - kappa * te[1]];
+        segments.push(bezier_segment(s, p1, p2, e, 0.0, dur));
+    }
+    TrajectoryConfig { segments }
+}
+
+/// Square of the given side length in the horizontal plane (four min-jerk edges).
+fn generate_square(side: f32, speed: f32) -> TrajectoryConfig {
+    let l = side.max(0.05);
+    let dur = (l / speed.max(0.05)).max(0.4);
+    let corners = [
+        [0.0, 0.0, 0.0],
+        [l, 0.0, 0.0],
+        [l, l, 0.0],
+        [0.0, l, 0.0],
+        [0.0, 0.0, 0.0],
+    ];
+    let segments = (0..4).map(|i| min_jerk_segment(corners[i], corners[i + 1], dur)).collect();
+    TrajectoryConfig { segments }
+}
+
+/// Cube wireframe of the given side length: a closed 16-edge walk that traces all
+/// 12 edges of the cube (four edges are retraced), each edge a min-jerk segment.
+fn generate_cube(side: f32, speed: f32) -> TrajectoryConfig {
+    let l = side.max(0.05);
+    let dur = (l / speed.max(0.05)).max(0.4);
+    let v = |x: f32, y: f32, z: f32| [x * l, y * l, z * l];
+    let seq = [
+        v(0., 0., 0.), v(1., 0., 0.), v(1., 1., 0.), v(0., 1., 0.), v(0., 0., 0.),
+        v(0., 0., 1.), v(1., 0., 1.), v(1., 1., 1.), v(0., 1., 1.), v(0., 0., 1.),
+        v(1., 0., 1.), v(1., 0., 0.), v(1., 1., 0.), v(1., 1., 1.), v(0., 1., 1.),
+        v(0., 1., 0.), v(0., 0., 0.),
+    ];
+    let segments = (0..seq.len() - 1).map(|i| min_jerk_segment(seq[i], seq[i + 1], dur)).collect();
+    TrajectoryConfig { segments }
+}
+
+/// Build a primitive trajectory by name. `size` is the radius for a circle and the
+/// side length for a square/cube. Returns None for an unknown shape.
+fn generate_primitive(shape: &str, size: f32) -> Option<TrajectoryConfig> {
+    match shape {
+        "circle" => Some(generate_circle(size, PRIMITIVE_SPEED)),
+        "square" => Some(generate_square(size, PRIMITIVE_SPEED)),
+        "cube" => Some(generate_cube(size, PRIMITIVE_SPEED)),
+        _ => None,
+    }
+}
+
+/// Ordered waypoint list for a back-and-forth "wave" in the horizontal plane at a
+/// constant (relative) z, starting at the origin. `y_amp` is the half-amplitude — Y
+/// swings between +y_amp and -y_amp (peak-to-peak 2·y_amp). `x_step` is how far X
+/// advances per leg; pass a negative value to walk in the -X direction. `cycles` is the
+/// number of full up/down periods.
+///
+/// When `simultaneous` is false the X and Y moves alternate — X holds while Y swings, Y
+/// holds while X advances — tracing a castellated **square wave**. When true, X and Y
+/// move together on every leg, tracing a **zig-zag / sawtooth**.
+fn wave_waypoints(x_step: f32, y_amp: f32, cycles: u32, simultaneous: bool) -> Vec<[f32; 3]> {
+    let a = y_amp.abs();
+    let cycles = cycles.max(1);
+    let mut pts: Vec<[f32; 3]> = vec![[0.0, 0.0, 0.0]];
+    let mut x = 0.0f32;
+
+    if simultaneous {
+        // Zig-zag: every leg advances X and flips Y to the opposite extreme at once.
+        for leg in 0..(2 * cycles) {
+            x += x_step;
+            let y = if leg % 2 == 0 { a } else { -a };
+            pts.push([x, y, 0.0]);
+        }
+    } else {
+        // Square wave: rise to +amp first, then alternate (advance X, swing Y) so only
+        // one axis moves on each leg.
+        pts.push([x, a, 0.0]); // initial Y rise, X held
+        for _ in 0..cycles {
+            x += x_step;
+            pts.push([x, a, 0.0]); // advance X, Y held high
+            pts.push([x, -a, 0.0]); // swing Y down, X held
+            x += x_step;
+            pts.push([x, -a, 0.0]); // advance X, Y held low
+            pts.push([x, a, 0.0]); // swing Y up, X held
+        }
+    }
+    pts
+}
+
+/// Build a back-and-forth wave as a *compressed* trajectory: each leg is a straight,
+/// constant-velocity move that the firmware interpolates from the previous endpoint to
+/// the stored endpoint, so only the axes that actually change cost any bytes (the rest
+/// are flagged "constant"). Z and yaw are held throughout. Compressed trajectories are
+/// terminated by the firmware at the first zero-duration piece, so a sentinel segment is
+/// appended (the 4 KB trajectory memory is persistent and otherwise still holds stale
+/// bytes from a previous upload, which would be parsed as bogus extra pieces).
+///
+/// Returns the compressed start point, the segment list (sentinel included), the polyline
+/// points for visualization, and the total duration in seconds.
+fn build_wave_compressed(
+    x_step: f32,
+    y_amp: f32,
+    cycles: u32,
+    simultaneous: bool,
+    speed: f32,
+) -> (
+    crazyflie_lib::subsystems::memory::CompressedStart,
+    Vec<crazyflie_lib::subsystems::memory::CompressedSegment>,
+    Vec<[f32; 3]>,
+    f32,
+) {
+    use crazyflie_lib::subsystems::memory::{CompressedSegment, CompressedStart};
+
+    let pts = wave_waypoints(x_step, y_amp, cycles, simultaneous);
+    let speed = speed.max(0.05);
+    let start = CompressedStart::new(pts[0][0], pts[0][1], pts[0][2], 0.0);
+
+    let mut segments = Vec::new();
+    let mut total = 0.0f32;
+    for w in pts.windows(2) {
+        let (from, to) = (w[0], w[1]);
+        let (dx, dy, dz) = (to[0] - from[0], to[1] - from[1], to[2] - from[2]);
+        let d = (dx * dx + dy * dy + dz * dz).sqrt();
+        // Drop degenerate zero-length legs (e.g. x_step == 0 in square-wave mode).
+        if d < 1e-4 {
+            continue;
+        }
+        let dur = (d / speed).max(0.4);
+        total += dur;
+        // Linear (1 control point = the endpoint) on axes that move; constant (no control
+        // points, holds the previous value) on axes that don't.
+        let xe = if dx.abs() > 1e-4 { vec![to[0]] } else { vec![] };
+        let ye = if dy.abs() > 1e-4 { vec![to[1]] } else { vec![] };
+        let ze = if dz.abs() > 1e-4 { vec![to[2]] } else { vec![] };
+        if let Ok(seg) = CompressedSegment::new(dur, xe, ye, ze, vec![]) {
+            segments.push(seg);
+        }
+    }
+    // Terminating sentinel: a zero-duration, all-constant piece packs to [0, 0, 0],
+    // which the firmware parser reads as "duration 0" and stops.
+    if let Ok(term) = CompressedSegment::new(0.0, vec![], vec![], vec![], vec![]) {
+        segments.push(term);
+    }
+
+    (start, segments, pts, total)
+}
+
+/// Upload a trajectory definition to a single unit's trajectory memory, define it
+/// as trajectory id 1, and store its sampled points for visualization. Shared by
+/// the file-based upload and the generated-primitive buttons. If the unit is not
+/// connected, the visualization data is still stored so the path can be previewed.
+async fn upload_trajectory_config_to_unit(
+    original_index: usize,
+    traj_config: TrajectoryConfig,
+    swarm_state: SwarmState,
+    trajectory_data: SharedTrajectoryData,
+) {
+    use crazyflie_lib::subsystems::memory::{MemoryType, Poly, Poly4D, TrajectoryMemory};
+
+    let viz_points = sample_trajectory(&traj_config);
+    let total_duration: f32 = traj_config.segments.iter().map(|s| s.duration).sum();
+    let segment_count = traj_config.segments.len();
+
+    let segments: Vec<Poly4D> = traj_config
+        .segments
+        .iter()
+        .map(|s| {
+            Poly4D::new(
+                s.duration,
+                Poly::from_slice(&s.x),
+                Poly::from_slice(&s.y),
+                Poly::from_slice(&s.z),
+                Poly::from_slice(&s.yaw),
+            )
+        })
+        .collect();
+
+    let cf = {
+        let state = swarm_state.lock().await;
+        match state.get(&original_index) {
+            Some(cu) => cu.cf.clone(),
+            None => {
+                eprintln!("Unit {} is not connected", original_index);
+                // Still store visualization data even if not connected.
+                let mut td = trajectory_data.lock().await;
+                td.insert(original_index, TrajectoryData {
+                    points: viz_points,
+                    duration: total_duration,
+                    anchor: None,
+                    saved_points: None,
+                });
+                return;
+            }
+        }
+    };
+
+    let traj_mems = cf.memory.get_memories(Some(MemoryType::Trajectory));
+    if let Some(mem) = traj_mems.first() {
+        if let Some(Ok(traj_mem)) = cf.memory.open_memory::<TrajectoryMemory>((*mem).clone()).await {
+            match traj_mem.write_uncompressed(&segments, 0).await {
+                Ok(bytes) => eprintln!("Uploaded {} bytes of trajectory data", bytes),
+                Err(e) => {
+                    eprintln!("Failed to upload trajectory: {:?}", e);
+                    cf.memory.close_memory(traj_mem).await.ok();
+                    return;
+                }
+            }
+            cf.memory.close_memory(traj_mem).await.ok();
+        }
+    }
+
+    if let Err(e) = cf
+        .high_level_commander
+        .define_trajectory(1, 0, segment_count as u8, None)
+        .await
+    {
+        eprintln!("Failed to define trajectory: {:?}", e);
+    }
+
+    eprintln!("Trajectory uploaded and defined ({} segments, {:.1}s)", segment_count, total_duration);
+
+    let mut td = trajectory_data.lock().await;
+    td.insert(original_index, TrajectoryData {
+        points: viz_points,
+        duration: total_duration,
+        anchor: None,
+        saved_points: None,
+    });
+}
+
+/// Upload a *compressed* trajectory to a unit's trajectory memory, define it as
+/// compressed trajectory id 1, and store its polyline points for visualization. The
+/// counterpart to [`upload_trajectory_config_to_unit`] for the compressed format; the
+/// `segments` slice must already include the terminating zero-duration sentinel (see
+/// [`build_wave_compressed`]). If the unit is not connected the visualization data is
+/// still stored so the path can be previewed.
+async fn upload_compressed_trajectory_to_unit(
+    original_index: usize,
+    start: crazyflie_lib::subsystems::memory::CompressedStart,
+    segments: Vec<crazyflie_lib::subsystems::memory::CompressedSegment>,
+    viz_points: Vec<[f32; 3]>,
+    total_duration: f32,
+    swarm_state: SwarmState,
+    trajectory_data: SharedTrajectoryData,
+) {
+    use crazyflie_lib::subsystems::high_level_commander::TRAJECTORY_TYPE_POLY4D_COMPRESSED;
+    use crazyflie_lib::subsystems::memory::{MemoryType, TrajectoryMemory};
+
+    // The sentinel does not count as a flight piece; report the real leg count.
+    let piece_count = segments.len().saturating_sub(1);
+
+    let cf = {
+        let state = swarm_state.lock().await;
+        match state.get(&original_index) {
+            Some(cu) => cu.cf.clone(),
+            None => {
+                eprintln!("Unit {} is not connected", original_index);
+                let mut td = trajectory_data.lock().await;
+                td.insert(original_index, TrajectoryData {
+                    points: viz_points,
+                    duration: total_duration,
+                    anchor: None,
+                    saved_points: None,
+                });
+                return;
+            }
+        }
+    };
+
+    let traj_mems = cf.memory.get_memories(Some(MemoryType::Trajectory));
+    if let Some(mem) = traj_mems.first() {
+        if let Some(Ok(traj_mem)) = cf.memory.open_memory::<TrajectoryMemory>((*mem).clone()).await {
+            match traj_mem.write_compressed(&start, &segments, 0).await {
+                Ok(bytes) => eprintln!("Uploaded {} bytes of compressed trajectory data", bytes),
+                Err(e) => {
+                    eprintln!("Failed to upload compressed trajectory: {:?}", e);
+                    cf.memory.close_memory(traj_mem).await.ok();
+                    return;
+                }
+            }
+            cf.memory.close_memory(traj_mem).await.ok();
+        }
+    }
+
+    // num_pieces is ignored by the firmware for compressed trajectories (it stops at the
+    // zero-duration sentinel), but the define command still carries the type.
+    if let Err(e) = cf
+        .high_level_commander
+        .define_trajectory(1, 0, piece_count as u8, Some(TRAJECTORY_TYPE_POLY4D_COMPRESSED))
+        .await
+    {
+        eprintln!("Failed to define compressed trajectory: {:?}", e);
+    }
+
+    eprintln!("Compressed trajectory uploaded and defined ({} pieces, {:.1}s)", piece_count, total_duration);
+
+    let mut td = trajectory_data.lock().await;
+    td.insert(original_index, TrajectoryData {
+        points: viz_points,
+        duration: total_duration,
+        anchor: None,
+        saved_points: None,
+    });
+}
+
+/// Absolute Z (metres) that units take off to before executing a trajectory. Kept
+/// as a constant so the pre-flight geofence check anchors the trajectory at the same
+/// height the unit will actually fly at.
+const TRAJECTORY_TAKEOFF_HEIGHT: f32 = 0.5;
+
+/// Verify that a trajectory, anchored at `anchor` with the firmware's relative shift
+/// applied (trajectory point 0 maps to `anchor`), stays inside the flight area(s).
+/// Returns the first offending absolute point if it would leave the geofence. When no
+/// flight areas are defined there is no geofence to enforce, so this always passes.
+fn trajectory_within_flight_areas(
+    points: &[[f32; 3]],
+    anchor: [f32; 3],
+    flight_areas: &[planning::BoxVolume],
+) -> Result<(), [f32; 3]> {
+    if flight_areas.is_empty() {
+        return Ok(());
+    }
+    let first = points.first().copied().unwrap_or([0.0, 0.0, 0.0]);
+    for pt in points {
+        let abs = [
+            pt[0] + anchor[0] - first[0],
+            pt[1] + anchor[1] - first[1],
+            pt[2] + anchor[2] - first[2],
+        ];
+        if !planning::point_in_areas(flight_areas, abs) {
+            return Err(abs);
+        }
+    }
+    Ok(())
+}
+
+/// Show a modal error/alert dialog with the given title and message. Safe to call
+/// from async tasks; the work is marshalled onto the Slint event loop.
+fn show_error_dialog(ui_weak: &slint::Weak<AppWindow>, title: String, message: String) {
+    let ui_weak = ui_weak.clone();
+    slint::invoke_from_event_loop(move || {
+        if let Some(ui) = ui_weak.upgrade() {
+            ui.set_error_dialog_title(title.into());
+            ui.set_error_dialog_message(message.into());
+            ui.set_error_dialog_visible(true);
+        }
+    })
+    .ok();
+}
+
 #[derive(Serialize, Deserialize, Clone)]
 struct JournalEntry {
     timestamp: String,
@@ -947,6 +1435,11 @@ async fn main() {
         ui.set_tuning_prop_test_pwm_ratio(v.to_string().into());
     }
 
+    // Live data plot dock, shared by the Units and Visualization tabs. The
+    // reusable plot component (ported from swarmfinity) renders the graph;
+    // `wire_logging` (after swarm_state below) connects the streaming lifecycle.
+    let plot_state = plot::setup(&ui);
+
     // Sort units table
     {
         let ui_weak = ui.as_weak();
@@ -965,10 +1458,24 @@ async fn main() {
     let link_context = Arc::new(crazyflie_link::LinkContext::new());
     let toc_cache = FileTocCache::new();
     let swarm_state: SwarmState = Arc::new(Mutex::new(HashMap::new()));
+
+    // Plot dock log streaming: the unit selected for logging (unsorted original
+    // index) and the supervising task handle (aborted on switch/stop to free the
+    // firmware log blocks). Wired to the PlotBridge callbacks here.
+    let plot_selected_index: plot::SelectedIndex = Arc::new(std::sync::Mutex::new(None));
+    let plot_log_task: plot::LogTask = Arc::new(Mutex::new(None));
+    plot::wire_logging(
+        &ui,
+        &plot_state,
+        swarm_state.clone(),
+        plot_selected_index.clone(),
+        plot_log_task.clone(),
+    );
     // Firmware binary selected in the Flash Firmware dialog (path on disk).
     let flash_binary: Arc<Mutex<Option<std::path::PathBuf>>> = Arc::new(Mutex::new(None));
     let positioning_source: Arc<Mutex<Option<usize>>> = Arc::new(Mutex::new(None));
     let positioning_data: SharedPositioningData = Arc::new(Mutex::new(PositioningData::default()));
+    let goto_targets: SharedGotoTargets = Arc::new(Mutex::new(HashMap::new()));
     let journal_store: SharedJournalStore = Arc::new(Mutex::new(load_journal()));
     let console_store: SharedConsoleStore = Arc::new(Mutex::new(load_console()));
 
@@ -1015,6 +1522,7 @@ async fn main() {
 
         let positioning_source = positioning_source.clone();
         let positioning_data = positioning_data.clone();
+        let goto_targets = goto_targets.clone();
         let journal_store = journal_store.clone();
         let console_store = console_store.clone();
         ui.on_connect_swarm(move || {
@@ -1032,6 +1540,7 @@ async fn main() {
                 let swarm_state = swarm_state.clone();
                 let positioning_source = positioning_source.clone();
                 let positioning_data = positioning_data.clone();
+                let goto_targets = goto_targets.clone();
                 let journal_store = journal_store.clone();
                 let console_store = console_store.clone();
 
@@ -1068,7 +1577,7 @@ async fn main() {
                     // Store connected Crazyflie
                     {
                         let mut state = swarm_state.lock().await;
-                        state.insert(i, ConnectedUnit { cf: cf.clone(), identify_stop: None, home_position: None });
+                        state.insert(i, ConnectedUnit { cf: cf.clone(), identify_stop: None, home_position: None, launch_z: None });
                     }
 
                     // Read installed decks
@@ -1139,7 +1648,7 @@ async fn main() {
                         }
                     }
 
-                    start_telemetry(i, uri.clone(), cf.clone(), ui_weak, positioning_data, positioning_source).await;
+                    start_telemetry(i, uri.clone(), cf.clone(), ui_weak, positioning_data, positioning_source, goto_targets).await;
                 });
             }
         });
@@ -1207,6 +1716,7 @@ async fn main() {
         let ui_weak = ui.as_weak();
         let positioning_source = positioning_source.clone();
         let positioning_data = positioning_data.clone();
+        let goto_targets = goto_targets.clone();
         let journal_store = journal_store.clone();
         let console_store = console_store.clone();
 
@@ -1228,6 +1738,7 @@ async fn main() {
                 let swarm_state = swarm_state.clone();
                 let positioning_source = positioning_source.clone();
                 let positioning_data = positioning_data.clone();
+                let goto_targets = goto_targets.clone();
                 let journal_store = journal_store.clone();
                 let console_store = console_store.clone();
 
@@ -1262,7 +1773,7 @@ async fn main() {
 
                     {
                         let mut state = swarm_state.lock().await;
-                        state.insert(i, ConnectedUnit { cf: cf.clone(), identify_stop: None, home_position: None });
+                        state.insert(i, ConnectedUnit { cf: cf.clone(), identify_stop: None, home_position: None, launch_z: None });
                     }
 
                     let deck_lighthouse: u8 = cf.param.get("deck.bcLighthouse4").await.unwrap_or(0);
@@ -1322,7 +1833,7 @@ async fn main() {
                         }
                     }
 
-                    start_telemetry(i, uri.clone(), cf.clone(), ui_weak, positioning_data, positioning_source).await;
+                    start_telemetry(i, uri.clone(), cf.clone(), ui_weak, positioning_data, positioning_source, goto_targets).await;
                 });
             }
         });
@@ -2040,10 +2551,12 @@ async fn main() {
     {
         let swarm_state = swarm_state.clone();
         let trajectory_data = trajectory_data.clone();
+        let viz_scene_state = viz_scene_state.clone();
         let ui_weak = ui.as_weak();
         ui.on_fly_trajectory_swarm(move || {
             let swarm_state = swarm_state.clone();
             let trajectory_data = trajectory_data.clone();
+            let viz_scene_state = viz_scene_state.clone();
             let ui_weak = ui_weak.clone();
 
             tokio::spawn(async move {
@@ -2055,6 +2568,59 @@ async fn main() {
                 if connected_units.is_empty() {
                     eprintln!("No connected units");
                     return;
+                }
+
+                // Pre-flight geofence check: abort the whole flight if any unit's
+                // trajectory would leave the flight area at its takeoff-height anchor.
+                {
+                    let (tx, rx) = tokio::sync::oneshot::channel();
+                    let ui_weak_inner = ui_weak.clone();
+                    let unit_indices: Vec<usize> = connected_units.iter().map(|(idx, _)| *idx).collect();
+                    let _ = slint::invoke_from_event_loop(move || {
+                        let mut positions = HashMap::new();
+                        if let Some(ui) = ui_weak_inner.upgrade() {
+                            let units = ui.get_units();
+                            for idx in &unit_indices {
+                                if let Some(u) = units.row_data(*idx) {
+                                    positions.insert(*idx, [u.pos_x, u.pos_y, u.pos_z]);
+                                }
+                            }
+                        }
+                        let _ = tx.send(positions);
+                    });
+                    let positions = rx.await.unwrap_or_default();
+                    let areas = match viz_scene_state.lock() {
+                        Ok(s) => s.flight_areas.clone(),
+                        Err(_) => Vec::new(),
+                    };
+                    if !areas.is_empty() {
+                        let mut offenders: Vec<usize> = Vec::new();
+                        {
+                            let td = trajectory_data.lock().await;
+                            for (idx, _) in &connected_units {
+                                let Some(pos) = positions.get(idx) else { continue };
+                                let Some(data) = td.get(idx) else { continue };
+                                let anchor = [pos[0], pos[1], TRAJECTORY_TAKEOFF_HEIGHT];
+                                if trajectory_within_flight_areas(&data.points, anchor, &areas).is_err() {
+                                    offenders.push(*idx);
+                                }
+                            }
+                        }
+                        if !offenders.is_empty() {
+                            let list = offenders.iter().map(|i| i.to_string()).collect::<Vec<_>>().join(", ");
+                            eprintln!("Trajectory leaves flight area for unit(s) {} - aborting swarm flight", list);
+                            show_error_dialog(
+                                &ui_weak,
+                                "Trajectory outside flight area".into(),
+                                format!(
+                                    "The trajectory would leave the flight area for unit(s) {}. \
+                                     No units were flown - reduce the size or reposition.",
+                                    list
+                                ),
+                            );
+                            return;
+                        }
+                    }
                 }
 
                 // Arm all units in parallel
@@ -2710,7 +3276,11 @@ async fn main() {
                     }
                 }
 
-                // Store positioning data
+                // Store positioning data and work out which anchor targets
+                // still need (re)sending. We compute the send list while holding
+                // the lock but send the (best-effort) LPP packets after dropping
+                // it, so we never hold the mutex across an await.
+                let mut anchors_to_send: Vec<(u8, [f32; 3])> = Vec::new();
                 {
                     let mut pd = positioning_data.lock().await;
                     pd.lighthouse_bs = lighthouse_positions;
@@ -2720,9 +3290,119 @@ async fn main() {
                     }
                     pd.loco_anchors = loco_positions;
                     pd.loco_active_ids = loco_active_ids;
+
+                    if pd.loco_upload_active && !pd.loco_targets.is_empty() {
+                        let mut all_confirmed = true;
+                        for (&id, target) in &pd.loco_targets {
+                            let matched = pd
+                                .loco_seen
+                                .get(&id)
+                                .map_or(false, |p| anchor_pos_matches(p, target));
+                            if !matched {
+                                all_confirmed = false;
+                                anchors_to_send.push((id, *target));
+                            }
+                        }
+                        // Once every anchor's read-back matches, stop resending.
+                        if all_confirmed {
+                            pd.loco_upload_active = false;
+                        }
+                    }
+
                     update_loco_anchors(&ui_weak, &pd);
                 }
+
+                // (Re)send anchor positions over UWB for anchors not yet confirmed.
+                // LPP anchor-position packets are best-effort, hence the retry loop.
+                for (id, pos) in anchors_to_send {
+                    let mut data = Vec::with_capacity(13);
+                    data.push(LPP_TYPE_ANCHOR_POSITION);
+                    data.extend_from_slice(&pos[0].to_le_bytes());
+                    data.extend_from_slice(&pos[1].to_le_bytes());
+                    data.extend_from_slice(&pos[2].to_le_bytes());
+                    if let Err(e) = cf
+                        .localization
+                        .loco_positioning
+                        .send_short_lpp_packet(id, &data)
+                        .await
+                    {
+                        eprintln!("Failed to send anchor {} position: {:?}", id, e);
+                    }
+                }
             }
+        });
+    }
+
+    // Load anchor positions from file and start uploading them to the anchors.
+    {
+        let positioning_data = positioning_data.clone();
+        let ui_weak = ui.as_weak();
+
+        ui.on_load_anchor_positions(move || {
+            let positioning_data = positioning_data.clone();
+            let ui_weak = ui_weak.clone();
+            tokio::spawn(async move {
+                let Some(handle) = rfd::AsyncFileDialog::new()
+                    .add_filter("YAML", &["yaml", "yml"])
+                    .pick_file()
+                    .await
+                else { return };
+                let path = handle.path().to_path_buf();
+
+                let contents = match std::fs::read_to_string(&path) {
+                    Ok(c) => c,
+                    Err(e) => {
+                        eprintln!("Failed to read anchor positions file: {}", e);
+                        return;
+                    }
+                };
+
+                // File format: a map of anchor id -> { x, y, z }.
+                let entries: std::collections::BTreeMap<u8, AnchorPositionEntry> =
+                    match serde_yaml::from_str(&contents) {
+                        Ok(c) => c,
+                        Err(e) => {
+                            eprintln!("Failed to parse anchor positions file: {}", e);
+                            return;
+                        }
+                    };
+
+                if entries.is_empty() {
+                    eprintln!("Anchor positions file contained no anchors");
+                    return;
+                }
+
+                let targets: HashMap<u8, [f32; 3]> = entries
+                    .into_iter()
+                    .map(|(id, e)| (id, [e.x, e.y, e.z]))
+                    .collect();
+                eprintln!("Loaded {} anchor positions from {}", targets.len(), path.display());
+
+                {
+                    let mut pd = positioning_data.lock().await;
+                    pd.loco_targets = targets;
+                    pd.loco_upload_active = true;
+                    // Push the targets to the UI right away; the telemetry loop
+                    // will keep sending and refresh the confirmed state.
+                    update_loco_anchors(&ui_weak, &pd);
+                }
+            });
+        });
+    }
+
+    // Stop the anchor-position upload (leave the loaded targets visible).
+    {
+        let positioning_data = positioning_data.clone();
+        let ui_weak = ui.as_weak();
+
+        ui.on_stop_anchor_upload(move || {
+            let positioning_data = positioning_data.clone();
+            let ui_weak = ui_weak.clone();
+            tokio::spawn(async move {
+                let mut pd = positioning_data.lock().await;
+                pd.loco_upload_active = false;
+                update_loco_anchors(&ui_weak, &pd);
+            });
         });
     }
 
@@ -3115,87 +3795,105 @@ async fn main() {
                     }
                 };
 
-                // Sample points for visualization (relative to unit position)
-                let viz_points = sample_trajectory(&traj_config);
-                let total_duration: f32 = traj_config.segments.iter().map(|s| s.duration).sum();
-                let segment_count = traj_config.segments.len();
+                upload_trajectory_config_to_unit(original_index, traj_config, swarm_state, trajectory_data).await;
+            });
+        });
+    }
 
-                // Convert to Poly4D segments
-                use crazyflie_lib::subsystems::memory::{Poly4D, Poly};
-                let segments: Vec<Poly4D> = traj_config
-                    .segments
-                    .iter()
-                    .map(|s| {
-                        Poly4D::new(
-                            s.duration,
-                            Poly::from_slice(&s.x),
-                            Poly::from_slice(&s.y),
-                            Poly::from_slice(&s.z),
-                            Poly::from_slice(&s.yaw),
-                        )
-                    })
-                    .collect();
+    // Generate and upload a primitive trajectory (circle / square / cube) to the
+    // selected unit, then visualize it. Press "Fly Trajectory" to execute.
+    {
+        let swarm_state = swarm_state.clone();
+        let trajectory_data = trajectory_data.clone();
+        let ui_weak = ui.as_weak();
 
-                // Get connected Crazyflie
-                let cf = {
-                    let state = swarm_state.lock().await;
-                    match state.get(&original_index) {
-                        Some(cu) => cu.cf.clone(),
-                        None => {
-                            eprintln!("Unit {} is not connected", original_index);
-                            // Still store visualization data even if not connected
-                            let mut td = trajectory_data.lock().await;
-                            td.insert(original_index, TrajectoryData {
-                                points: viz_points,
-                                duration: total_duration,
-                                anchor: None,
-                                saved_points: None,
-                            });
-                            return;
-                        }
-                    }
+        ui.on_generate_primitive(move |row_index, shape, size_str| {
+            if row_index < 0 {
+                return;
+            }
+
+            let original_index = {
+                let Some(ui) = ui_weak.upgrade() else { return };
+                let units = ui.get_units();
+                let col = ui.get_sort_column();
+                let ascending = ui.get_sort_ascending();
+                let indices = sort_unit_indices(&units, col, ascending);
+                let row = row_index as usize;
+                if row >= indices.len() {
+                    return;
+                }
+                indices[row]
+            };
+
+            let size: f32 = size_str.parse().unwrap_or(0.5);
+            let shape = shape.to_string();
+            let swarm_state = swarm_state.clone();
+            let trajectory_data = trajectory_data.clone();
+
+            tokio::spawn(async move {
+                let Some(traj_config) = generate_primitive(&shape, size) else {
+                    eprintln!("Unknown primitive shape: {}", shape);
+                    return;
                 };
+                eprintln!("Generated {} trajectory (size {:.2}m)", shape, size);
+                upload_trajectory_config_to_unit(original_index, traj_config, swarm_state, trajectory_data).await;
+            });
+        });
+    }
 
-                // Upload trajectory to Crazyflie memory
-                use crazyflie_lib::subsystems::memory::MemoryType;
-                use crazyflie_lib::subsystems::memory::TrajectoryMemory;
+    // Generate and upload a back-and-forth "wave" trajectory to the selected unit:
+    // a square wave (X/Y moves alternate) or a zig-zag/sawtooth (X/Y move together).
+    {
+        let swarm_state = swarm_state.clone();
+        let trajectory_data = trajectory_data.clone();
+        let ui_weak = ui.as_weak();
 
-                let traj_mems = cf.memory.get_memories(Some(MemoryType::Trajectory));
-                if let Some(mem) = traj_mems.first() {
-                    if let Some(Ok(traj_mem)) = cf.memory.open_memory::<TrajectoryMemory>((*mem).clone()).await {
-                        match traj_mem.write_uncompressed(&segments, 0).await {
-                            Ok(bytes) => eprintln!("Uploaded {} bytes of trajectory data", bytes),
-                            Err(e) => {
-                                eprintln!("Failed to upload trajectory: {:?}", e);
-                                cf.memory.close_memory(traj_mem).await.ok();
-                                return;
-                            }
-                        }
-                        cf.memory.close_memory(traj_mem).await.ok();
-                    }
+        ui.on_generate_wave(move |row_index, x_str, y_str, reps_str, simultaneous, speed_str| {
+            if row_index < 0 {
+                return;
+            }
+
+            let original_index = {
+                let Some(ui) = ui_weak.upgrade() else { return };
+                let units = ui.get_units();
+                let col = ui.get_sort_column();
+                let ascending = ui.get_sort_ascending();
+                let indices = sort_unit_indices(&units, col, ascending);
+                let row = row_index as usize;
+                if row >= indices.len() {
+                    return;
                 }
+                indices[row]
+            };
 
-                // Define trajectory (ID=1, offset=0)
-                if let Err(e) = cf
-                    .high_level_commander
-                    .define_trajectory(1, 0, segment_count as u8, None)
-                    .await
-                {
-                    eprintln!("Failed to define trajectory: {:?}", e);
-                }
+            let x_step: f32 = x_str.trim().parse().unwrap_or(0.3);
+            let y_amp: f32 = y_str.trim().parse().unwrap_or(0.3);
+            let cycles: u32 = reps_str.trim().parse().unwrap_or(3);
+            let speed: f32 = speed_str.trim().parse().unwrap_or(PRIMITIVE_SPEED);
+            let swarm_state = swarm_state.clone();
+            let trajectory_data = trajectory_data.clone();
 
-                eprintln!("Trajectory uploaded and defined ({} segments, {:.1}s)", segment_count, total_duration);
-
-                // Store trajectory data for visualization and flight
-                {
-                    let mut td = trajectory_data.lock().await;
-                    td.insert(original_index, TrajectoryData {
-                        points: viz_points,
-                        duration: total_duration,
-                        anchor: None,
-                        saved_points: None,
-                    });
-                }
+            tokio::spawn(async move {
+                let (start, segments, viz_points, total_duration) =
+                    build_wave_compressed(x_step, y_amp, cycles, simultaneous, speed);
+                eprintln!(
+                    "Generated {} trajectory (x step {:.2}m, y amp {:.2}m, {} reps, {:.2} m/s)",
+                    if simultaneous { "zig-zag" } else { "square-wave" },
+                    x_step,
+                    y_amp,
+                    cycles,
+                    speed
+                );
+                upload_compressed_trajectory_to_unit(
+                    original_index,
+                    start,
+                    segments,
+                    viz_points,
+                    total_duration,
+                    swarm_state,
+                    trajectory_data,
+                )
+                .await;
             });
         });
     }
@@ -3204,6 +3902,7 @@ async fn main() {
     {
         let swarm_state = swarm_state.clone();
         let trajectory_data = trajectory_data.clone();
+        let viz_scene_state = viz_scene_state.clone();
         let ui_weak = ui.as_weak();
 
         ui.on_fly_trajectory(move |row_index| {
@@ -3226,13 +3925,14 @@ async fn main() {
 
             let swarm_state = swarm_state.clone();
             let trajectory_data = trajectory_data.clone();
+            let viz_scene_state = viz_scene_state.clone();
             let ui_weak = ui_weak.clone();
 
             tokio::spawn(async move {
-                let duration = {
+                let (duration, points) = {
                     let td = trajectory_data.lock().await;
                     match td.get(&original_index) {
-                        Some(d) => d.duration,
+                        Some(d) => (d.duration, d.points.clone()),
                         None => {
                             eprintln!("No trajectory uploaded for unit {}", original_index);
                             return;
@@ -3250,6 +3950,43 @@ async fn main() {
                         }
                     }
                 };
+
+                // Pre-flight geofence check: abort before arming if the trajectory
+                // would leave the flight area at its takeoff-height anchor.
+                {
+                    let (tx, rx) = tokio::sync::oneshot::channel();
+                    let ui_weak_inner = ui_weak.clone();
+                    let _ = slint::invoke_from_event_loop(move || {
+                        let pos = ui_weak_inner.upgrade().and_then(|ui| {
+                            ui.get_units().row_data(original_index).map(|u| [u.pos_x, u.pos_y, u.pos_z])
+                        });
+                        let _ = tx.send(pos);
+                    });
+                    if let Ok(Some(pos)) = rx.await {
+                        let anchor = [pos[0], pos[1], TRAJECTORY_TAKEOFF_HEIGHT];
+                        let areas = match viz_scene_state.lock() {
+                            Ok(s) => s.flight_areas.clone(),
+                            Err(_) => Vec::new(),
+                        };
+                        if let Err(bad) = trajectory_within_flight_areas(&points, anchor, &areas) {
+                            eprintln!(
+                                "Unit {}: trajectory leaves flight area at ({:.2}, {:.2}, {:.2}) - aborting",
+                                original_index, bad[0], bad[1], bad[2]
+                            );
+                            show_error_dialog(
+                                &ui_weak,
+                                "Trajectory outside flight area".into(),
+                                format!(
+                                    "The trajectory would leave the flight area at \
+                                     ({:.2}, {:.2}, {:.2}) m. Execution aborted - reduce the \
+                                     size or reposition the unit.",
+                                    bad[0], bad[1], bad[2]
+                                ),
+                            );
+                            return;
+                        }
+                    }
+                }
 
                 eprintln!("Arming...");
                 if let Err(e) = cf.platform.send_arming_request(true).await {
@@ -3320,12 +4057,11 @@ async fn main() {
                 {
                     eprintln!("Start trajectory failed: {:?}", e);
                 }
+                // Let the trajectory play out, then leave the unit hovering at its final
+                // setpoint (the HLC holds the last position) rather than landing. Use the
+                // Land button to bring it down.
                 tokio::time::sleep(tokio::time::Duration::from_secs_f32(duration + 0.5)).await;
-
-                eprintln!("Landing...");
-                if let Err(e) = cf.high_level_commander.land(0.0, None, 2.0, None).await {
-                    eprintln!("Land failed: {:?}", e);
-                }
+                eprintln!("Trajectory complete - hovering");
             });
         });
     }
@@ -3367,7 +4103,7 @@ async fn main() {
         let swarm_state = swarm_state.clone();
         let ui_weak = ui.as_weak();
 
-        ui.on_hlc_takeoff(move |row_index, height_str, yaw_str, time_str| {
+        ui.on_hlc_takeoff(move |row_index, height_str, yaw_str, time_str, relative| {
             if row_index < 0 {
                 return;
             }
@@ -3405,13 +4141,13 @@ async fn main() {
                     }
                 };
 
-                // Snapshot x,y as home before takeoff; z is the takeoff target height
-                let home_xy = {
+                // Snapshot current x,y,z before takeoff. x,y become the home position.
+                let home_pos = {
                     let (tx, rx) = tokio::sync::oneshot::channel();
                     let _ = slint::invoke_from_event_loop(move || {
                         let pos = if let Some(ui) = ui_weak_inner.upgrade() {
                             let units = ui.get_units();
-                            units.row_data(original_index).map(|u| [u.pos_x, u.pos_y])
+                            units.row_data(original_index).map(|u| [u.pos_x, u.pos_y, u.pos_z])
                         } else {
                             None
                         };
@@ -3419,12 +4155,22 @@ async fn main() {
                     });
                     rx.await.ok().flatten()
                 };
-                if let Some(xy) = home_xy {
-                    let home = [xy[0], xy[1], height];
+
+                // When relative, the entered height is added to the current Z so takeoff
+                // is "go up by H" regardless of the world-frame origin (which may be negative).
+                let target_height = match (relative, home_pos) {
+                    (true, Some(pos)) => pos[2] + height,
+                    _ => height,
+                };
+
+                if let Some(pos) = home_pos {
+                    let home = [pos[0], pos[1], target_height];
                     let mut state = swarm_state.lock().await;
                     if let Some(cu) = state.get_mut(&original_index) {
                         cu.home_position = Some(home);
-                        eprintln!("Unit {} home position saved: ({:.2}, {:.2}, {:.2})", original_index, home[0], home[1], home[2]);
+                        // Remember the launch surface so landing returns to it.
+                        cu.launch_z = Some(pos[2]);
+                        eprintln!("Unit {} home position saved: ({:.2}, {:.2}, {:.2}), launch z {:.2}", original_index, home[0], home[1], home[2], pos[2]);
                     }
                 }
 
@@ -3436,8 +4182,8 @@ async fn main() {
                 // Wait for propellers to spin up before taking off
                 tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
 
-                eprintln!("Taking off unit {} to {:.2}m, yaw={:.1}deg, over {:.1}s...", original_index, height, yaw_deg, duration);
-                if let Err(e) = cf.high_level_commander.take_off(height, Some(yaw_rad), duration, None).await {
+                eprintln!("Taking off unit {} to {:.2}m{}, yaw={:.1}deg, over {:.1}s...", original_index, target_height, if relative { " (relative)" } else { "" }, yaw_deg, duration);
+                if let Err(e) = cf.high_level_commander.take_off(target_height, Some(yaw_rad), duration, None).await {
                     eprintln!("Takeoff failed: {:?}", e);
                 }
             });
@@ -3447,14 +4193,15 @@ async fn main() {
     // HLC Goto
     {
         let swarm_state = swarm_state.clone();
+        let goto_targets = goto_targets.clone();
         let ui_weak = ui.as_weak();
 
-        ui.on_hlc_goto(move |row_index, x_str, y_str, z_str, yaw_str, relative| {
+        ui.on_hlc_goto(move |row_index, x_str, y_str, z_str, yaw_str, relative, speed_str| {
             if row_index < 0 {
                 return;
             }
 
-            let original_index = {
+            let (original_index, current_pos) = {
                 let Some(ui) = ui_weak.upgrade() else { return };
                 let units = ui.get_units();
                 let col = ui.get_sort_column();
@@ -3464,7 +4211,9 @@ async fn main() {
                 if row >= indices.len() {
                     return;
                 }
-                indices[row]
+                let idx = indices[row];
+                let pos = units.row_data(idx).map(|u| [u.pos_x, u.pos_y, u.pos_z]).unwrap_or([0.0, 0.0, 0.0]);
+                (idx, pos)
             };
 
             let x: f32 = x_str.parse().unwrap_or(0.0);
@@ -3472,8 +4221,40 @@ async fn main() {
             let z: f32 = z_str.parse().unwrap_or(0.0);
             let yaw_deg: f32 = yaw_str.parse().unwrap_or(0.0);
             let yaw_rad = yaw_deg.to_radians();
+            let speed: f32 = speed_str.parse().unwrap_or(1.0);
+
+            // For a relative goto the target (x,y,z) is itself the displacement vector;
+            // for an absolute goto the displacement is target minus current position.
+            let distance = if relative {
+                (x * x + y * y + z * z).sqrt()
+            } else {
+                let dx = x - current_pos[0];
+                let dy = y - current_pos[1];
+                let dz = z - current_pos[2];
+                (dx * dx + dy * dy + dz * dz).sqrt()
+            };
+
+            // duration = distance / speed. The firmware uses a rest-to-rest min-snap profile
+            // whose peak velocity is ~1.875x the average (= set speed) independent of distance,
+            // so short moves need correspondingly short durations to actually hit the set speed -
+            // no large floor. The tiny 0.1s floor only guards a near-zero-distance no-op move
+            // (and a zero/negative speed) from producing an invalid duration.
+            let duration: f32 = if speed > 0.0 {
+                (distance / speed).max(0.1)
+            } else {
+                2.0
+            };
+
+            // Absolute world-space target for the visualization marker. A relative
+            // goto displaces from the current position; an absolute goto is the target.
+            let target = if relative {
+                [current_pos[0] + x, current_pos[1] + y, current_pos[2] + z]
+            } else {
+                [x, y, z]
+            };
 
             let swarm_state = swarm_state.clone();
+            let goto_targets = goto_targets.clone();
 
             tokio::spawn(async move {
                 let cf = {
@@ -3487,11 +4268,13 @@ async fn main() {
                     }
                 };
 
+                goto_targets.lock().await.insert(original_index, target);
+
                 eprintln!(
-                    "Goto unit {} ({:.2}, {:.2}, {:.2}) yaw={:.1}deg relative={} over 2.0s...",
-                    original_index, x, y, z, yaw_deg, relative
+                    "Goto unit {} ({:.2}, {:.2}, {:.2}) yaw={:.1}deg relative={} dist={:.2}m at {:.2}m/s over {:.1}s...",
+                    original_index, x, y, z, yaw_deg, relative, distance, speed, duration
                 );
-                if let Err(e) = cf.high_level_commander.go_to(x, y, z, yaw_rad, 2.0, relative, false, None).await {
+                if let Err(e) = cf.high_level_commander.go_to(x, y, z, yaw_rad, duration, relative, false, None).await {
                     eprintln!("Goto failed: {:?}", e);
                 }
             });
@@ -3501,6 +4284,7 @@ async fn main() {
     // HLC Land
     {
         let swarm_state = swarm_state.clone();
+        let goto_targets = goto_targets.clone();
         let ui_weak = ui.as_weak();
 
         ui.on_hlc_land(move |row_index| {
@@ -3523,17 +4307,17 @@ async fn main() {
                 (idx, z)
             };
 
-            // Landing duration scales with current height at 2 seconds per meter,
-            // with a 1 second floor so a near-zero reading still descends gently.
-            let duration: f32 = (pos_z * 2.0).max(1.0);
-
             let swarm_state = swarm_state.clone();
+            let goto_targets = goto_targets.clone();
 
             tokio::spawn(async move {
-                let cf = {
+                // Landing cancels any in-progress goto, so drop its marker.
+                goto_targets.lock().await.remove(&original_index);
+
+                let (cf, launch_z) = {
                     let state = swarm_state.lock().await;
                     match state.get(&original_index) {
-                        Some(cu) => cu.cf.clone(),
+                        Some(cu) => (cu.cf.clone(), cu.launch_z),
                         None => {
                             eprintln!("Unit {} is not connected", original_index);
                             return;
@@ -3541,8 +4325,18 @@ async fn main() {
                     }
                 };
 
-                eprintln!("Landing unit {} from {:.2}m over {:.1}s...", original_index, pos_z, duration);
-                if let Err(e) = cf.high_level_commander.land(0.0, None, duration, None).await {
+                // Land back to the surface the unit launched from. The world origin
+                // may be non-zero (even negative), so descend to the captured launch Z
+                // rather than a hard-coded 0.0. Fall back to 0.0 if it never took off
+                // through this app (e.g. connected mid-flight).
+                let target_z = launch_z.unwrap_or(0.0);
+                // Duration scales with the actual descent distance at 2 seconds per
+                // meter, with a 1 second floor. Using the absolute distance keeps this
+                // correct when pos_z or target_z is negative.
+                let duration: f32 = ((pos_z - target_z).abs() * 2.0).max(1.0);
+
+                eprintln!("Landing unit {} from {:.2}m to {:.2}m over {:.1}s...", original_index, pos_z, target_z, duration);
+                if let Err(e) = cf.high_level_commander.land(target_z, None, duration, None).await {
                     eprintln!("Land failed: {:?}", e);
                 }
             });
@@ -3647,8 +4441,8 @@ async fn main() {
             ui.set_unit_goto_x_text(x_str.clone());
             ui.set_unit_goto_y_text(y_str.clone());
             ui.set_unit_goto_z_text(z_str.clone());
-            // Trigger the same path as the Goto button (yaw=0, relative=false)
-            ui.invoke_hlc_goto(row_index, x_str, y_str, z_str, "0".into(), false);
+            // Trigger the same path as the Goto button (yaw=0, relative=false, 1.0 m/s)
+            ui.invoke_hlc_goto(row_index, x_str, y_str, z_str, "0".into(), false, "1.0".into());
         });
     }
 
@@ -3875,8 +4669,16 @@ async fn main() {
     {
         let swarm_state = swarm_state.clone();
         let ui_weak = ui.as_weak();
+        let plot_selected_index = plot_selected_index.clone();
 
         ui.on_unit_row_selected(move |row_index| {
+            // Remember which unit a "Start logging" should bind to.
+            if let Some(ui) = ui_weak.upgrade() {
+                let units = ui.get_units();
+                let indices = sort_unit_indices(&units, ui.get_sort_column(), ui.get_sort_ascending());
+                let orig = if row_index >= 0 { indices.get(row_index as usize).copied() } else { None };
+                *plot_selected_index.lock().unwrap() = orig;
+            }
             fetch_unit_details(ui_weak.clone(), swarm_state.clone(), row_index);
         });
     }
@@ -3885,6 +4687,7 @@ async fn main() {
     {
         let swarm_state = swarm_state.clone();
         let ui_weak = ui.as_weak();
+        let plot_selected_index = plot_selected_index.clone();
 
         ui.on_viz_unit_clicked(move |click_x, click_y| {
             let Some(ui) = ui_weak.upgrade() else { return };
@@ -3925,10 +4728,13 @@ async fn main() {
             match best {
                 Some((row, _)) => {
                     ui.set_viz_selected_unit(row);
+                    let indices = sort_unit_indices(&ui.get_units(), ui.get_sort_column(), ui.get_sort_ascending());
+                    *plot_selected_index.lock().unwrap() = indices.get(row as usize).copied();
                     fetch_unit_details(ui_weak.clone(), swarm_state.clone(), row);
                 }
                 None => {
                     ui.set_viz_selected_unit(-1);
+                    *plot_selected_index.lock().unwrap() = None;
                 }
             }
         });
@@ -3942,6 +4748,7 @@ async fn main() {
         let ui_weak = ui.as_weak();
         let positioning_source = positioning_source.clone();
         let positioning_data = positioning_data.clone();
+        let goto_targets = goto_targets.clone();
         let journal_store = journal_store.clone();
         let console_store = console_store.clone();
 
@@ -3976,6 +4783,7 @@ async fn main() {
             let ui_weak = ui_weak.clone();
             let positioning_source = positioning_source.clone();
             let positioning_data = positioning_data.clone();
+            let goto_targets = goto_targets.clone();
             let journal_store = journal_store.clone();
             let console_store = console_store.clone();
 
@@ -4010,7 +4818,7 @@ async fn main() {
 
                 {
                     let mut state = swarm_state.lock().await;
-                    state.insert(original_index, ConnectedUnit { cf: cf.clone(), identify_stop: None, home_position: None });
+                    state.insert(original_index, ConnectedUnit { cf: cf.clone(), identify_stop: None, home_position: None, launch_z: None });
                 }
 
                 let deck_lighthouse: u8 = cf.param.get("deck.bcLighthouse4").await.unwrap_or(0);
@@ -4075,7 +4883,7 @@ async fn main() {
                     }
                 }
 
-                start_telemetry(original_index, uri.clone(), cf.clone(), ui_weak, positioning_data, positioning_source).await;
+                start_telemetry(original_index, uri.clone(), cf.clone(), ui_weak, positioning_data, positioning_source, goto_targets).await;
             });
         });
     }
@@ -4975,6 +5783,7 @@ async fn main() {
         let app_weak = ui.as_weak();
         let positioning_data = positioning_data.clone();
         let trajectory_data = trajectory_data.clone();
+        let goto_targets = goto_targets.clone();
         let coverage_state = coverage_state.clone();
         let tdoa3_state = tdoa3_state.clone();
         let wizard_state_render = wizard_state.clone();
@@ -5137,6 +5946,26 @@ async fn main() {
                                 }
                             }
 
+                            // Active goto targets: a magenta marker at each target plus a
+                            // faint line from the unit's current position to it. Entries are
+                            // removed by the telemetry loop once the unit arrives.
+                            let mut goto_points = Vec::new();
+                            let mut goto_lines = Vec::new();
+                            if let Ok(gt) = goto_targets.try_lock() {
+                                for (unit_idx, t) in gt.iter() {
+                                    goto_points.push(renderer::UnitPos {
+                                        x: t[0], y: t[1], z: t[2],
+                                        color: [1.0, 0.2, 0.9],
+                                        selected: false,
+                                    });
+                                    if let Some(u) = units_model.row_data(*unit_idx) {
+                                        goto_lines.extend_from_slice(&[
+                                            u.pos_x, u.pos_y, u.pos_z, t[0], t[1], t[2],
+                                        ]);
+                                    }
+                                }
+                            }
+
                             // Scene overlay (flight/waypoint areas + pads + obstacles)
                             let (flight_areas, waypoint_areas, pads, obs_tris, obs_wires, obs_colors) = if app.get_viz_show_scene_overlay() {
                                 if let Ok(s) = viz_scene_state.try_lock() {
@@ -5157,6 +5986,7 @@ async fn main() {
                             let texture = renderer.render(
                                 width, height, yaw, pitch, distance, pan_x, pan_y, &unit_positions, &fixed_points, &trajectory_lines,
                                 &flight_areas, &waypoint_areas, &pads, &obs_tris, &obs_wires, &obs_colors,
+                                &goto_points, &goto_lines,
                             );
                             app.set_viz_texture(texture);
 
@@ -10032,7 +10862,561 @@ async fn main() {
         });
     }
 
+    // ---- LPS sniffer tab ----
+    {
+        let sniffer_state: Arc<std::sync::Mutex<sniffer::SnifferState>> =
+            Arc::new(std::sync::Mutex::new(sniffer::SnifferState::default()));
+        let sniffer_stop = Arc::new(AtomicBool::new(false));
+        // Opt-in capture: while true the reader thread writes every sniffed
+        // packet to a JSONL recording file. Toggled by the UI "Record" checkbox.
+        let sniffer_recording = Arc::new(AtomicBool::new(false));
+        let sniffer_thread: Arc<std::sync::Mutex<Option<std::thread::JoinHandle<()>>>> =
+            Arc::new(std::sync::Mutex::new(None));
+        // Back-pressure: true while a UI refresh is queued but not yet applied,
+        // so the reader never floods the event loop with model rebuilds.
+        let sniffer_ui_pending = Arc::new(AtomicBool::new(false));
+
+        // Populate the port list on launch.
+        {
+            let ports: Vec<slint::SharedString> =
+                sniffer::list_ports().into_iter().map(Into::into).collect();
+            ui.set_sniffer_port_names(slint::ModelRc::new(slint::VecModel::from(ports)));
+        }
+
+        {
+            let ui_weak = ui.as_weak();
+            ui.on_sniffer_refresh_ports(move || {
+                let Some(ui) = ui_weak.upgrade() else { return };
+                let ports: Vec<slint::SharedString> =
+                    sniffer::list_ports().into_iter().map(Into::into).collect();
+                ui.set_sniffer_port_names(slint::ModelRc::new(slint::VecModel::from(ports)));
+            });
+        }
+
+        {
+            let ui_weak = ui.as_weak();
+            let state = sniffer_state.clone();
+            let stop = sniffer_stop.clone();
+            let recording = sniffer_recording.clone();
+            let thread_holder = sniffer_thread.clone();
+            let ui_pending = sniffer_ui_pending.clone();
+            ui.on_sniffer_connect(move || {
+                eprintln!("[sniffer] on_sniffer_connect: callback entered (UI thread)");
+                let Some(ui) = ui_weak.upgrade() else { return };
+                // Ignore if a reader is already running.
+                if thread_holder.lock().unwrap().is_some() {
+                    eprintln!("[sniffer] on_sniffer_connect: already running, ignoring");
+                    return;
+                }
+                let idx = ui.get_sniffer_port_index().max(0) as usize;
+                let names = ui.get_sniffer_port_names();
+                let Some(port) = names.row_data(idx) else {
+                    ui.set_sniffer_status("No serial port selected".into());
+                    return;
+                };
+                stop.store(false, Ordering::Relaxed);
+                ui_pending.store(false, Ordering::Relaxed);
+                let handle = start_sniffer(
+                    port.to_string(),
+                    state.clone(),
+                    stop.clone(),
+                    recording.clone(),
+                    ui_weak.clone(),
+                    ui_pending.clone(),
+                );
+                *thread_holder.lock().unwrap() = Some(handle);
+                eprintln!("[sniffer] on_sniffer_connect: callback returning (UI thread free)");
+            });
+        }
+
+        {
+            let stop = sniffer_stop.clone();
+            let thread_holder = sniffer_thread.clone();
+            ui.on_sniffer_disconnect(move || {
+                stop.store(true, Ordering::Relaxed);
+                if let Some(h) = thread_holder.lock().unwrap().take() {
+                    let _ = h.join();
+                }
+            });
+        }
+
+        {
+            let ui_weak = ui.as_weak();
+            let state = sniffer_state.clone();
+            ui.on_sniffer_solve_survey(move || {
+                if let Ok(mut st) = state.lock() {
+                    st.solve_survey();
+                }
+                update_sniffer_ui(&ui_weak, &state, None);
+            });
+        }
+
+        {
+            let state = sniffer_state.clone();
+            ui.on_sniffer_set_paused(move |p| {
+                if let Ok(mut st) = state.lock() {
+                    st.paused = p;
+                }
+            });
+        }
+
+        {
+            // The reader thread opens/closes the recording file to match this
+            // flag; toggling it before connecting simply starts recording once
+            // the reader is up.
+            let recording = sniffer_recording.clone();
+            ui.on_sniffer_set_recording(move |on| {
+                recording.store(on, Ordering::Relaxed);
+            });
+        }
+
+        {
+            let state = sniffer_state.clone();
+            ui.on_sniffer_save_survey(move || {
+                let survey = match state.lock() {
+                    Ok(st) => st.survey.clone(),
+                    Err(_) => return,
+                };
+                if survey.is_empty() {
+                    return;
+                }
+                tokio::spawn(async move {
+                    let Some(file) = rfd::AsyncFileDialog::new()
+                        .add_filter("YAML", &["yaml", "yml"])
+                        .set_file_name("sniffer-geometry.yaml")
+                        .save_file()
+                        .await
+                    else {
+                        return;
+                    };
+                    // Same shape the Loco tab loads: { id: { x, y, z } }.
+                    let entries: std::collections::BTreeMap<u8, AnchorPositionEntry> = survey
+                        .iter()
+                        .map(|s| {
+                            (
+                                s.id,
+                                AnchorPositionEntry {
+                                    x: s.pos[0],
+                                    y: s.pos[1],
+                                    z: s.pos[2],
+                                },
+                            )
+                        })
+                        .collect();
+                    match serde_yaml::to_string(&entries) {
+                        Ok(text) => {
+                            if let Err(e) = std::fs::write(file.path(), text) {
+                                eprintln!("Failed to write survey geometry: {e}");
+                            }
+                        }
+                        Err(e) => eprintln!("Failed to serialize survey geometry: {e}"),
+                    }
+                });
+            });
+        }
+
+        // Stop the reader cleanly when the window closes.
+        {
+            let stop = sniffer_stop.clone();
+            let thread_holder = sniffer_thread.clone();
+            ui.window().on_close_requested(move || {
+                stop.store(true, Ordering::Relaxed);
+                if let Some(h) = thread_holder.lock().unwrap().take() {
+                    let _ = h.join();
+                }
+                slint::quit_event_loop().ok();
+                slint::CloseRequestResponse::HideWindow
+            });
+        }
+    }
+
     ui.run().expect("Failed to run UI");
+}
+
+/// Build the Slint models from the current sniffer state and push them to the
+/// UI thread. Safe to call from the serial reader thread.
+fn update_sniffer_ui(
+    ui_weak: &slint::Weak<AppWindow>,
+    state: &Arc<std::sync::Mutex<sniffer::SnifferState>>,
+    pending: Option<Arc<AtomicBool>>,
+) {
+    let build_start = std::time::Instant::now();
+    let Ok(st) = state.lock() else {
+        eprintln!("[sniffer] update_sniffer_ui: state lock poisoned/contended, skipping");
+        if let Some(p) = pending {
+            p.store(false, Ordering::Release);
+        }
+        return;
+    };
+
+    let connected = st.connected;
+    let total_packets = st.total_packets as i32;
+    let status = if let Some(ref e) = st.error {
+        format!("Error: {e}")
+    } else if st.connected {
+        format!("Connected ({})", st.port_name)
+    } else {
+        "Disconnected".to_string()
+    };
+
+    // Per-anchor stats, sorted by source id.
+    let mut ids: Vec<u8> = st.stats.keys().copied().collect();
+    ids.sort_unstable();
+    let mut total_rate = 0.0f32;
+    let mut anchor_rows: Vec<SnifferAnchorRow> = Vec::with_capacity(ids.len());
+    for id in &ids {
+        let s = &st.stats[id];
+        total_rate += s.rate_hz();
+        let ago = (st.now - s.last_seen).max(0.0);
+        anchor_rows.push(SnifferAnchorRow {
+            id: *id as i32,
+            kind: s.kind.label().into(),
+            rate: s.rate_hz(),
+            count: s.count as i32,
+            lost: s.lost as i32,
+            last_seen: format!("{ago:.1} s ago").into(),
+            rssi: s.rx_power.unwrap_or(0.0),
+            has_rssi: s.rx_power.is_some(),
+            nlos: s.nlos().unwrap_or(0.0),
+        });
+    }
+
+    // Aggregate loss split: where packets are going missing.
+    let wire_dropped = st.wire_dropped as i32;
+    let host_resyncs = st.host_resyncs as i32;
+    let air_lost = st.air_lost() as i32;
+
+    // Recording status (set by the reader thread).
+    let recording = st.recording;
+    let rec_count = st.rec_count as i32;
+    let rec_path = st.rec_path.clone();
+
+    // Distance matrix.
+    let mids = st.matrix.ids();
+    let matrix_ids: Vec<i32> = mids.iter().map(|&i| i as i32).collect();
+    // Plain data only — `SnifferMatrixRow`'s inner model isn't `Send`, so the
+    // rows are assembled inside the event-loop closure below.
+    let matrix_rows_data: Vec<(i32, Vec<slint::SharedString>)> = mids
+        .iter()
+        .map(|&ri| {
+            let cells = mids
+                .iter()
+                .map(|&ci| {
+                    if ri == ci {
+                        slint::SharedString::from("—")
+                    } else if let Some(d) = st.matrix.distance(ri, ci) {
+                        slint::SharedString::from(format!("{d:.2}"))
+                    } else {
+                        slint::SharedString::from("·")
+                    }
+                })
+                .collect();
+            (ri as i32, cells)
+        })
+        .collect();
+
+    // Survey results.
+    let survey_status = st.survey_status.clone();
+    let survey_rows: Vec<SnifferSurveyRow> = st
+        .survey
+        .iter()
+        .map(|s| SnifferSurveyRow {
+            id: s.id as i32,
+            x: s.pos[0],
+            y: s.pos[1],
+            z: s.pos[2],
+            residual: s.residual,
+            has_known: st.lpp_positions.contains_key(&s.id),
+        })
+        .collect();
+
+    // Packet feed, newest first.
+    let feed_rows: Vec<SnifferFeedRow> = st
+        .feed
+        .iter()
+        .rev()
+        .take(200)
+        .map(|p| {
+            let info = match p.kind {
+                sniffer::PacketKind::Tdoa3 => {
+                    let dists = p
+                        .remote_anchors
+                        .iter()
+                        .filter(|r| r.distance_ticks.is_some())
+                        .count();
+                    format!(
+                        "seq {}, {} remotes ({} ranged){}",
+                        p.seq.map(|s| s as i32).unwrap_or(-1),
+                        p.remote_anchors.len(),
+                        dists,
+                        if p.lpp_position.is_some() { ", +pos" } else { "" }
+                    )
+                }
+                _ => match p.seq {
+                    Some(s) => format!("seq {s}, {} B", p.payload_len),
+                    None => format!("{} B", p.payload_len),
+                },
+            };
+            SnifferFeedRow {
+                time: format!("@{:010x}", p.rx_timestamp).into(),
+                from: p.from as i32,
+                to: p.to as i32,
+                kind: p.kind.label().into(),
+                info: info.into(),
+            }
+        })
+        .collect();
+
+    let total_packets_dbg = st.total_packets;
+    drop(st);
+
+    eprintln!(
+        "[sniffer] build: total={} anchors={} matrix={}x{} survey={} feed={} build_took={:?}",
+        total_packets_dbg,
+        anchor_rows.len(),
+        matrix_ids.len(),
+        matrix_ids.len(),
+        survey_rows.len(),
+        feed_rows.len(),
+        build_start.elapsed(),
+    );
+
+    let ui_weak = ui_weak.clone();
+    let post_instant = std::time::Instant::now();
+    slint::invoke_from_event_loop(move || {
+        // Clear the in-flight flag as soon as this update runs, so the reader is
+        // free to queue the next one — but only after the prior render finished.
+        if let Some(p) = pending {
+            p.store(false, Ordering::Release);
+        }
+        let apply_start = std::time::Instant::now();
+        eprintln!(
+            "[sniffer] applied on UI thread: queue_latency={:?}",
+            post_instant.elapsed(),
+        );
+        let Some(ui) = ui_weak.upgrade() else {
+            eprintln!("[sniffer] applied: ui weak upgrade failed");
+            return;
+        };
+        ui.set_sniffer_connected(connected);
+        ui.set_sniffer_status(status.into());
+        ui.set_sniffer_total_packets(total_packets);
+        ui.set_sniffer_total_rate(total_rate);
+        ui.set_sniffer_wire_dropped(wire_dropped);
+        ui.set_sniffer_host_resyncs(host_resyncs);
+        ui.set_sniffer_air_lost(air_lost);
+        ui.set_sniffer_recording_active(recording);
+        ui.set_sniffer_rec_count(rec_count);
+        ui.set_sniffer_rec_path(rec_path.into());
+        ui.set_sniffer_anchor_rows(slint::ModelRc::new(slint::VecModel::from(anchor_rows)));
+        ui.set_sniffer_matrix_ids(slint::ModelRc::new(slint::VecModel::from(matrix_ids)));
+        let matrix_rows: Vec<SnifferMatrixRow> = matrix_rows_data
+            .into_iter()
+            .map(|(id, cells)| SnifferMatrixRow {
+                id,
+                cells: slint::ModelRc::new(slint::VecModel::from(cells)),
+            })
+            .collect();
+        ui.set_sniffer_matrix_rows(slint::ModelRc::new(slint::VecModel::from(matrix_rows)));
+        ui.set_sniffer_survey_status(survey_status.into());
+        ui.set_sniffer_survey_rows(slint::ModelRc::new(slint::VecModel::from(survey_rows)));
+        ui.set_sniffer_feed_rows(slint::ModelRc::new(slint::VecModel::from(feed_rows)));
+        eprintln!(
+            "[sniffer] applied: set_models_took={:?}",
+            apply_start.elapsed(),
+        );
+    })
+    .ok();
+}
+
+/// Open the serial port, switch the node to binary sniffer mode, and stream
+/// decoded packets into `state` until `stop` is set. Runs on its own thread.
+fn start_sniffer(
+    port: String,
+    state: Arc<std::sync::Mutex<sniffer::SnifferState>>,
+    stop: Arc<AtomicBool>,
+    recording: Arc<AtomicBool>,
+    ui_weak: slint::Weak<AppWindow>,
+    ui_pending: Arc<AtomicBool>,
+) -> std::thread::JoinHandle<()> {
+    std::thread::spawn(move || {
+        eprintln!("[sniffer] reader thread started, opening {port}");
+        let opened = serialport::new(&port, 9600)
+            .timeout(std::time::Duration::from_millis(50))
+            .open();
+        let mut sp = match opened {
+            Ok(p) => {
+                eprintln!("[sniffer] port {port} opened");
+                p
+            }
+            Err(e) => {
+                eprintln!("[sniffer] open failed: {e}");
+                if let Ok(mut st) = state.lock() {
+                    st.connected = false;
+                    st.port_name = port.clone();
+                    st.error = Some(e.to_string());
+                }
+                update_sniffer_ui(&ui_weak, &state, None);
+                return;
+            }
+        };
+
+        // The node only enables its USB output once the host asserts DTR — it
+        // watches SET_CONTROL_LINE_STATE and drops everything until then.
+        // pyserial asserts DTR on open; the serialport crate does not, so do it
+        // explicitly or we never see a single byte.
+        match sp.write_data_terminal_ready(true) {
+            Ok(()) => eprintln!("[sniffer] write_data_terminal_ready(true) OK"),
+            Err(e) => eprintln!("[sniffer] write_data_terminal_ready FAILED: {e}"),
+        }
+
+        // Switch the node from human-readable to binary output.
+        match sp.write_all(b"b") {
+            Ok(()) => eprintln!("[sniffer] wrote 'b' OK"),
+            Err(e) => eprintln!("[sniffer] write 'b' FAILED: {e}"),
+        }
+        match sp.flush() {
+            Ok(()) => eprintln!("[sniffer] flush OK — entering read loop"),
+            Err(e) => eprintln!("[sniffer] flush FAILED: {e}"),
+        }
+        if let Ok(mut st) = state.lock() {
+            st.connected = true;
+            st.error = None;
+            st.port_name = port.clone();
+        }
+        update_sniffer_ui(&ui_weak, &state, None);
+
+        let start = std::time::Instant::now();
+        let mut dec = sniffer::FrameDecoder::new();
+        let mut rxbuf = [0u8; 2048];
+        let mut packets = Vec::new();
+        // Opt-in recorder, opened/closed in the loop to track the `recording`
+        // flag. Owned here so all file I/O stays off the shared state mutex.
+        let mut recorder: Option<sniffer::SnifferRecorder> = None;
+        let mut last_ui = std::time::Instant::now();
+        let mut bytes_total: u64 = 0;
+        let mut packets_total: u64 = 0;
+        let mut reads_total: u64 = 0;
+        let mut timeouts: u64 = 0;
+        let mut zero_reads: u64 = 0;
+
+        while !stop.load(Ordering::Relaxed) {
+            // Open/close the recording file to match the UI checkbox.
+            match (recording.load(Ordering::Relaxed), recorder.is_some()) {
+                (true, false) => {
+                    let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S").to_string();
+                    match sniffer::SnifferRecorder::create(
+                        std::path::Path::new("recordings/sniffer"),
+                        &stamp,
+                    ) {
+                        Ok(r) => {
+                            eprintln!("[sniffer] recording to {}", r.path.display());
+                            recorder = Some(r);
+                        }
+                        Err(e) => {
+                            eprintln!("[sniffer] cannot start recording: {e}");
+                            // Clear the flag so we don't retry (and spam) every loop.
+                            recording.store(false, Ordering::Relaxed);
+                        }
+                    }
+                }
+                (false, true) => {
+                    if let Some(mut r) = recorder.take() {
+                        r.flush();
+                        eprintln!(
+                            "[sniffer] recording stopped: {} packets -> {}",
+                            r.count,
+                            r.path.display()
+                        );
+                    }
+                }
+                _ => {}
+            }
+
+            match sp.read(&mut rxbuf) {
+                Ok(0) => {
+                    zero_reads += 1;
+                }
+                Ok(n) => {
+                    reads_total += 1;
+                    bytes_total += n as u64;
+                    packets.clear();
+                    dec.push(&rxbuf[..n], &mut packets);
+                    packets_total += packets.len() as u64;
+                    let now = start.elapsed().as_secs_f64();
+                    // Record every decoded sample, outside the state lock, so a
+                    // recording is full-fidelity (the live feed is capped).
+                    if let Some(r) = recorder.as_mut() {
+                        for p in &packets {
+                            r.record(now, p);
+                        }
+                    }
+                    if let Ok(mut st) = state.lock() {
+                        st.now = now;
+                        st.host_resyncs = dec.resyncs;
+                        for p in packets.drain(..) {
+                            st.ingest(p, now);
+                        }
+                    }
+                }
+                Err(ref e) if e.kind() == std::io::ErrorKind::TimedOut => {
+                    timeouts += 1;
+                    if let Ok(mut st) = state.lock() {
+                        st.now = start.elapsed().as_secs_f64();
+                    }
+                }
+                Err(ref e) => {
+                    eprintln!("[sniffer] read error: {e} — stopping reader");
+                    break;
+                }
+            }
+            // Throttle to ~6 Hz. Reset the timer every tick so the debug line is
+            // rate-limited even when an update is skipped, and watch ui_pending:
+            // if it stays `true` the event loop isn't draining our closures.
+            if last_ui.elapsed().as_millis() >= 150 {
+                last_ui = std::time::Instant::now();
+                // Flush buffered samples and mirror recording status to the UI.
+                if let Some(r) = recorder.as_mut() {
+                    r.flush();
+                }
+                if let Ok(mut st) = state.lock() {
+                    st.recording = recorder.is_some();
+                    st.rec_count = recorder.as_ref().map(|r| r.count).unwrap_or(0);
+                    st.rec_path = recorder
+                        .as_ref()
+                        .map(|r| r.path.display().to_string())
+                        .unwrap_or_default();
+                }
+                let pend = ui_pending.load(Ordering::Acquire);
+                eprintln!(
+                    "[sniffer] tick: okN={reads_total} bytes={bytes_total} packets={packets_total} timeouts={timeouts} zero={zero_reads} ui_pending={pend}"
+                );
+                if !ui_pending.swap(true, Ordering::AcqRel) {
+                    update_sniffer_ui(&ui_weak, &state, Some(ui_pending.clone()));
+                } else {
+                    eprintln!("[sniffer] tick: skipped update (previous still in flight)");
+                }
+            }
+        }
+
+        eprintln!("[sniffer] reader loop exited (stop={})", stop.load(Ordering::Relaxed));
+        // Finalise any in-progress recording before the thread ends.
+        if let Some(mut r) = recorder.take() {
+            r.flush();
+            eprintln!(
+                "[sniffer] recording closed: {} packets -> {}",
+                r.count,
+                r.path.display()
+            );
+        }
+        if let Ok(mut st) = state.lock() {
+            st.connected = false;
+            st.recording = false;
+            st.rec_count = 0;
+            st.rec_path = String::new();
+        }
+        update_sniffer_ui(&ui_weak, &state, None);
+    })
 }
 
 fn parse_radio_uri(uri: &str) -> Option<(usize, u8, [u8; 5])> {
@@ -10314,6 +11698,7 @@ async fn start_telemetry(
     ui_weak: slint::Weak<AppWindow>,
     positioning_data: SharedPositioningData,
     positioning_source: Arc<Mutex<Option<usize>>>,
+    goto_targets: SharedGotoTargets,
 ) {
     let mut log_block = match cf.log.create_block().await {
         Ok(block) => block,
@@ -10391,6 +11776,21 @@ async fn start_telemetry(
             .get("stateEstimate.z")
             .and_then(|v| (*v).try_into().ok())
             .unwrap_or(0.0);
+
+        // Drop the goto marker once the unit has arrived at its target.
+        {
+            const GOTO_REACHED_TOLERANCE: f32 = 0.15; // metres
+            let mut targets = goto_targets.lock().await;
+            if let Some(t) = targets.get(&index) {
+                let dx = x - t[0];
+                let dy = y - t[1];
+                let dz = z - t[2];
+                if (dx * dx + dy * dy + dz * dz).sqrt() <= GOTO_REACHED_TOLERANCE {
+                    targets.remove(&index);
+                }
+            }
+        }
+
         let vbat: f32 = data
             .data
             .get("pm.vbat")
@@ -10506,6 +11906,7 @@ async fn start_telemetry(
     }
 
     // Connection lost
+    goto_targets.lock().await.remove(&index);
     update_unit(&ui_weak, index, |u| {
         u.state = UnitState::Disconnected;
         u.pos_x = 0.0;

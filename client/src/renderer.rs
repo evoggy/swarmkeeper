@@ -292,6 +292,8 @@ impl Scene3DRenderer {
         obstacle_triangles: &[Vec<f32>],
         obstacle_wireframes: &[Vec<f32>],
         obstacle_colors: &[[f32; 3]],
+        goto_points: &[UnitPos],
+        goto_lines: &[f32],
     ) -> slint::Image {
         let width = width.max(1);
         let height = height.max(1);
@@ -482,6 +484,42 @@ impl Scene3DRenderer {
                         gl.draw_arrays(glow::LINE_STRIP, idx as i32 * per_pad, per_pad);
                     }
                 }
+            }
+
+            // Draw goto targets: faint connecting line from unit to target, a marker
+            // point, a 3D crosshair, and a drop line to the ground.
+            if !goto_lines.is_empty() {
+                gl.uniform_3_f32(Some(&self.u_color), 0.6, 0.15, 0.55);
+                gl.uniform_1_f32(Some(&self.u_point_size), 1.0);
+                upload_and_draw(gl, self.vbo, goto_lines, glow::LINES);
+                gl.draw_arrays(glow::LINES, 0, goto_lines.len() as i32 / 3);
+            }
+            for pt in goto_points {
+                let c = pt.color;
+                gl.uniform_3_f32(Some(&self.u_color), c[0], c[1], c[2]);
+
+                // Marker point
+                gl.uniform_1_f32(Some(&self.u_point_size), 9.0);
+                let pos = [pt.x, pt.y, pt.z];
+                upload_and_draw(gl, self.vbo, &pos, glow::POINTS);
+                gl.draw_arrays(glow::POINTS, 0, 1);
+
+                // 3D crosshair through the target (0.15m arms on each axis)
+                let a = 0.15;
+                let cross = [
+                    pt.x - a, pt.y, pt.z, pt.x + a, pt.y, pt.z,
+                    pt.x, pt.y - a, pt.z, pt.x, pt.y + a, pt.z,
+                    pt.x, pt.y, pt.z - a, pt.x, pt.y, pt.z + a,
+                ];
+                gl.uniform_1_f32(Some(&self.u_point_size), 1.0);
+                upload_and_draw(gl, self.vbo, &cross, glow::LINES);
+                gl.draw_arrays(glow::LINES, 0, 6);
+
+                // Drop line to ground
+                gl.uniform_3_f32(Some(&self.u_color), c[0] * 0.4, c[1] * 0.4, c[2] * 0.4);
+                let drop_line = [pt.x, pt.y, pt.z, pt.x, pt.y, 0.0];
+                upload_and_draw(gl, self.vbo, &drop_line, glow::LINES);
+                gl.draw_arrays(glow::LINES, 0, 2);
             }
 
             gl.use_program(None);

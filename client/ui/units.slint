@@ -1,6 +1,7 @@
 import { Button, Palette, ScrollView, VerticalBox, HorizontalBox, LineEdit, CheckBox, ComboBox } from "std-widgets.slint";
 import { UnitData, UnitState, JournalEntryData } from "unit-card.slint";
 import { SectionHeader } from "widgets.slint";
+import { PlotPanel, PlotBridge } from "plot.slint";
 
 component HeaderCell inherits Rectangle {
     in property <string> label;
@@ -353,8 +354,10 @@ export component UnitSidebar inherits Rectangle {
     callback upload-trajectory-clicked();
     callback fly-trajectory-clicked();
     callback clear-trajectory-clicked();
-    callback takeoff-clicked(/* height */ string, /* yaw */ string, /* time */ string);
-    callback goto-clicked(/* x */ string, /* y */ string, /* z */ string, /* yaw */ string, /* relative */ bool);
+    callback generate-primitive-clicked(/* shape */ string, /* size m */ string);
+    callback generate-wave-clicked(/* x step m */ string, /* y amp m */ string, /* reps */ string, /* simultaneous */ bool, /* speed m/s */ string);
+    callback takeoff-clicked(/* height */ string, /* yaw */ string, /* time */ string, /* relative */ bool);
+    callback goto-clicked(/* x */ string, /* y */ string, /* z */ string, /* yaw */ string, /* relative */ bool, /* speed m/s */ string);
     callback random-goto-clicked();
     callback go-home-clicked();
     callback land-clicked();
@@ -552,9 +555,14 @@ export component UnitSidebar inherits Rectangle {
                         }
                     }
 
+                    takeoff-relative := CheckBox {
+                        text: "Relative to current position";
+                        checked: true;
+                    }
+
                     Button {
                         text: "Takeoff";
-                        clicked => { takeoff-clicked(takeoff-height.text, takeoff-yaw.text, takeoff-time.text); }
+                        clicked => { takeoff-clicked(takeoff-height.text, takeoff-yaw.text, takeoff-time.text, takeoff-relative.checked); }
                     }
 
                     // Goto fields
@@ -604,6 +612,17 @@ export component UnitSidebar inherits Rectangle {
                                 height: 24px;
                             }
                         }
+
+                        VerticalLayout {
+                            spacing: 1px;
+                            width: 60px;
+                            Text { text: "Speed (m/s)"; font-size: 9px; color: Palette.foreground.transparentize(0.5); }
+                            goto-speed := LineEdit {
+                                text: "1.0";
+                                font-size: 11px;
+                                height: 24px;
+                            }
+                        }
                     }
 
                     HorizontalLayout {
@@ -619,7 +638,7 @@ export component UnitSidebar inherits Rectangle {
                         Button {
                             text: "Goto";
                             horizontal-stretch: 1;
-                            clicked => { goto-clicked(goto-x.text, goto-y.text, goto-z.text, goto-yaw.text, goto-relative.checked); }
+                            clicked => { goto-clicked(goto-x.text, goto-y.text, goto-z.text, goto-yaw.text, goto-relative.checked, goto-speed.text); }
                         }
                         Button {
                             text: "Random in area";
@@ -766,6 +785,121 @@ export component UnitSidebar inherits Rectangle {
                         text: "Clear Trajectory";
                         clicked => { clear-trajectory-clicked(); }
                     }
+
+                    // Primitive shapes: generate + upload a trajectory, then "Fly Trajectory" to execute.
+                    VerticalLayout {
+                        spacing: 1px;
+                        Text {
+                            text: "Size / radius (m)";
+                            font-size: 9px;
+                            color: Palette.foreground.transparentize(0.5);
+                        }
+                        primitive-size := LineEdit {
+                            text: "0.5";
+                            font-size: 11px;
+                            height: 24px;
+                        }
+                    }
+
+                    HorizontalLayout {
+                        spacing: 4px;
+                        Button {
+                            text: "Circle";
+                            horizontal-stretch: 1;
+                            clicked => { generate-primitive-clicked("circle", primitive-size.text); }
+                        }
+                        Button {
+                            text: "Square";
+                            horizontal-stretch: 1;
+                            clicked => { generate-primitive-clicked("square", primitive-size.text); }
+                        }
+                        Button {
+                            text: "Cube";
+                            horizontal-stretch: 1;
+                            clicked => { generate-primitive-clicked("cube", primitive-size.text); }
+                        }
+                    }
+
+                    // Back-and-forth wave: keeps z constant, swings y between +/- the
+                    // amplitude and walks x along. Unchecked = square wave (x and y move
+                    // one-at-a-time); checked = zig-zag/sawtooth (x and y move together).
+                    Rectangle {
+                        height: 1px;
+                        background: Palette.foreground.transparentize(0.85);
+                    }
+                    HorizontalLayout {
+                        spacing: 6px;
+                        Text {
+                            text: "X step (m)";
+                            width: 96px;
+                            vertical-alignment: center;
+                            font-size: 10px;
+                            color: Palette.foreground.transparentize(0.5);
+                        }
+                        wave-x := LineEdit {
+                            text: "0.3";
+                            font-size: 11px;
+                            height: 24px;
+                            horizontal-stretch: 1;
+                        }
+                    }
+                    HorizontalLayout {
+                        spacing: 6px;
+                        Text {
+                            text: "Y amplitude (± m)";
+                            width: 96px;
+                            vertical-alignment: center;
+                            font-size: 10px;
+                            color: Palette.foreground.transparentize(0.5);
+                        }
+                        wave-y := LineEdit {
+                            text: "0.3";
+                            font-size: 11px;
+                            height: 24px;
+                            horizontal-stretch: 1;
+                        }
+                    }
+                    HorizontalLayout {
+                        spacing: 6px;
+                        Text {
+                            text: "Repetitions";
+                            width: 96px;
+                            vertical-alignment: center;
+                            font-size: 10px;
+                            color: Palette.foreground.transparentize(0.5);
+                        }
+                        wave-reps := LineEdit {
+                            text: "3";
+                            font-size: 11px;
+                            height: 24px;
+                            horizontal-stretch: 1;
+                        }
+                    }
+                    HorizontalLayout {
+                        spacing: 6px;
+                        Text {
+                            text: "Speed (m/s)";
+                            width: 96px;
+                            vertical-alignment: center;
+                            font-size: 10px;
+                            color: Palette.foreground.transparentize(0.5);
+                        }
+                        wave-speed := LineEdit {
+                            text: "0.5";
+                            font-size: 11px;
+                            height: 24px;
+                            horizontal-stretch: 1;
+                        }
+                    }
+                    wave-simultaneous := CheckBox {
+                        text: "Move X & Y together (zig-zag)";
+                    }
+                    Button {
+                        text: wave-simultaneous.checked ? "Generate Zig-Zag" : "Generate Square Wave";
+                        clicked => {
+                            generate-wave-clicked(wave-x.text, wave-y.text, wave-reps.text, wave-simultaneous.checked, wave-speed.text);
+                        }
+                    }
                 }
 
                 // Tools
@@ -781,6 +915,11 @@ export component UnitSidebar inherits Rectangle {
                     Button {
                         text: unit.identifying ? "Stop Identifying" : "Identify";
                         clicked => { identify-clicked(); }
+                    }
+
+                    Button {
+                        text: PlotBridge.dock-visible ? "Hide Plot / Logging" : "Plot / Logging";
+                        clicked => { PlotBridge.dock-visible = !PlotBridge.dock-visible; }
                     }
 
                     Button {
@@ -1392,8 +1531,10 @@ export component UnitsContent inherits Rectangle {
     callback upload-trajectory-requested(/* row index */ int);
     callback fly-trajectory-requested(/* row index */ int);
     callback clear-trajectory-requested(/* row index */ int);
-    callback takeoff-requested(/* row index */ int, /* height */ string, /* yaw */ string, /* time */ string);
-    callback goto-requested(/* row index */ int, /* x */ string, /* y */ string, /* z */ string, /* yaw */ string, /* relative */ bool);
+    callback generate-primitive-requested(/* row index */ int, /* shape */ string, /* size m */ string);
+    callback generate-wave-requested(/* row index */ int, /* x step m */ string, /* y amp m */ string, /* reps */ string, /* simultaneous */ bool, /* speed m/s */ string);
+    callback takeoff-requested(/* row index */ int, /* height */ string, /* yaw */ string, /* time */ string, /* relative */ bool);
+    callback goto-requested(/* row index */ int, /* x */ string, /* y */ string, /* z */ string, /* yaw */ string, /* relative */ bool, /* speed m/s */ string);
     callback random-goto-requested(/* row index */ int);
     callback go-home-requested(/* row index */ int);
     callback land-requested(/* row index */ int);
@@ -1454,7 +1595,12 @@ export component UnitsContent inherits Rectangle {
         }
     }
 
-    HorizontalLayout {
+    // Outer split: table + sidebar on top, the (shared) plot dock below.
+    VerticalLayout {
+        spacing: 0px;
+
+        HorizontalLayout {
+        vertical-stretch: 1;
         spacing: 0px;
 
         // Table
@@ -1596,8 +1742,10 @@ export component UnitsContent inherits Rectangle {
             upload-trajectory-clicked => { upload-trajectory-requested(selected-row); }
             fly-trajectory-clicked => { fly-trajectory-requested(selected-row); }
             clear-trajectory-clicked => { clear-trajectory-requested(selected-row); }
-            takeoff-clicked(height, yaw, time) => { takeoff-requested(selected-row, height, yaw, time); }
-            goto-clicked(x, y, z, yaw, relative) => { goto-requested(selected-row, x, y, z, yaw, relative); }
+            generate-primitive-clicked(shape, size) => { generate-primitive-requested(selected-row, shape, size); }
+            generate-wave-clicked(x, y, reps, sim, speed) => { generate-wave-requested(selected-row, x, y, reps, sim, speed); }
+            takeoff-clicked(height, yaw, time, relative) => { takeoff-requested(selected-row, height, yaw, time, relative); }
+            goto-clicked(x, y, z, yaw, relative, speed) => { goto-requested(selected-row, x, y, z, yaw, relative, speed); }
             random-goto-clicked => { random-goto-requested(selected-row); }
             go-home-clicked => { go-home-requested(selected-row); }
             land-clicked => { land-requested(selected-row); }
@@ -1619,6 +1767,9 @@ export component UnitsContent inherits Rectangle {
                 selected-row = -1;
             }
         }
+        }
+
+        if PlotBridge.dock-visible: PlotPanel {}
     }
 
     // Sidebar action popups (journal, manual control, power-off confirm)

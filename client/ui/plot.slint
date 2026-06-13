@@ -1,0 +1,661 @@
+import { Button, ComboBox, LineEdit, CheckBox, ListView, Palette } from "std-widgets.slint";
+
+// Data-transfer structs pushed from Rust (plot.rs). Ported from swarmfinity's
+// Explore plot — the data lines are pre-built SVG path command strings in
+// pixel coordinates, rendered by Slint's native `Path`.
+export struct PlotLine {
+    commands: string,
+    color: color,
+}
+
+export struct AxisTick {
+    // 0..1 along the axis: 0 = left for X, 0 = top for Y.
+    pos: float,
+    label: string,
+}
+
+export struct LegendEntry {
+    label: string,
+    color: color,
+    // "3.65 .. 4.10" — series' overall value range.
+    range: string,
+    // Value at the hover cursor, formatted; empty when not hovering.
+    hover-value: string,
+    // Index into the Rust slot vec; click toggles visibility.
+    slot-index: int,
+    // False when the series is toggled off (shown muted, line hidden).
+    enabled: bool,
+}
+
+// One row in the "New config" TOC variable picker.
+export struct LogVarRow {
+    name: string,
+    checked: bool,
+}
+
+// Single source of truth for the plot. Both the Units-tab and Visualization-tab
+// PlotPanel instances read/write this one global, so the dock is one logical
+// panel viewed from two places — no per-tab state and a single Rust target.
+export global PlotBridge {
+    // ----- Data (pushed from Rust) -----
+    in property <[PlotLine]> plot-lines;
+    in property <[AxisTick]> x-ticks;
+    in property <[AxisTick]> y-ticks;
+    in property <[LegendEntry]> legend;
+    in property <string> x-label: "—";
+    in property <string> summary;
+    in property <string> y-axis-label: "(normalized)";
+    in property <bool> has-view;
+    in property <bool> hover-active;
+    in property <float> hover-x;        // 0..1 within plot area
+    in property <string> hover-text;
+    in property <float> nav-min-frac;
+    in property <float> nav-max-frac: 1.0;
+
+    // ----- Shared dock state -----
+    in-out property <bool> dock-visible: false;
+    in-out property <length> dock-height: 280px;
+    // Last polled plot-area pixel size — the `Path` viewbox binds to these so
+    // FitStyle::Min scales the pixel-space commands 1:1.
+    in-out property <float> area-w-px;
+    in-out property <float> area-h-px;
+
+    // ----- Streaming controls (set from Rust) -----
+    in property <bool> logging-active;
+    in property <string> status-text: "No log configured";
+    in property <[string]> config-names;
+    in-out property <int> config-index: -1;
+    in-out property <bool> show-new-config: false;
+    // New-config TOC variable picker.
+    in property <[LogVarRow]> toc-rows;
+    in property <string> toc-status: "";
+    in-out property <string> toc-filter: "";
+
+    // ----- Callbacks out to Rust -----
+    callback pan-start();
+    callback pan-move(float, float);
+    callback zoom(float, float, float);
+    callback reset();
+    callback hover(float);
+    callback size-changed(float, float);
+    callback nav-press(float);
+    callback nav-drag(float);
+    callback toggle-series(int);
+    // Streaming lifecycle — wired in a later phase, declared now so the UI is
+    // stable. start-logging applies the currently selected config to the
+    // selected unit; stop-logging tears the active log block down.
+    callback start-logging();
+    callback stop-logging();
+    callback select-config(int);
+    // New-config dialog: prepare loads the selected unit's TOC into the picker.
+    callback prepare-new-config();
+    callback toggle-toc-var(string);
+    callback toc-filter-changed(string);
+    // Save the picked variables as a new config (name, period ms).
+    callback save-new-config(string, float);
+}
+
+// The graph itself: Y-axis column | plot area + X axis + navigator | legend.
+// Reads everything from PlotBridge. Faithful port of swarmfinity's plot block.
+export component Plot inherits Rectangle {
+    background: Palette.background;
+
+    // Poll the plot-area pixel size and push it to Rust when it changes. Done
+    // from a Timer (not `changed width`) because changed callbacks on
+    // layout-driven dimensions recurse during item-geometry lookups. Gated on
+    // dock-visible so the hidden tab's instance does not also poll; only pushes
+    // a sane non-zero size, so the two instances converge instead of fighting.
+    Timer {
+        interval: 200ms;
+        running: PlotBridge.dock-visible;
+        triggered => {
+            if (plot-area.width > 1px
+                && (plot-area.width / 1px != PlotBridge.area-w-px
+                    || plot-area.height / 1px != PlotBridge.area-h-px)) {
+                PlotBridge.area-w-px = plot-area.width / 1px;
+                PlotBridge.area-h-px = plot-area.height / 1px;
+                PlotBridge.size-changed(plot-area.width / 1px, plot-area.height / 1px);
+            }
+        }
+    }
+
+    VerticalLayout {
+        spacing: 4px;
+        padding: 6px;
+
+        // Header: summary + Reset-view button.
+        HorizontalLayout {
+            spacing: 6px;
+            Text {
+                text: PlotBridge.summary == ""
+                    ? "Plot — start a log to graph variables"
+                    : PlotBridge.summary;
+                color: Palette.foreground;
+                font-size: 12px;
+                font-weight: 600;
+                vertical-alignment: center;
+                horizontal-stretch: 1;
+            }
+            Rectangle {
+                width: 92px;
+                height: 22px;
+                background: reset-ta.has-hover && PlotBridge.has-view
+                    ? Palette.accent-background.transparentize(0.7)
+                    : transparent;
+                border-color: PlotBridge.has-view ? Palette.accent-background : Palette.border;
+                border-width: 1px;
+                border-radius: 3px;
+                Text {
+                    text: "Reset view";
+                    color: PlotBridge.has-view ? Palette.accent-background : Palette.foreground.transparentize(0.5);
+                    font-size: 11px;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+                reset-ta := TouchArea {
+                    enabled: PlotBridge.has-view;
+                    mouse-cursor: pointer;
+                    clicked => { PlotBridge.reset(); }
+                }
+            }
+        }
+
+        // Body: y-axis column | plot + x-axis | legend.
+        HorizontalLayout {
+            spacing: 0;
+            vertical-stretch: 1;
+
+            // ----- Y axis column -----
+            Rectangle {
+                width: 56px;
+                VerticalLayout {
+                    spacing: 0;
+                    Rectangle {
+                        vertical-stretch: 1;
+                        for t in PlotBridge.y-ticks: Text {
+                            text: t.label;
+                            color: Palette.foreground.transparentize(0.4);
+                            font-size: 9px;
+                            horizontal-alignment: right;
+                            width: parent.width - 4px;
+                            x: 0;
+                            y: t.pos * parent.height - self.font-size / 2;
+                        }
+                    }
+                    // Spacers matching the x-axis tick + label rows.
+                    Rectangle { height: 16px; }
+                    Rectangle { height: 14px; }
+                }
+            }
+
+            // ----- Plot area + X axis below -----
+            Rectangle {
+                horizontal-stretch: 1;
+                VerticalLayout {
+                    spacing: 0;
+                    plot-area := Rectangle {
+                        vertical-stretch: 1;
+                        background: Palette.background.darker(0.15);
+                        border-color: Palette.border;
+                        border-width: 1px;
+                        border-radius: 3px;
+                        clip: true;
+
+                        // Vertical grid (X ticks).
+                        for t in PlotBridge.x-ticks: Rectangle {
+                            width: 1px;
+                            height: parent.height;
+                            background: Palette.border.transparentize(0.4);
+                            x: t.pos * parent.width;
+                            y: 0;
+                        }
+                        // Horizontal grid (Y ticks).
+                        for t in PlotBridge.y-ticks: Rectangle {
+                            width: parent.width;
+                            height: 1px;
+                            background: Palette.border.transparentize(0.4);
+                            x: 0;
+                            y: t.pos * parent.height;
+                        }
+                        // Data lines. The viewbox uses the polled pixel size so
+                        // the pixel-space commands span the full widget and
+                        // FitStyle::Min scales 1:1.
+                        for ln in PlotBridge.plot-lines: Path {
+                            width: parent.width;
+                            height: parent.height;
+                            viewbox-x: 0;
+                            viewbox-y: 0;
+                            viewbox-width: PlotBridge.area-w-px;
+                            viewbox-height: PlotBridge.area-h-px;
+                            stroke: ln.color;
+                            stroke-width: 1.5px;
+                            commands: ln.commands;
+                        }
+                        // Hover crosshair.
+                        if PlotBridge.hover-active: Rectangle {
+                            width: 1px;
+                            height: parent.height;
+                            background: Palette.foreground.transparentize(0.3);
+                            x: PlotBridge.hover-x * parent.width;
+                            y: 0;
+                        }
+                        // Hover tooltip — flips left near the right edge.
+                        if PlotBridge.hover-active && PlotBridge.hover-text != "": Rectangle {
+                            background: Palette.background;
+                            border-color: Palette.border;
+                            border-width: 1px;
+                            border-radius: 3px;
+                            width: tooltip-text.preferred-width + 12px;
+                            height: tooltip-text.preferred-height + 8px;
+                            x: PlotBridge.hover-x * parent.width > parent.width - self.width - 16px
+                                ? PlotBridge.hover-x * parent.width - self.width - 10px
+                                : PlotBridge.hover-x * parent.width + 10px;
+                            y: 6px;
+                            tooltip-text := Text {
+                                text: PlotBridge.hover-text;
+                                color: Palette.foreground;
+                                font-size: 10px;
+                                x: 6px;
+                                y: 4px;
+                            }
+                        }
+                        // Pan / zoom / hover.
+                        plot-ta := TouchArea {
+                            mouse-cursor: self.pressed ? grabbing : crosshair;
+                            pointer-event(e) => {
+                                if (e.kind == PointerEventKind.down
+                                    && e.button == PointerEventButton.left) {
+                                    PlotBridge.pan-start();
+                                }
+                            }
+                            moved => {
+                                if (self.pressed) {
+                                    PlotBridge.pan-move(
+                                        ((self.mouse-x - self.pressed-x) / 1px) / (self.width / 1px),
+                                        ((self.mouse-y - self.pressed-y) / 1px) / (self.height / 1px));
+                                } else {
+                                    PlotBridge.hover((self.mouse-x / 1px) / (self.width / 1px));
+                                }
+                            }
+                            changed has-hover => {
+                                if (!self.has-hover) {
+                                    PlotBridge.hover(-1);
+                                }
+                            }
+                            scroll-event(e) => {
+                                PlotBridge.zoom(
+                                    (self.mouse-x / 1px) / (self.width / 1px),
+                                    (self.mouse-y / 1px) / (self.height / 1px),
+                                    e.delta-y / 1px);
+                                return accept;
+                            }
+                            double-clicked => { PlotBridge.reset(); }
+                        }
+                    }
+                    // X axis tick row.
+                    Rectangle {
+                        height: 16px;
+                        for t in PlotBridge.x-ticks: Text {
+                            text: t.label;
+                            color: Palette.foreground.transparentize(0.4);
+                            font-size: 9px;
+                            horizontal-alignment: center;
+                            x: t.pos * parent.width - self.preferred-width / 2;
+                            y: 2px;
+                        }
+                    }
+                    // X axis title.
+                    Text {
+                        text: PlotBridge.x-label;
+                        color: Palette.foreground.transparentize(0.4);
+                        font-size: 10px;
+                        horizontal-alignment: center;
+                        height: 14px;
+                    }
+                    // Navigator — where the current view sits in the full range.
+                    Rectangle {
+                        height: 12px;
+                        Rectangle {
+                            x: 0;
+                            y: 3px;
+                            width: parent.width;
+                            height: 6px;
+                            background: Palette.border.transparentize(0.3);
+                            border-color: Palette.border;
+                            border-width: 1px;
+                            border-radius: 3px;
+                        }
+                        Rectangle {
+                            x: PlotBridge.nav-min-frac * parent.width;
+                            y: 1px;
+                            width: max(6px, (PlotBridge.nav-max-frac - PlotBridge.nav-min-frac) * parent.width);
+                            height: 10px;
+                            background: nav-ta.has-hover || nav-ta.pressed
+                                ? Palette.accent-background
+                                : Palette.accent-background.transparentize(0.3);
+                            border-color: Palette.accent-background;
+                            border-width: 1px;
+                            border-radius: 3px;
+                        }
+                        nav-ta := TouchArea {
+                            mouse-cursor: self.pressed ? grabbing : pointer;
+                            pointer-event(e) => {
+                                if (e.kind == PointerEventKind.down) {
+                                    PlotBridge.nav-press((self.mouse-x / 1px) / (self.width / 1px));
+                                }
+                            }
+                            moved => {
+                                if (self.pressed) {
+                                    PlotBridge.nav-drag((self.mouse-x / 1px) / (self.width / 1px));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // ----- Legend -----
+            Rectangle {
+                width: 196px;
+                VerticalLayout {
+                    padding-left: 8px;
+                    padding-right: 4px;
+                    padding-top: 2px;
+                    spacing: 4px;
+                    alignment: start;
+                    HorizontalLayout {
+                        spacing: 4px;
+                        Text {
+                            text: "Y axis";
+                            color: Palette.foreground.transparentize(0.5);
+                            font-size: 9px;
+                            vertical-alignment: center;
+                        }
+                        Text {
+                            text: PlotBridge.y-axis-label;
+                            color: Palette.foreground;
+                            font-size: 10px;
+                            vertical-alignment: center;
+                            overflow: elide;
+                            horizontal-stretch: 1;
+                        }
+                    }
+                    Rectangle {
+                        height: 1px;
+                        background: Palette.border.transparentize(0.4);
+                    }
+                    Text {
+                        text: PlotBridge.legend.length == 0
+                            ? "Legend — variables appear here"
+                            : "Legend (" + PlotBridge.legend.length + ")";
+                        color: Palette.foreground;
+                        font-size: 11px;
+                        font-weight: 600;
+                    }
+                    for e in PlotBridge.legend: Rectangle {
+                        background: legend-ta.has-hover ? Palette.accent-background.transparentize(0.85) : transparent;
+                        border-radius: 2px;
+                        height: 30px;
+                        HorizontalLayout {
+                            spacing: 6px;
+                            padding-left: 2px;
+                            padding-right: 2px;
+                            // Filled when enabled, hollow outline when disabled.
+                            Rectangle {
+                                width: 10px;
+                                height: 10px;
+                                y: (parent.height - 10px) / 2;
+                                background: e.enabled ? e.color : transparent;
+                                border-color: e.color;
+                                border-width: e.enabled ? 0px : 1.5px;
+                                border-radius: 2px;
+                            }
+                            VerticalLayout {
+                                spacing: 0;
+                                horizontal-stretch: 1;
+                                Text {
+                                    text: e.enabled ? e.label : e.label + "  (off)";
+                                    color: e.enabled ? Palette.foreground : Palette.foreground.transparentize(0.55);
+                                    font-size: 10px;
+                                    font-weight: 600;
+                                    overflow: elide;
+                                }
+                                Text {
+                                    text: e.hover-value != "" ? e.hover-value : e.range;
+                                    color: !e.enabled ? Palette.foreground.transparentize(0.65)
+                                        : e.hover-value != "" ? Palette.accent-background
+                                        : Palette.foreground.transparentize(0.4);
+                                    font-size: 9px;
+                                    overflow: elide;
+                                }
+                            }
+                        }
+                        legend-ta := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { PlotBridge.toggle-series(e.slot-index); }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// The dock: a draggable height handle, a control strip and the plot. Embedded
+// in both the Units and Visualization tab bodies; both share PlotBridge so it
+// behaves as one panel. Minimises duplication — the wrapping tab only adds this
+// one element.
+export component PlotPanel inherits Rectangle {
+    height: PlotBridge.dock-height;
+    background: Palette.background;
+    border-color: Palette.border;
+    border-width: 1px;
+
+    VerticalLayout {
+        spacing: 0px;
+
+        // Height drag handle (drag up to grow the dock).
+        Rectangle {
+            height: 6px;
+            background: hdrag.has-hover || hdrag.pressed
+                ? Palette.accent-background
+                : Palette.border.transparentize(0.2);
+            hdrag := TouchArea {
+                mouse-cursor: ns-resize;
+                moved => {
+                    PlotBridge.dock-height = clamp(PlotBridge.dock-height - self.mouse-y, 140px, 700px);
+                }
+            }
+        }
+
+        // Control strip.
+        Rectangle {
+            height: 34px;
+            background: Palette.background;
+            HorizontalLayout {
+                padding-left: 8px;
+                padding-right: 6px;
+                spacing: 6px;
+
+                Text {
+                    text: "Logging";
+                    font-size: 12px;
+                    font-weight: 600;
+                    color: Palette.foreground;
+                    vertical-alignment: center;
+                }
+                ComboBox {
+                    width: 200px;
+                    model: PlotBridge.config-names;
+                    current-index <=> PlotBridge.config-index;
+                    enabled: PlotBridge.config-names.length > 0;
+                    selected(value) => { PlotBridge.select-config(self.current-index); }
+                }
+                Button {
+                    text: "New…";
+                    clicked => {
+                        PlotBridge.show-new-config = true;
+                        PlotBridge.prepare-new-config();
+                    }
+                }
+                Button {
+                    text: PlotBridge.logging-active ? "Stop" : "Start";
+                    primary: !PlotBridge.logging-active;
+                    clicked => {
+                        if (PlotBridge.logging-active) {
+                            PlotBridge.stop-logging();
+                        } else {
+                            PlotBridge.start-logging();
+                        }
+                    }
+                }
+                Text {
+                    text: PlotBridge.status-text;
+                    font-size: 10px;
+                    color: Palette.foreground.transparentize(0.4);
+                    vertical-alignment: center;
+                    horizontal-stretch: 1;
+                    overflow: elide;
+                }
+                Rectangle {
+                    width: 22px;
+                    height: 22px;
+                    background: close-ta.has-hover ? Palette.border : transparent;
+                    border-radius: 3px;
+                    Text {
+                        text: "✕";
+                        font-size: 13px;
+                        color: Palette.foreground.transparentize(0.3);
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                    close-ta := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { PlotBridge.dock-visible = false; }
+                    }
+                }
+            }
+        }
+
+        Plot {
+            vertical-stretch: 1;
+        }
+    }
+}
+
+// Modal dialog to create + save a new log configuration. Instantiated once at
+// the AppWindow root, gated by `PlotBridge.show-new-config`.
+export component PlotNewConfigDialog inherits Rectangle {
+    width: 100%;
+    height: 100%;
+    background: #000000.transparentize(0.55);
+
+    // Absorb clicks on the backdrop so they don't reach the view underneath.
+    TouchArea {}
+
+    Rectangle {
+        width: 520px;
+        height: 540px;
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        background: Palette.background;
+        border-color: Palette.border;
+        border-width: 1px;
+        border-radius: 6px;
+
+        VerticalLayout {
+            padding: 16px;
+            spacing: 10px;
+
+            Text {
+                text: "New log configuration";
+                font-size: 15px;
+                font-weight: 700;
+                color: Palette.foreground;
+            }
+            HorizontalLayout {
+                spacing: 10px;
+                VerticalLayout {
+                    spacing: 2px;
+                    horizontal-stretch: 1;
+                    Text {
+                        text: "Name";
+                        font-size: 11px;
+                        color: Palette.foreground.transparentize(0.4);
+                    }
+                    name-edit := LineEdit {
+                        placeholder-text: "e.g. Attitude";
+                    }
+                }
+                VerticalLayout {
+                    spacing: 2px;
+                    Text {
+                        text: "Period (ms)";
+                        font-size: 11px;
+                        color: Palette.foreground.transparentize(0.4);
+                    }
+                    period-edit := LineEdit {
+                        text: "100";
+                        width: 80px;
+                    }
+                }
+            }
+
+            Text {
+                text: "Variables — checked from the selected unit's log TOC";
+                font-size: 11px;
+                color: Palette.foreground.transparentize(0.4);
+            }
+            // Search filter.
+            LineEdit {
+                placeholder-text: "Filter… (e.g. stateEstimate)";
+                text <=> PlotBridge.toc-filter;
+                edited(t) => { PlotBridge.toc-filter-changed(t); }
+            }
+            // Variable checkbox list (virtualized).
+            Rectangle {
+                vertical-stretch: 1;
+                background: Palette.background.darker(0.1);
+                border-color: Palette.border;
+                border-width: 1px;
+                border-radius: 3px;
+                ListView {
+                    for row in PlotBridge.toc-rows: Rectangle {
+                        height: 26px;
+                        CheckBox {
+                            x: 6px;
+                            width: parent.width - 12px;
+                            text: row.name;
+                            checked: row.checked;
+                            toggled => { PlotBridge.toggle-toc-var(row.name); }
+                        }
+                    }
+                }
+            }
+            Text {
+                text: PlotBridge.toc-status;
+                font-size: 10px;
+                color: Palette.foreground.transparentize(0.3);
+            }
+
+            HorizontalLayout {
+                spacing: 8px;
+                Rectangle { horizontal-stretch: 1; }
+                Button {
+                    text: "Cancel";
+                    clicked => { PlotBridge.show-new-config = false; }
+                }
+                Button {
+                    text: "Save";
+                    primary: true;
+                    enabled: name-edit.text != "";
+                    // Rust validates + closes on success (keeps open w/ a status
+                    // message if no variables are selected).
+                    clicked => {
+                        PlotBridge.save-new-config(name-edit.text, period-edit.text.to-float());
+                    }
+                }
+            }
+        }
+    }
+}

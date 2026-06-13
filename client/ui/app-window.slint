@@ -8,6 +8,12 @@ import { LhBaseStationData } from "lh-coverage.slint";
 import { Tdoa3AnchorData } from "tdoa3-coverage.slint";
 import { LhWizardContent, WizardSampleData, WizardBsData } from "lh-wizard.slint";
 import { PlanningContent, PlanObstacleData, PlanPadData, PlanBoxVolumeData } from "planning.slint";
+import { SnifferContent, SnifferAnchorRow, SnifferFeedRow, SnifferMatrixRow, SnifferSurveyRow } from "sniffer.slint";
+import { PlotBridge, PlotLine, AxisTick, LegendEntry, PlotNewConfigDialog } from "plot.slint";
+
+// Re-export the plot globals/structs from the root so the Rust side can reach
+// PlotBridge via `ui.global::<PlotBridge>()` and the generated data structs.
+export { PlotBridge, PlotLine, AxisTick, LegendEntry }
 
 export struct HealthTestResult {
     name: string,
@@ -596,6 +602,11 @@ export component AppWindow inherits Window {
     in-out property <string> progress-dialog-status;
     in-out property <string> progress-dialog-title;
 
+    // Generic error/alert dialog (e.g. trajectory geofence violation)
+    in-out property <bool> error-dialog-visible: false;
+    in-out property <string> error-dialog-title;
+    in-out property <string> error-dialog-message;
+
     callback exit-requested();
     callback open-swarm-requested();
     callback arm-swarm();
@@ -626,8 +637,10 @@ export component AppWindow inherits Window {
     callback upload-trajectory(/* row index */ int);
     callback fly-trajectory(/* row index */ int);
     callback clear-trajectory(/* row index */ int);
-    callback hlc-takeoff(/* row index */ int, /* height */ string, /* yaw */ string, /* time */ string);
-    callback hlc-goto(/* row index */ int, /* x */ string, /* y */ string, /* z */ string, /* yaw */ string, /* relative */ bool);
+    callback generate-primitive(/* row index */ int, /* shape */ string, /* size m */ string);
+    callback generate-wave(/* row index */ int, /* x step m */ string, /* y amp m */ string, /* reps */ string, /* simultaneous */ bool, /* speed m/s */ string);
+    callback hlc-takeoff(/* row index */ int, /* height */ string, /* yaw */ string, /* time */ string, /* relative */ bool);
+    callback hlc-goto(/* row index */ int, /* x */ string, /* y */ string, /* z */ string, /* yaw */ string, /* relative */ bool, /* speed m/s */ string);
     callback hlc-go-home(/* row index */ int);
     callback hlc-land(/* row index */ int);
     callback random-goto(/* row index */ int);
@@ -704,6 +717,39 @@ export component AppWindow inherits Window {
     in-out property <string> loco-mode-text: "Unknown";
     in-out property <int> loco-active-count;
     in-out property <int> loco-total-count;
+    in-out property <string> loco-upload-status;
+    in-out property <bool> loco-upload-active;
+    callback load-anchor-positions();
+    callback stop-anchor-upload();
+
+    // LPS sniffer
+    in-out property <[string]> sniffer-port-names;
+    in-out property <int> sniffer-port-index;
+    in-out property <bool> sniffer-connected;
+    in-out property <string> sniffer-status: "Disconnected";
+    in-out property <int> sniffer-total-packets;
+    in-out property <float> sniffer-total-rate;
+    in-out property <int> sniffer-wire-dropped;
+    in-out property <int> sniffer-host-resyncs;
+    in-out property <int> sniffer-air-lost;
+    in-out property <[SnifferAnchorRow]> sniffer-anchor-rows;
+    in-out property <[int]> sniffer-matrix-ids;
+    in-out property <[SnifferMatrixRow]> sniffer-matrix-rows;
+    in-out property <[SnifferSurveyRow]> sniffer-survey-rows;
+    in-out property <string> sniffer-survey-status;
+    in-out property <[SnifferFeedRow]> sniffer-feed-rows;
+    in-out property <bool> sniffer-paused;
+    in-out property <bool> sniffer-recording;
+    in-out property <bool> sniffer-recording-active;
+    in-out property <int> sniffer-rec-count;
+    in-out property <string> sniffer-rec-path;
+    callback sniffer-refresh-ports();
+    callback sniffer-connect();
+    callback sniffer-disconnect();
+    callback sniffer-solve-survey();
+    callback sniffer-save-survey();
+    callback sniffer-set-paused(bool);
+    callback sniffer-set-recording(bool);
 
     // Health test
     in-out property <bool> health-test-dialog-visible: false;
@@ -1047,8 +1093,10 @@ export component AppWindow inherits Window {
                     upload-trajectory-requested(row) => { upload-trajectory(row); }
                     fly-trajectory-requested(row) => { fly-trajectory(row); }
                     clear-trajectory-requested(row) => { clear-trajectory(row); }
-                    takeoff-requested(row, height, yaw, time) => { hlc-takeoff(row, height, yaw, time); }
-                    goto-requested(row, x, y, z, yaw, relative) => { hlc-goto(row, x, y, z, yaw, relative); }
+                    generate-primitive-requested(row, shape, size) => { generate-primitive(row, shape, size); }
+                    generate-wave-requested(row, x, y, reps, sim, speed) => { generate-wave(row, x, y, reps, sim, speed); }
+                    takeoff-requested(row, height, yaw, time, relative) => { hlc-takeoff(row, height, yaw, time, relative); }
+                    goto-requested(row, x, y, z, yaw, relative, speed) => { hlc-goto(row, x, y, z, yaw, relative, speed); }
                     random-goto-requested(row) => { random-goto(row); }
                     go-home-requested(row) => { hlc-go-home(row); }
                     land-requested(row) => { hlc-land(row); }
@@ -1098,6 +1146,42 @@ export component AppWindow inherits Window {
                     anchors: root.loco-anchors;
                     active-count: root.loco-active-count;
                     total-count: root.loco-total-count;
+                    upload-status: root.loco-upload-status;
+                    upload-active: root.loco-upload-active;
+                    load-anchor-positions() => { root.load-anchor-positions(); }
+                    stop-anchor-upload() => { root.stop-anchor-upload(); }
+                }
+            }
+            Tab {
+                title: "Sniffer";
+                SnifferContent {
+                    port-names: root.sniffer-port-names;
+                    port-index <=> root.sniffer-port-index;
+                    connected: root.sniffer-connected;
+                    status-text: root.sniffer-status;
+                    total-packets: root.sniffer-total-packets;
+                    total-rate: root.sniffer-total-rate;
+                    wire-dropped: root.sniffer-wire-dropped;
+                    host-resyncs: root.sniffer-host-resyncs;
+                    air-lost: root.sniffer-air-lost;
+                    anchor-rows: root.sniffer-anchor-rows;
+                    matrix-ids: root.sniffer-matrix-ids;
+                    matrix-rows: root.sniffer-matrix-rows;
+                    survey-rows: root.sniffer-survey-rows;
+                    survey-status: root.sniffer-survey-status;
+                    feed-rows: root.sniffer-feed-rows;
+                    paused <=> root.sniffer-paused;
+                    recording <=> root.sniffer-recording;
+                    recording-active: root.sniffer-recording-active;
+                    rec-count: root.sniffer-rec-count;
+                    rec-path: root.sniffer-rec-path;
+                    refresh-ports() => { root.sniffer-refresh-ports(); }
+                    connect() => { root.sniffer-connect(); }
+                    disconnect() => { root.sniffer-disconnect(); }
+                    solve-survey() => { root.sniffer-solve-survey(); }
+                    save-survey() => { root.sniffer-save-survey(); }
+                    set-paused(p) => { root.sniffer-set-paused(p); }
+                    set-recording(p) => { root.sniffer-set-recording(p); }
                 }
             }
             Tab {
@@ -1135,8 +1219,10 @@ export component AppWindow inherits Window {
                     upload-trajectory-requested(row) => { upload-trajectory(row); }
                     fly-trajectory-requested(row) => { fly-trajectory(row); }
                     clear-trajectory-requested(row) => { clear-trajectory(row); }
-                    takeoff-requested(row, height, yaw, time) => { hlc-takeoff(row, height, yaw, time); }
-                    goto-requested(row, x, y, z, yaw, relative) => { hlc-goto(row, x, y, z, yaw, relative); }
+                    generate-primitive-requested(row, shape, size) => { generate-primitive(row, shape, size); }
+                    generate-wave-requested(row, x, y, reps, sim, speed) => { generate-wave(row, x, y, reps, sim, speed); }
+                    takeoff-requested(row, height, yaw, time, relative) => { hlc-takeoff(row, height, yaw, time, relative); }
+                    goto-requested(row, x, y, z, yaw, relative, speed) => { hlc-goto(row, x, y, z, yaw, relative, speed); }
                     random-goto-requested(row) => { random-goto(row); }
                     go-home-requested(row) => { hlc-go-home(row); }
                     land-requested(row) => { hlc-land(row); }
@@ -1282,6 +1368,59 @@ export component AppWindow inherits Window {
                             power-off-swarm();
                             confirm-power-off-visible = false;
                         }
+                    }
+                }
+            }
+        }
+    }
+
+    // Generic error/alert dialog
+    if error-dialog-visible: Rectangle {
+        width: 100%;
+        height: 100%;
+        background: black.transparentize(0.5);
+
+        TouchArea {
+            clicked => { error-dialog-visible = false; }
+        }
+
+        Rectangle {
+            width: 380px;
+            height: layout.preferred-height;
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            background: Palette.background;
+            border-radius: 8px;
+            border-width: 1px;
+            border-color: Palette.border;
+
+            TouchArea {
+                // Block clicks from closing the dialog
+            }
+
+            layout := VerticalLayout {
+                padding: 24px;
+                spacing: 16px;
+
+                Text {
+                    text: root.error-dialog-title;
+                    font-size: 15px;
+                    font-weight: 600;
+                    color: #ff6b6b;
+                }
+
+                Text {
+                    text: root.error-dialog-message;
+                    font-size: 13px;
+                    wrap: word-wrap;
+                    color: Palette.foreground.transparentize(0.1);
+                }
+
+                HorizontalLayout {
+                    alignment: end;
+                    Button {
+                        text: "OK";
+                        clicked => { error-dialog-visible = false; }
                     }
                 }
             }
@@ -1940,4 +2079,7 @@ export component AppWindow inherits Window {
             }
         }
     }
+
+    // New-log-config modal (plot dock). Full-window overlay gated by PlotBridge.
+    if PlotBridge.show-new-config: PlotNewConfigDialog {}
 }

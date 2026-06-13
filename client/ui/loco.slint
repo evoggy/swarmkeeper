@@ -1,4 +1,4 @@
-import { VerticalBox, HorizontalBox, ScrollView, ComboBox, Palette } from "std-widgets.slint";
+import { VerticalBox, HorizontalBox, ScrollView, ComboBox, Palette, Button } from "std-widgets.slint";
 
 // One row in the Loco anchor status list.
 export struct LocoAnchorStatus {
@@ -10,6 +10,13 @@ export struct LocoAnchorStatus {
     // True if the Crazyflie is currently receiving packets from this anchor
     // (present in the firmware's active anchor list, i.e. heard within ~2 s).
     receiving: bool,
+    // A target position has been loaded for this anchor and is being uploaded.
+    has-target: bool,
+    target-x: float,
+    target-y: float,
+    target-z: float,
+    // The read-back position matches the loaded target (the upload "stuck").
+    confirmed: bool,
 }
 
 // Debug view listing every Loco anchor the positioning-source Crazyflie knows
@@ -24,6 +31,12 @@ export component LocoContent inherits Rectangle {
     in property <[LocoAnchorStatus]> anchors;
     in property <int> active-count;
     in property <int> total-count;
+
+    // Anchor-position upload (from file) and read-back verification.
+    in property <string> upload-status;
+    in property <bool> upload-active;
+    callback load-anchor-positions();
+    callback stop-anchor-upload();
 
     VerticalBox {
         padding: 16px;
@@ -61,13 +74,36 @@ export component LocoContent inherits Rectangle {
             }
         }
 
+        // Anchor-position upload controls
+        HorizontalBox {
+            alignment: start;
+            spacing: 12px;
+
+            Button {
+                text: "Load anchor positions…";
+                clicked => { root.load-anchor-positions(); }
+            }
+            Button {
+                text: "Stop";
+                enabled: root.upload-active;
+                clicked => { root.stop-anchor-upload(); }
+            }
+            Text {
+                text: root.upload-status;
+                vertical-alignment: center;
+                font-size: 14px;
+                color: #888;
+            }
+        }
+
         // Column headers
         HorizontalBox {
             spacing: 0;
             padding-left: 4px;
             Text { text: "Anchor"; width: 90px; font-weight: 700; }
             Text { text: "Receiving"; width: 120px; font-weight: 700; }
-            Text { text: "Position (x, y, z) [m]"; font-weight: 700; }
+            Text { text: "Position (x, y, z) [m]"; width: 200px; font-weight: 700; }
+            Text { text: "Target (x, y, z) [m]"; font-weight: 700; }
         }
 
         ScrollView {
@@ -108,11 +144,30 @@ export component LocoContent inherits Rectangle {
                         }
 
                         Text {
+                            width: 200px;
                             vertical-alignment: center;
                             text: a.has-position
                                 ? (Math.round(a.x * 100) / 100) + ",  " + (Math.round(a.y * 100) / 100) + ",  " + (Math.round(a.z * 100) / 100)
                                 : "(no stored position)";
                             color: a.has-position ? Palette.foreground : #888;
+                        }
+
+                        if a.has-target: HorizontalBox {
+                            alignment: start;
+                            spacing: 8px;
+                            Rectangle {
+                                width: 12px;
+                                height: 12px;
+                                border-radius: 6px;
+                                // green = confirmed (stuck), amber = still sending
+                                background: a.confirmed ? #2ecc40 : #ff851b;
+                            }
+                            Text {
+                                vertical-alignment: center;
+                                text: (Math.round(a.target-x * 100) / 100) + ",  " + (Math.round(a.target-y * 100) / 100) + ",  " + (Math.round(a.target-z * 100) / 100)
+                                    + (a.confirmed ? "  ✓" : "");
+                                color: a.confirmed ? #2ecc40 : Palette.foreground;
+                            }
                         }
                     }
                 }

@@ -1,0 +1,336 @@
+import { VerticalBox, HorizontalBox, ScrollView, ComboBox, Palette, Button, CheckBox } from "std-widgets.slint";
+
+// One row of per-anchor sniffer statistics.
+export struct SnifferAnchorRow {
+    id: int,
+    kind: string,
+    rate: float,        // packets/s
+    count: int,
+    lost: int,
+    last-seen: string,  // e.g. "0.2 s ago"
+    rssi: float,        // smoothed receive power [dBm]
+    has-rssi: bool,     // RSSI is available (RSSI firmware + a sample seen)
+    nlos: float,        // rx - fp power [dB]; large => likely NLOS/multipath
+}
+
+// One decoded packet in the live feed.
+export struct SnifferFeedRow {
+    time: string,
+    from: int,
+    to: int,
+    kind: string,
+    info: string,
+}
+
+// One row of the inter-anchor distance matrix (cells are pre-formatted strings).
+export struct SnifferMatrixRow {
+    id: int,
+    cells: [string],
+}
+
+// One solved anchor position from the auto-survey.
+export struct SnifferSurveyRow {
+    id: int,
+    x: float,
+    y: float,
+    z: float,
+    residual: float,   // metres
+    has-known: bool,   // a reference (LPP) position was available for this anchor
+}
+
+// Sniffer tab: drives an LPS node in binary sniffer mode over serial, decodes
+// the UWB traffic, and shows anchor stats, a packet feed, the inter-anchor
+// distance matrix, and an auto-survey of anchor geometry.
+export component SnifferContent inherits Rectangle {
+    // Connection
+    in property <[string]> port-names;
+    in-out property <int> port-index;
+    in property <bool> connected;
+    in property <string> status-text: "Disconnected";
+    in property <int> total-packets;
+    in property <float> total-rate;
+    callback refresh-ports();
+    callback connect();
+    callback disconnect();
+
+    // Loss accounting (where packets are going missing)
+    in property <int> wire-dropped;   // node TX-queue overflow (on the wire)
+    in property <int> host-resyncs;   // framing loss on the PC side
+    in property <int> air-lost;       // estimated over-the-air loss
+
+    // Per-anchor stats
+    in property <[SnifferAnchorRow]> anchor-rows;
+
+    // Distance matrix
+    in property <[int]> matrix-ids;
+    in property <[SnifferMatrixRow]> matrix-rows;
+
+    // Auto-survey
+    in property <string> survey-status;
+    in property <[SnifferSurveyRow]> survey-rows;
+    callback solve-survey();
+    callback save-survey();
+
+    // Packet feed
+    in property <[SnifferFeedRow]> feed-rows;
+    in-out property <bool> paused;
+    callback set-paused(bool);
+
+    // Recording (capture every sniffed sample to a JSONL file)
+    in-out property <bool> recording;       // checkbox state
+    in property <bool> recording-active;    // reader has a file open
+    in property <int> rec-count;            // samples written so far
+    in property <string> rec-path;          // active recording file path
+    callback set-recording(bool);
+
+    ScrollView {
+        VerticalBox {
+            padding: 16px;
+            spacing: 12px;
+            alignment: start;
+
+            // ---- Connection row ----
+            HorizontalBox {
+                alignment: start;
+                spacing: 12px;
+
+                Text {
+                    text: "Sniffer port:";
+                    vertical-alignment: center;
+                    font-size: 14px;
+                }
+                ComboBox {
+                    width: 240px;
+                    model: root.port-names;
+                    current-index <=> root.port-index;
+                    enabled: !root.connected;
+                }
+                Button {
+                    text: "⟳";
+                    enabled: !root.connected;
+                    clicked => { root.refresh-ports(); }
+                }
+                Button {
+                    text: root.connected ? "Disconnect" : "Connect";
+                    clicked => {
+                        if (root.connected) { root.disconnect(); }
+                        else { root.connect(); }
+                    }
+                }
+                Text {
+                    text: root.status-text;
+                    vertical-alignment: center;
+                    font-size: 14px;
+                    color: root.connected ? #2ecc40 : #888;
+                }
+            }
+            Text {
+                text: root.total-packets + " packets · " + Math.round(root.total-rate) + " pkt/s on air";
+                font-size: 13px;
+                color: #888;
+            }
+            // Where packets go missing: on the air vs on the USB link.
+            Text {
+                text: "Loss — air: " + root.air-lost
+                    + " · USB (node): " + root.wire-dropped
+                    + " · USB (host): " + root.host-resyncs;
+                font-size: 13px;
+                color: (root.wire-dropped > 0 || root.host-resyncs > 0) ? #ff851b : #888;
+            }
+
+            // ---- Recording ----
+            // Captures every decoded sample (not just the capped feed) to a
+            // timestamped JSONL file under recordings/sniffer/.
+            HorizontalBox {
+                alignment: start;
+                spacing: 12px;
+                CheckBox {
+                    text: "Record all samples to file";
+                    checked <=> root.recording;
+                    toggled => { root.set-recording(self.checked); }
+                }
+                Text {
+                    text: root.recording-active
+                        ? "● " + root.rec-count + " samples → " + root.rec-path
+                        : (root.recording ? "waiting for connection…" : "");
+                    vertical-alignment: center;
+                    font-size: 13px;
+                    color: root.recording-active ? #ff4136 : #888;
+                }
+            }
+
+            // ---- Per-anchor stats ----
+            Text { text: "Anchors on air"; font-weight: 700; font-size: 15px; }
+            HorizontalBox {
+                spacing: 0;
+                padding-left: 4px;
+                Text { text: "Source"; width: 70px; font-weight: 700; }
+                Text { text: "Type"; width: 90px; font-weight: 700; }
+                Text { text: "Rate"; width: 70px; font-weight: 700; }
+                Text { text: "Packets"; width: 90px; font-weight: 700; }
+                Text { text: "Lost"; width: 70px; font-weight: 700; }
+                Text { text: "RSSI"; width: 80px; font-weight: 700; }
+                Text { text: "NLOS"; width: 70px; font-weight: 700; }
+                Text { text: "Last seen"; font-weight: 700; }
+            }
+            for a in root.anchor-rows: Rectangle {
+                height: 26px;
+                background: touch.has-hover ? Palette.alternate-background : transparent;
+                border-radius: 4px;
+                touch := TouchArea { }
+                HorizontalBox {
+                    padding-left: 4px;
+                    spacing: 0;
+                    Text { text: "A" + a.id; width: 70px; vertical-alignment: center; }
+                    Text { text: a.kind; width: 90px; vertical-alignment: center; color: #888; }
+                    Text { text: Math.round(a.rate) + " Hz"; width: 70px; vertical-alignment: center; }
+                    Text { text: a.count; width: 90px; vertical-alignment: center; }
+                    Text {
+                        text: a.lost;
+                        width: 70px;
+                        vertical-alignment: center;
+                        color: a.lost > 0 ? #ff851b : Palette.foreground;
+                    }
+                    Text {
+                        text: a.has-rssi ? Math.round(a.rssi) + " dBm" : "—";
+                        width: 80px;
+                        vertical-alignment: center;
+                        // green ≳ -80, amber to -90, red below
+                        color: !a.has-rssi ? #888
+                            : a.rssi > -80 ? #2ecc40
+                            : a.rssi > -90 ? #ff851b
+                            : #ff4136;
+                    }
+                    Text {
+                        text: a.has-rssi ? Math.round(a.nlos) + " dB" : "—";
+                        width: 70px;
+                        vertical-alignment: center;
+                        // large rx-fp gap suggests non-line-of-sight
+                        color: !a.has-rssi ? #888 : a.nlos > 10 ? #ff851b : Palette.foreground;
+                    }
+                    Text { text: a.last-seen; vertical-alignment: center; color: #888; }
+                }
+            }
+            if root.anchor-rows.length == 0: Text {
+                text: "No traffic. Connect to an LPS node flashed in sniffer mode (it will be switched to binary mode automatically).";
+                color: #888;
+                wrap: word-wrap;
+            }
+
+            // ---- Distance matrix ----
+            Text { text: "Inter-anchor distances [m] (TDoA3)"; font-weight: 700; font-size: 15px; }
+            if root.matrix-ids.length == 0: Text {
+                text: "Distances appear when anchors run TDoA3 and range to each other.";
+                color: #888;
+                wrap: word-wrap;
+            }
+            if root.matrix-ids.length > 0: VerticalBox {
+                spacing: 1px;
+                // Header row of anchor ids
+                HorizontalBox {
+                    spacing: 0;
+                    Text { text: ""; width: 56px; }
+                    for id in root.matrix-ids: Text {
+                        text: "A" + id;
+                        width: 60px;
+                        font-weight: 700;
+                        horizontal-alignment: right;
+                    }
+                }
+                for row in root.matrix-rows: HorizontalBox {
+                    spacing: 0;
+                    Text { text: "A" + row.id; width: 56px; font-weight: 700; vertical-alignment: center; }
+                    for cell in row.cells: Text {
+                        text: cell;
+                        width: 60px;
+                        horizontal-alignment: right;
+                        vertical-alignment: center;
+                        color: cell == "·" ? #555 : Palette.foreground;
+                    }
+                }
+            }
+
+            // ---- Auto-survey ----
+            Text { text: "Auto-survey"; font-weight: 700; font-size: 15px; }
+            HorizontalBox {
+                alignment: start;
+                spacing: 12px;
+                Button {
+                    text: "Solve geometry";
+                    clicked => { root.solve-survey(); }
+                }
+                Button {
+                    text: "Save as geometry…";
+                    enabled: root.survey-rows.length > 0;
+                    clicked => { root.save-survey(); }
+                }
+                Text {
+                    text: root.survey-status;
+                    vertical-alignment: center;
+                    color: #888;
+                }
+            }
+            if root.survey-rows.length > 0: HorizontalBox {
+                spacing: 0;
+                padding-left: 4px;
+                Text { text: "Anchor"; width: 80px; font-weight: 700; }
+                Text { text: "x [m]"; width: 80px; font-weight: 700; }
+                Text { text: "y [m]"; width: 80px; font-weight: 700; }
+                Text { text: "z [m]"; width: 80px; font-weight: 700; }
+                Text { text: "Residual"; width: 100px; font-weight: 700; }
+                Text { text: "Ref"; font-weight: 700; }
+            }
+            for s in root.survey-rows: HorizontalBox {
+                padding-left: 4px;
+                spacing: 0;
+                Text { text: "A" + s.id; width: 80px; vertical-alignment: center; }
+                Text { text: Math.round(s.x * 100) / 100; width: 80px; vertical-alignment: center; }
+                Text { text: Math.round(s.y * 100) / 100; width: 80px; vertical-alignment: center; }
+                Text { text: Math.round(s.z * 100) / 100; width: 80px; vertical-alignment: center; }
+                Text {
+                    text: Math.round(s.residual * 1000) + " mm";
+                    width: 100px;
+                    vertical-alignment: center;
+                    color: s.residual > 0.1 ? #ff851b : #2ecc40;
+                }
+                Text {
+                    text: s.has-known ? "✓" : "—";
+                    vertical-alignment: center;
+                    color: #888;
+                }
+            }
+
+            // ---- Packet feed ----
+            HorizontalBox {
+                alignment: start;
+                spacing: 12px;
+                Text { text: "Packet feed"; font-weight: 700; font-size: 15px; vertical-alignment: center; }
+                CheckBox {
+                    text: "Pause";
+                    checked <=> root.paused;
+                    toggled => { root.set-paused(self.checked); }
+                }
+            }
+            Rectangle {
+                height: 260px;
+                border-width: 1px;
+                border-color: Palette.border;
+                border-radius: 4px;
+                ScrollView {
+                    VerticalBox {
+                        alignment: start;
+                        spacing: 1px;
+                        padding: 4px;
+                        for f in root.feed-rows: HorizontalBox {
+                            spacing: 0;
+                            Text { text: f.time; width: 110px; font-size: 12px; color: #888; }
+                            Text { text: f.from + "→" + f.to; width: 70px; font-size: 12px; }
+                            Text { text: f.kind; width: 100px; font-size: 12px; color: #888; }
+                            Text { text: f.info; font-size: 12px; wrap: no-wrap; }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

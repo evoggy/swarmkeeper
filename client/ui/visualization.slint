@@ -1,6 +1,7 @@
 import { Button, CheckBox, ComboBox, Palette } from "std-widgets.slint";
 import { UnitSidebar, UnitActionPopups } from "units.slint";
 import { UnitData, JournalEntryData } from "unit-card.slint";
+import { PlotPanel, PlotBridge } from "plot.slint";
 
 export struct VizLabel {
     text: string,
@@ -10,8 +11,10 @@ export struct VizLabel {
 
 export component VisualizationContent inherits Rectangle {
     in-out property <image> texture;
-    out property <float> viewport-width: self.width / 1px;
-    out property <float> viewport-height: self.height / 1px;
+    // Track the inner 3D pane (not the whole component) so the renderer texture
+    // shrinks when the plot dock takes the bottom of this tab.
+    out property <float> viewport-width: viz-pane.width / 1px;
+    out property <float> viewport-height: viz-pane.height / 1px;
 
     // Camera state
     in-out property <float> cam-yaw: 0.8;
@@ -73,8 +76,10 @@ export component VisualizationContent inherits Rectangle {
     callback upload-trajectory-requested(/* row index */ int);
     callback fly-trajectory-requested(/* row index */ int);
     callback clear-trajectory-requested(/* row index */ int);
-    callback takeoff-requested(/* row index */ int, /* height */ string, /* yaw */ string, /* time */ string);
-    callback goto-requested(/* row index */ int, /* x */ string, /* y */ string, /* z */ string, /* yaw */ string, /* relative */ bool);
+    callback generate-primitive-requested(/* row index */ int, /* shape */ string, /* size m */ string);
+    callback generate-wave-requested(/* row index */ int, /* x step m */ string, /* y amp m */ string, /* reps */ string, /* simultaneous */ bool, /* speed m/s */ string);
+    callback takeoff-requested(/* row index */ int, /* height */ string, /* yaw */ string, /* time */ string, /* relative */ bool);
+    callback goto-requested(/* row index */ int, /* x */ string, /* y */ string, /* z */ string, /* yaw */ string, /* relative */ bool, /* speed m/s */ string);
     callback random-goto-requested(/* row index */ int);
     callback go-home-requested(/* row index */ int);
     callback land-requested(/* row index */ int);
@@ -99,6 +104,13 @@ export component VisualizationContent inherits Rectangle {
     private property <bool> confirm-power-off-open: false;
     private property <bool> confirm-clear-tlv-open: false;
     private property <length> sidebar-width: 360px;
+
+    // Outer split: 3D view on top, the (shared) plot dock below.
+    VerticalLayout {
+        spacing: 0px;
+        viz-pane := Rectangle {
+        vertical-stretch: 1;
+        clip: true;
 
     Image {
         source: root.texture;
@@ -379,8 +391,10 @@ export component VisualizationContent inherits Rectangle {
             upload-trajectory-clicked => { upload-trajectory-requested(selected-unit); }
             fly-trajectory-clicked => { fly-trajectory-requested(selected-unit); }
             clear-trajectory-clicked => { clear-trajectory-requested(selected-unit); }
-            takeoff-clicked(height, yaw, time) => { takeoff-requested(selected-unit, height, yaw, time); }
-            goto-clicked(x, y, z, yaw, relative) => { goto-requested(selected-unit, x, y, z, yaw, relative); }
+            generate-primitive-clicked(shape, size) => { generate-primitive-requested(selected-unit, shape, size); }
+            generate-wave-clicked(x, y, reps, sim, speed) => { generate-wave-requested(selected-unit, x, y, reps, sim, speed); }
+            takeoff-clicked(height, yaw, time, relative) => { takeoff-requested(selected-unit, height, yaw, time, relative); }
+            goto-clicked(x, y, z, yaw, relative, speed) => { goto-requested(selected-unit, x, y, z, yaw, relative, speed); }
             random-goto-clicked => { random-goto-requested(selected-unit); }
             go-home-clicked => { go-home-requested(selected-unit); }
             land-clicked => { land-requested(selected-unit); }
@@ -396,6 +410,11 @@ export component VisualizationContent inherits Rectangle {
             clear-tlv-clicked => { confirm-clear-tlv-open = true; }
             close-clicked => { root.selected-unit = -1; }
         }
+    }
+
+        }
+
+        if PlotBridge.dock-visible: PlotPanel {}
     }
 
     // Sidebar action popups (shared component with the Units tab).
