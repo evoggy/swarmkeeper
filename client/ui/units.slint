@@ -2,6 +2,7 @@ import { Button, Palette, ScrollView, VerticalBox, HorizontalBox, LineEdit, Chec
 import { UnitData, UnitState, JournalEntryData } from "unit-card.slint";
 import { SectionHeader } from "widgets.slint";
 import { PlotPanel, PlotBridge } from "plot.slint";
+import { ViewSettings } from "view-settings.slint";
 
 component HeaderCell inherits Rectangle {
     in property <string> label;
@@ -343,19 +344,17 @@ export component UnitSidebar inherits Rectangle {
     in property <UnitData> unit;
     in property <bool> has-selection;
     in property <[JournalEntryData]> journal-entries;
-    in-out property <string> goto-x-text: "0";
-    in-out property <string> goto-y-text: "0";
-    in-out property <string> goto-z-text: "0";
     callback close-clicked();
     callback journal-clicked();
     callback add-journal-entry(string);
     callback console-clicked();
     callback clear-console-clicked();
     callback upload-trajectory-clicked();
+    callback download-trajectory-clicked();
     callback fly-trajectory-clicked();
     callback clear-trajectory-clicked();
-    callback generate-primitive-clicked(/* shape */ string, /* size m */ string);
-    callback generate-wave-clicked(/* x step m */ string, /* y amp m */ string, /* reps */ string, /* simultaneous */ bool, /* speed m/s */ string);
+    callback generate-primitive-clicked(/* shape */ string, /* size m */ string, /* size y m */ string, /* z offset m */ string, /* z iterations */ string);
+    callback generate-wave-clicked(/* x step m */ string, /* y amp m */ string, /* reps */ string, /* simultaneous */ bool, /* speed m/s */ string, /* z offset m */ string, /* z iterations */ string);
     callback takeoff-clicked(/* height */ string, /* yaw */ string, /* time */ string, /* relative */ bool);
     callback goto-clicked(/* x */ string, /* y */ string, /* z */ string, /* yaw */ string, /* relative */ bool, /* speed m/s */ string);
     callback random-goto-clicked();
@@ -372,16 +371,15 @@ export component UnitSidebar inherits Rectangle {
     callback syson-clicked();
     callback clear-tlv-clicked();
 
-    // Collapsible info section state (Status expanded by default)
-    property <bool> status-expanded: true;
-    property <bool> info-expanded: false;
-    property <bool> link-expanded: false;
-
-    // Collapsible action section state (Flight expanded by default)
-    property <bool> flight-expanded: true;
-    property <bool> trajectory-expanded: false;
-    property <bool> tools-expanded: false;
-    property <bool> power-expanded: false;
+    // Collapsible section state (Status/Flight expanded by default), shared with
+    // the sidebar embedded in the other tab
+    property <bool> status-expanded <=> ViewSettings.section-status-expanded;
+    property <bool> info-expanded <=> ViewSettings.section-info-expanded;
+    property <bool> link-expanded <=> ViewSettings.section-link-expanded;
+    property <bool> flight-expanded <=> ViewSettings.section-flight-expanded;
+    property <bool> trajectory-expanded <=> ViewSettings.section-trajectory-expanded;
+    property <bool> tools-expanded <=> ViewSettings.section-tools-expanded;
+    property <bool> power-expanded <=> ViewSettings.section-power-expanded;
 
     property <string> state-text: unit.state == UnitState.disconnected ? "Disconnected"
                                 : unit.state == UnitState.connected ? "Connected"
@@ -526,7 +524,7 @@ export component UnitSidebar inherits Rectangle {
                             width: 60px;
                             Text { text: "H (m)"; font-size: 9px; color: Palette.foreground.transparentize(0.5); }
                             takeoff-height := LineEdit {
-                                text: "0.5";
+                                text <=> ViewSettings.takeoff-height;
                                 font-size: 11px;
                                 height: 24px;
                             }
@@ -537,7 +535,7 @@ export component UnitSidebar inherits Rectangle {
                             width: 60px;
                             Text { text: "Yaw (°)"; font-size: 9px; color: Palette.foreground.transparentize(0.5); }
                             takeoff-yaw := LineEdit {
-                                text: "0";
+                                text <=> ViewSettings.takeoff-yaw;
                                 font-size: 11px;
                                 height: 24px;
                             }
@@ -548,7 +546,7 @@ export component UnitSidebar inherits Rectangle {
                             width: 60px;
                             Text { text: "Time (s)"; font-size: 9px; color: Palette.foreground.transparentize(0.5); }
                             takeoff-time := LineEdit {
-                                text: "2";
+                                text <=> ViewSettings.takeoff-time;
                                 font-size: 11px;
                                 height: 24px;
                             }
@@ -557,7 +555,7 @@ export component UnitSidebar inherits Rectangle {
 
                     takeoff-relative := CheckBox {
                         text: "Relative to current position";
-                        checked: true;
+                        checked <=> ViewSettings.takeoff-relative;
                     }
 
                     Button {
@@ -574,7 +572,7 @@ export component UnitSidebar inherits Rectangle {
                             width: 60px;
                             Text { text: "X"; font-size: 9px; color: Palette.foreground.transparentize(0.5); }
                             goto-x := LineEdit {
-                                text <=> root.goto-x-text;
+                                text <=> ViewSettings.goto-x;
                                 font-size: 11px;
                                 height: 24px;
                             }
@@ -585,7 +583,7 @@ export component UnitSidebar inherits Rectangle {
                             width: 60px;
                             Text { text: "Y"; font-size: 9px; color: Palette.foreground.transparentize(0.5); }
                             goto-y := LineEdit {
-                                text <=> root.goto-y-text;
+                                text <=> ViewSettings.goto-y;
                                 font-size: 11px;
                                 height: 24px;
                             }
@@ -596,7 +594,7 @@ export component UnitSidebar inherits Rectangle {
                             width: 60px;
                             Text { text: "Z"; font-size: 9px; color: Palette.foreground.transparentize(0.5); }
                             goto-z := LineEdit {
-                                text <=> root.goto-z-text;
+                                text <=> ViewSettings.goto-z;
                                 font-size: 11px;
                                 height: 24px;
                             }
@@ -607,7 +605,7 @@ export component UnitSidebar inherits Rectangle {
                             width: 60px;
                             Text { text: "Yaw (°)"; font-size: 9px; color: Palette.foreground.transparentize(0.5); }
                             goto-yaw := LineEdit {
-                                text: "0";
+                                text <=> ViewSettings.goto-yaw;
                                 font-size: 11px;
                                 height: 24px;
                             }
@@ -618,7 +616,7 @@ export component UnitSidebar inherits Rectangle {
                             width: 60px;
                             Text { text: "Speed (m/s)"; font-size: 9px; color: Palette.foreground.transparentize(0.5); }
                             goto-speed := LineEdit {
-                                text: "1.0";
+                                text <=> ViewSettings.goto-speed;
                                 font-size: 11px;
                                 height: 24px;
                             }
@@ -630,6 +628,7 @@ export component UnitSidebar inherits Rectangle {
 
                         goto-relative := CheckBox {
                             text: "Relative";
+                            checked <=> ViewSettings.goto-relative;
                         }
                     }
 
@@ -776,6 +775,13 @@ export component UnitSidebar inherits Rectangle {
                         clicked => { upload-trajectory-clicked(); }
                     }
 
+                    // Writes whatever is currently loaded for this unit - including a
+                    // generated primitive or wave - back out as a trajectory YAML file.
+                    Button {
+                        text: "Download Trajectory";
+                        clicked => { download-trajectory-clicked(); }
+                    }
+
                     Button {
                         text: "Fly Trajectory";
                         clicked => { fly-trajectory-clicked(); }
@@ -786,16 +792,67 @@ export component UnitSidebar inherits Rectangle {
                         clicked => { clear-trajectory-clicked(); }
                     }
 
+                    // Z stacking, applied to both generators below: repeat the generated
+                    // path at "iterations" heights spaced "offset" apart. Every layer after
+                    // the first is flown backwards, so it starts directly above where the
+                    // previous one ended and the drone only climbs straight up in between.
+                    // Iterations 1 (or a zero offset) leaves the path untouched.
+                    Rectangle {
+                        height: 1px;
+                        background: Palette.foreground.transparentize(0.85);
+                    }
+                    HorizontalLayout {
+                        spacing: 6px;
+                        Text {
+                            text: "Z offset (m)";
+                            width: 96px;
+                            vertical-alignment: center;
+                            font-size: 10px;
+                            color: Palette.foreground.transparentize(0.5);
+                        }
+                        z-offset := LineEdit {
+                            text <=> ViewSettings.z-offset;
+                            font-size: 11px;
+                            height: 24px;
+                            horizontal-stretch: 1;
+                        }
+                    }
+                    HorizontalLayout {
+                        spacing: 6px;
+                        Text {
+                            text: "Z iterations";
+                            width: 96px;
+                            vertical-alignment: center;
+                            font-size: 10px;
+                            color: Palette.foreground.transparentize(0.5);
+                        }
+                        z-iterations := LineEdit {
+                            text <=> ViewSettings.z-iterations;
+                            font-size: 11px;
+                            height: 24px;
+                            horizontal-stretch: 1;
+                        }
+                    }
+
                     // Primitive shapes: generate + upload a trajectory, then "Fly Trajectory" to execute.
+                    // A negative side mirrors the shape, which is what you want when the
+                    // drone sits at the far end of the flight space: the box is then built
+                    // back towards the middle instead of out through the wall.
+                    Text {
+                        text: "Sides may be negative (mirrors into -X / -Y)";
+                        font-size: 9px;
+                        color: Palette.foreground.transparentize(0.5);
+                        wrap: word-wrap;
+                    }
                     VerticalLayout {
                         spacing: 1px;
                         Text {
-                            text: "Size / radius (m)";
+                            text: "Size / radius / X side (m)";
                             font-size: 9px;
                             color: Palette.foreground.transparentize(0.5);
                         }
                         primitive-size := LineEdit {
-                            text: "0.5";
+                            text <=> ViewSettings.primitive-size;
                             font-size: 11px;
                             height: 24px;
                         }
@@ -806,18 +863,39 @@ export component UnitSidebar inherits Rectangle {
                         Button {
                             text: "Circle";
                             horizontal-stretch: 1;
-                            clicked => { generate-primitive-clicked("circle", primitive-size.text); }
+                            clicked => { generate-primitive-clicked("circle", primitive-size.text, primitive-size-y.text, z-offset.text, z-iterations.text); }
                         }
                         Button {
                             text: "Square";
                             horizontal-stretch: 1;
-                            clicked => { generate-primitive-clicked("square", primitive-size.text); }
+                            clicked => { generate-primitive-clicked("square", primitive-size.text, primitive-size-y.text, z-offset.text, z-iterations.text); }
                         }
                         Button {
                             text: "Cube";
                             horizontal-stretch: 1;
-                            clicked => { generate-primitive-clicked("cube", primitive-size.text); }
+                            clicked => { generate-primitive-clicked("cube", primitive-size.text, primitive-size-y.text, z-offset.text, z-iterations.text); }
                         }
+                    }
+
+                    // Rectangle: takes its X side from the size field above and its Y side
+                    // from this one, so a non-square footprint needs no extra shape button.
+                    VerticalLayout {
+                        spacing: 1px;
+                        Text {
+                            text: "Y side (m) - rectangle only";
+                            font-size: 9px;
+                            color: Palette.foreground.transparentize(0.5);
+                        }
+                        primitive-size-y := LineEdit {
+                            text <=> ViewSettings.primitive-size-y;
+                            font-size: 11px;
+                            height: 24px;
+                        }
+                    }
+
+                    Button {
+                        text: "Rectangle (\{primitive-size.text} x \{primitive-size-y.text} m)";
+                        clicked => { generate-primitive-clicked("rectangle", primitive-size.text, primitive-size-y.text, z-offset.text, z-iterations.text); }
                     }
 
                     // Back-and-forth wave: keeps z constant, swings y between +/- the
@@ -837,7 +915,7 @@ export component UnitSidebar inherits Rectangle {
                             color: Palette.foreground.transparentize(0.5);
                         }
                         wave-x := LineEdit {
-                            text: "0.3";
+                            text <=> ViewSettings.wave-x;
                             font-size: 11px;
                             height: 24px;
                             horizontal-stretch: 1;
@@ -853,7 +931,7 @@ export component UnitSidebar inherits Rectangle {
                             color: Palette.foreground.transparentize(0.5);
                         }
                         wave-y := LineEdit {
-                            text: "0.3";
+                            text <=> ViewSettings.wave-y;
                             font-size: 11px;
                             height: 24px;
                             horizontal-stretch: 1;
@@ -869,7 +947,7 @@ export component UnitSidebar inherits Rectangle {
                             color: Palette.foreground.transparentize(0.5);
                         }
                         wave-reps := LineEdit {
-                            text: "3";
+                            text <=> ViewSettings.wave-reps;
                             font-size: 11px;
                             height: 24px;
                             horizontal-stretch: 1;
@@ -885,7 +963,7 @@ export component UnitSidebar inherits Rectangle {
                             color: Palette.foreground.transparentize(0.5);
                         }
                         wave-speed := LineEdit {
-                            text: "0.5";
+                            text <=> ViewSettings.wave-speed;
                             font-size: 11px;
                             height: 24px;
                             horizontal-stretch: 1;
@@ -893,11 +971,12 @@ export component UnitSidebar inherits Rectangle {
                     }
                     wave-simultaneous := CheckBox {
                         text: "Move X & Y together (zig-zag)";
+                        checked <=> ViewSettings.wave-simultaneous;
                     }
                     Button {
                         text: wave-simultaneous.checked ? "Generate Zig-Zag" : "Generate Square Wave";
                         clicked => {
-                            generate-wave-clicked(wave-x.text, wave-y.text, wave-reps.text, wave-simultaneous.checked, wave-speed.text);
+                            generate-wave-clicked(wave-x.text, wave-y.text, wave-reps.text, wave-simultaneous.checked, wave-speed.text, z-offset.text, z-iterations.text);
                         }
                     }
                 }
@@ -1519,9 +1598,6 @@ export component UnitsContent inherits Rectangle {
     in property <bool> sort-ascending: true;
     in property <[JournalEntryData]> journal-entries;
     in property <[string]> console-lines;
-    in-out property <string> goto-x-text: "0";
-    in-out property <string> goto-y-text: "0";
-    in-out property <string> goto-z-text: "0";
 
     callback sort-requested(/* column */ int, /* ascending */ bool);
     callback open-journal-requested(/* row index */ int);
@@ -1529,10 +1605,11 @@ export component UnitsContent inherits Rectangle {
     callback open-console-requested(/* row index */ int);
     callback clear-console-requested(/* row index */ int);
     callback upload-trajectory-requested(/* row index */ int);
+    callback download-trajectory-requested(/* row index */ int);
     callback fly-trajectory-requested(/* row index */ int);
     callback clear-trajectory-requested(/* row index */ int);
-    callback generate-primitive-requested(/* row index */ int, /* shape */ string, /* size m */ string);
-    callback generate-wave-requested(/* row index */ int, /* x step m */ string, /* y amp m */ string, /* reps */ string, /* simultaneous */ bool, /* speed m/s */ string);
+    callback generate-primitive-requested(/* row index */ int, /* shape */ string, /* size m */ string, /* size y m */ string, /* z offset m */ string, /* z iterations */ string);
+    callback generate-wave-requested(/* row index */ int, /* x step m */ string, /* y amp m */ string, /* reps */ string, /* simultaneous */ bool, /* speed m/s */ string, /* z offset m */ string, /* z iterations */ string);
     callback takeoff-requested(/* row index */ int, /* height */ string, /* yaw */ string, /* time */ string, /* relative */ bool);
     callback goto-requested(/* row index */ int, /* x */ string, /* y */ string, /* z */ string, /* yaw */ string, /* relative */ bool, /* speed m/s */ string);
     callback random-goto-requested(/* row index */ int);
@@ -1568,24 +1645,25 @@ export component UnitsContent inherits Rectangle {
     private property <bool> manual-control-open: false;
     private property <bool> confirm-power-off-open: false;
     private property <bool> confirm-clear-tlv-open: false;
-    private property <length> sidebar-width: 360px;
+    property <length> sidebar-width <=> ViewSettings.sidebar-width;
 
-    // Column widths (shared between header and data rows for alignment)
-    private property <length> col-indicator-w: 40px;
-    private property <length> col-status-w: 90px;
-    private property <length> col-name-w: 100px;
-    private property <length> col-uri-w: 160px;
-    private property <length> col-x-w: 60px;
-    private property <length> col-y-w: 60px;
-    private property <length> col-z-w: 60px;
-    private property <length> col-battery-w: 110px;
-    private property <length> col-link-w: 90px;
-    private property <length> col-power-w: 80px;
-    private property <length> col-supervisor-w: 90px;
-    private property <length> col-lh-w: 50px;
-    private property <length> col-loco-w: 50px;
-    private property <length> col-ledup-w: 55px;
-    private property <length> col-leddn-w: 55px;
+    // Column widths (shared between header and data rows for alignment, and
+    // persisted so a resized table survives a restart)
+    property <length> col-indicator-w <=> ViewSettings.col-indicator-w;
+    property <length> col-status-w <=> ViewSettings.col-status-w;
+    property <length> col-name-w <=> ViewSettings.col-name-w;
+    property <length> col-uri-w <=> ViewSettings.col-uri-w;
+    property <length> col-x-w <=> ViewSettings.col-x-w;
+    property <length> col-y-w <=> ViewSettings.col-y-w;
+    property <length> col-z-w <=> ViewSettings.col-z-w;
+    property <length> col-battery-w <=> ViewSettings.col-battery-w;
+    property <length> col-link-w <=> ViewSettings.col-link-w;
+    property <length> col-power-w <=> ViewSettings.col-power-w;
+    property <length> col-supervisor-w <=> ViewSettings.col-supervisor-w;
+    property <length> col-lh-w <=> ViewSettings.col-lh-w;
+    property <length> col-loco-w <=> ViewSettings.col-loco-w;
+    property <length> col-ledup-w <=> ViewSettings.col-ledup-w;
+    property <length> col-leddn-w <=> ViewSettings.col-leddn-w;
 
     function toggle-sort(c: int) {
         if (sort-column == c) {
@@ -1702,9 +1780,6 @@ export component UnitsContent inherits Rectangle {
         // Sidebar
         if sidebar-open: UnitSidebar {
             width: sidebar-width;
-            goto-x-text <=> root.goto-x-text;
-            goto-y-text <=> root.goto-y-text;
-            goto-z-text <=> root.goto-z-text;
             unit: selected-row >= 0 && selected-row < sorted-units.length ? sorted-units[selected-row] : {
                 name: "",
                 uri: "",
@@ -1740,10 +1815,11 @@ export component UnitsContent inherits Rectangle {
                 clear-console-requested(selected-row);
             }
             upload-trajectory-clicked => { upload-trajectory-requested(selected-row); }
+            download-trajectory-clicked => { download-trajectory-requested(selected-row); }
             fly-trajectory-clicked => { fly-trajectory-requested(selected-row); }
             clear-trajectory-clicked => { clear-trajectory-requested(selected-row); }
-            generate-primitive-clicked(shape, size) => { generate-primitive-requested(selected-row, shape, size); }
-            generate-wave-clicked(x, y, reps, sim, speed) => { generate-wave-requested(selected-row, x, y, reps, sim, speed); }
+            generate-primitive-clicked(shape, size, sizey, zoff, ziter) => { generate-primitive-requested(selected-row, shape, size, sizey, zoff, ziter); }
+            generate-wave-clicked(x, y, reps, sim, speed, zoff, ziter) => { generate-wave-requested(selected-row, x, y, reps, sim, speed, zoff, ziter); }
             takeoff-clicked(height, yaw, time, relative) => { takeoff-requested(selected-row, height, yaw, time, relative); }
             goto-clicked(x, y, z, yaw, relative, speed) => { goto-requested(selected-row, x, y, z, yaw, relative, speed); }
             random-goto-clicked => { random-goto-requested(selected-row); }

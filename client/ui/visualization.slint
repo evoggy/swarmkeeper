@@ -2,6 +2,7 @@ import { Button, CheckBox, ComboBox, Palette } from "std-widgets.slint";
 import { UnitSidebar, UnitActionPopups } from "units.slint";
 import { UnitData, JournalEntryData } from "unit-card.slint";
 import { PlotPanel, PlotBridge } from "plot.slint";
+import { ViewSettings } from "view-settings.slint";
 
 export struct VizLabel {
     text: string,
@@ -16,19 +17,19 @@ export component VisualizationContent inherits Rectangle {
     out property <float> viewport-width: viz-pane.width / 1px;
     out property <float> viewport-height: viz-pane.height / 1px;
 
-    // Camera state
-    in-out property <float> cam-yaw: 0.8;
-    in-out property <float> cam-pitch: 0.6;
-    in-out property <float> cam-distance: 6.0;
-    in-out property <float> cam-pan-x: 0;
-    in-out property <float> cam-pan-y: 0;
+    // Camera state (persisted, see view-settings.slint)
+    in-out property <float> cam-yaw <=> ViewSettings.cam-yaw;
+    in-out property <float> cam-pitch <=> ViewSettings.cam-pitch;
+    in-out property <float> cam-distance <=> ViewSettings.cam-distance;
+    in-out property <float> cam-pan-x <=> ViewSettings.cam-pan-x;
+    in-out property <float> cam-pan-y <=> ViewSettings.cam-pan-y;
 
-    // Label toggle states
-    in-out property <bool> show-cf-labels: false;
-    in-out property <bool> show-lh-labels: false;
-    in-out property <bool> show-loco-labels: false;
-    in-out property <bool> show-axis-labels: false;
-    in-out property <bool> show-grid-labels: false;
+    // Label toggle states (persisted)
+    in-out property <bool> show-cf-labels <=> ViewSettings.show-cf-labels;
+    in-out property <bool> show-lh-labels <=> ViewSettings.show-lh-labels;
+    in-out property <bool> show-loco-labels <=> ViewSettings.show-loco-labels;
+    in-out property <bool> show-axis-labels <=> ViewSettings.show-axis-labels;
+    in-out property <bool> show-grid-labels <=> ViewSettings.show-grid-labels;
 
     // Positioning source selector
     in-out property <[string]> positioning-source-names;
@@ -37,7 +38,7 @@ export component VisualizationContent inherits Rectangle {
 
     // Scene overlay (flight area + pads)
     in-out property <string> loaded-scene-name: "";
-    in-out property <bool> show-scene-overlay: true;
+    in-out property <bool> show-scene-overlay <=> ViewSettings.show-scene-overlay;
     callback save-pads();
     callback load-scene();
 
@@ -60,9 +61,6 @@ export component VisualizationContent inherits Rectangle {
     in property <float> stick-rx;
     in property <float> stick-ry;
     in property <bool> manual-control-armed;
-    in-out property <string> goto-x-text: "0";
-    in-out property <string> goto-y-text: "0";
-    in-out property <string> goto-z-text: "0";
 
     // Fired on a left-click that wasn't a drag; Rust hit-tests and sets selected-unit.
     callback viz-unit-clicked(/* x */ float, /* y */ float);
@@ -74,10 +72,11 @@ export component VisualizationContent inherits Rectangle {
     callback open-console-requested(/* row index */ int);
     callback clear-console-requested(/* row index */ int);
     callback upload-trajectory-requested(/* row index */ int);
+    callback download-trajectory-requested(/* row index */ int);
     callback fly-trajectory-requested(/* row index */ int);
     callback clear-trajectory-requested(/* row index */ int);
-    callback generate-primitive-requested(/* row index */ int, /* shape */ string, /* size m */ string);
-    callback generate-wave-requested(/* row index */ int, /* x step m */ string, /* y amp m */ string, /* reps */ string, /* simultaneous */ bool, /* speed m/s */ string);
+    callback generate-primitive-requested(/* row index */ int, /* shape */ string, /* size m */ string, /* size y m */ string, /* z offset m */ string, /* z iterations */ string);
+    callback generate-wave-requested(/* row index */ int, /* x step m */ string, /* y amp m */ string, /* reps */ string, /* simultaneous */ bool, /* speed m/s */ string, /* z offset m */ string, /* z iterations */ string);
     callback takeoff-requested(/* row index */ int, /* height */ string, /* yaw */ string, /* time */ string, /* relative */ bool);
     callback goto-requested(/* row index */ int, /* x */ string, /* y */ string, /* z */ string, /* yaw */ string, /* relative */ bool, /* speed m/s */ string);
     callback random-goto-requested(/* row index */ int);
@@ -103,7 +102,7 @@ export component VisualizationContent inherits Rectangle {
     private property <bool> manual-control-open: false;
     private property <bool> confirm-power-off-open: false;
     private property <bool> confirm-clear-tlv-open: false;
-    private property <length> sidebar-width: 360px;
+    private property <length> sidebar-width <=> ViewSettings.sidebar-width;
 
     // Outer split: 3D view on top, the (shared) plot dock below.
     VerticalLayout {
@@ -381,18 +380,16 @@ export component VisualizationContent inherits Rectangle {
             unit: sorted-units[selected-unit];
             has-selection: true;
             journal-entries: root.journal-entries;
-            goto-x-text <=> root.goto-x-text;
-            goto-y-text <=> root.goto-y-text;
-            goto-z-text <=> root.goto-z-text;
             journal-clicked => { open-journal-requested(selected-unit); journal-open = true; }
             add-journal-entry(text) => { add-journal-entry-requested(selected-unit, text); }
             console-clicked => { open-console-requested(selected-unit); console-open = true; }
             clear-console-clicked => { clear-console-requested(selected-unit); }
             upload-trajectory-clicked => { upload-trajectory-requested(selected-unit); }
+            download-trajectory-clicked => { download-trajectory-requested(selected-unit); }
             fly-trajectory-clicked => { fly-trajectory-requested(selected-unit); }
             clear-trajectory-clicked => { clear-trajectory-requested(selected-unit); }
-            generate-primitive-clicked(shape, size) => { generate-primitive-requested(selected-unit, shape, size); }
-            generate-wave-clicked(x, y, reps, sim, speed) => { generate-wave-requested(selected-unit, x, y, reps, sim, speed); }
+            generate-primitive-clicked(shape, size, sizey, zoff, ziter) => { generate-primitive-requested(selected-unit, shape, size, sizey, zoff, ziter); }
+            generate-wave-clicked(x, y, reps, sim, speed, zoff, ziter) => { generate-wave-requested(selected-unit, x, y, reps, sim, speed, zoff, ziter); }
             takeoff-clicked(height, yaw, time, relative) => { takeoff-requested(selected-unit, height, yaw, time, relative); }
             goto-clicked(x, y, z, yaw, relative, speed) => { goto-requested(selected-unit, x, y, z, yaw, relative, speed); }
             random-goto-clicked => { random-goto-requested(selected-unit); }

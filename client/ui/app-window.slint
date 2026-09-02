@@ -10,10 +10,11 @@ import { LhWizardContent, WizardSampleData, WizardBsData } from "lh-wizard.slint
 import { PlanningContent, PlanObstacleData, PlanPadData, PlanBoxVolumeData } from "planning.slint";
 import { SnifferContent, SnifferAnchorRow, SnifferFeedRow, SnifferMatrixRow, SnifferSurveyRow } from "sniffer.slint";
 import { PlotBridge, PlotLine, AxisTick, LegendEntry, PlotNewConfigDialog } from "plot.slint";
+import { ViewSettings } from "view-settings.slint";
 
 // Re-export the plot globals/structs from the root so the Rust side can reach
 // PlotBridge via `ui.global::<PlotBridge>()` and the generated data structs.
-export { PlotBridge, PlotLine, AxisTick, LegendEntry }
+export { PlotBridge, PlotLine, AxisTick, LegendEntry, ViewSettings }
 
 export struct HealthTestResult {
     name: string,
@@ -555,8 +556,8 @@ export component AppWindow inherits Window {
     in-out property <int> battery-count;
     in-out property <int> charging-count;
     in-out property <int> charged-count;
-    in-out property <int> sort-column: -1;
-    in-out property <bool> sort-ascending: true;
+    in-out property <int> sort-column <=> ViewSettings.sort-column;
+    in-out property <bool> sort-ascending <=> ViewSettings.sort-ascending;
     in-out property <image> viz-texture;
     in-out property <[JournalEntryData]> journal-entries;
     in-out property <[string]> console-lines;
@@ -635,18 +636,19 @@ export component AppWindow inherits Window {
     callback clear-console(/* row index */ int);
     callback clear-all-console();
     callback upload-trajectory(/* row index */ int);
+    callback download-trajectory(/* row index */ int);
     callback fly-trajectory(/* row index */ int);
     callback clear-trajectory(/* row index */ int);
-    callback generate-primitive(/* row index */ int, /* shape */ string, /* size m */ string);
-    callback generate-wave(/* row index */ int, /* x step m */ string, /* y amp m */ string, /* reps */ string, /* simultaneous */ bool, /* speed m/s */ string);
+    callback generate-primitive(/* row index */ int, /* shape */ string, /* size m */ string, /* size y m */ string, /* z offset m */ string, /* z iterations */ string);
+    callback generate-wave(/* row index */ int, /* x step m */ string, /* y amp m */ string, /* reps */ string, /* simultaneous */ bool, /* speed m/s */ string, /* z offset m */ string, /* z iterations */ string);
     callback hlc-takeoff(/* row index */ int, /* height */ string, /* yaw */ string, /* time */ string, /* relative */ bool);
     callback hlc-goto(/* row index */ int, /* x */ string, /* y */ string, /* z */ string, /* yaw */ string, /* relative */ bool, /* speed m/s */ string);
     callback hlc-go-home(/* row index */ int);
     callback hlc-land(/* row index */ int);
     callback random-goto(/* row index */ int);
-    in-out property <string> unit-goto-x-text: "0";
-    in-out property <string> unit-goto-y-text: "0";
-    in-out property <string> unit-goto-z-text: "0";
+    in-out property <string> unit-goto-x-text <=> ViewSettings.goto-x;
+    in-out property <string> unit-goto-y-text <=> ViewSettings.goto-y;
+    in-out property <string> unit-goto-z-text <=> ViewSettings.goto-z;
     callback identify-unit(/* row index */ int);
     callback connect-unit(/* row index */ int);
     callback disconnect-unit(/* row index */ int);
@@ -746,8 +748,15 @@ export component AppWindow inherits Window {
     callback sniffer-refresh-ports();
     callback sniffer-connect();
     callback sniffer-disconnect();
+    in-out property <[string]> sniffer-ref-unit-names;
+    in-out property <int> sniffer-ref-unit-index;
+    in-out property <int> sniffer-ref-count;
+    in-out property <bool> sniffer-ref-reading;
+    in-out property <string> sniffer-ref-status;
     callback sniffer-solve-survey();
     callback sniffer-save-survey();
+    callback sniffer-read-reference(int);
+    callback sniffer-clear-reference();
     callback sniffer-set-paused(bool);
     callback sniffer-set-recording(bool);
 
@@ -1082,19 +1091,17 @@ export component AppWindow inherits Window {
                     sort-ascending: root.sort-ascending;
                     journal-entries: root.journal-entries;
                     console-lines: root.console-lines;
-                    goto-x-text <=> root.unit-goto-x-text;
-                    goto-y-text <=> root.unit-goto-y-text;
-                    goto-z-text <=> root.unit-goto-z-text;
                     sort-requested(col, ascending) => { sort-units(col, ascending); }
                     open-journal-requested(row) => { open-journal(row); }
                     add-journal-entry-requested(row, text) => { add-journal-entry(row, text); }
                     open-console-requested(row) => { open-console(row); }
                     clear-console-requested(row) => { clear-console(row); }
                     upload-trajectory-requested(row) => { upload-trajectory(row); }
+                    download-trajectory-requested(row) => { download-trajectory(row); }
                     fly-trajectory-requested(row) => { fly-trajectory(row); }
                     clear-trajectory-requested(row) => { clear-trajectory(row); }
-                    generate-primitive-requested(row, shape, size) => { generate-primitive(row, shape, size); }
-                    generate-wave-requested(row, x, y, reps, sim, speed) => { generate-wave(row, x, y, reps, sim, speed); }
+                    generate-primitive-requested(row, shape, size, sizey, zoff, ziter) => { generate-primitive(row, shape, size, sizey, zoff, ziter); }
+                    generate-wave-requested(row, x, y, reps, sim, speed, zoff, ziter) => { generate-wave(row, x, y, reps, sim, speed, zoff, ziter); }
                     takeoff-requested(row, height, yaw, time, relative) => { hlc-takeoff(row, height, yaw, time, relative); }
                     goto-requested(row, x, y, z, yaw, relative, speed) => { hlc-goto(row, x, y, z, yaw, relative, speed); }
                     random-goto-requested(row) => { random-goto(row); }
@@ -1169,6 +1176,11 @@ export component AppWindow inherits Window {
                     matrix-rows: root.sniffer-matrix-rows;
                     survey-rows: root.sniffer-survey-rows;
                     survey-status: root.sniffer-survey-status;
+                    ref-unit-names: root.sniffer-ref-unit-names;
+                    ref-unit-index <=> root.sniffer-ref-unit-index;
+                    ref-count: root.sniffer-ref-count;
+                    ref-reading: root.sniffer-ref-reading;
+                    ref-status: root.sniffer-ref-status;
                     feed-rows: root.sniffer-feed-rows;
                     paused <=> root.sniffer-paused;
                     recording <=> root.sniffer-recording;
@@ -1180,6 +1192,8 @@ export component AppWindow inherits Window {
                     disconnect() => { root.sniffer-disconnect(); }
                     solve-survey() => { root.sniffer-solve-survey(); }
                     save-survey() => { root.sniffer-save-survey(); }
+                    read-reference(i) => { root.sniffer-read-reference(i); }
+                    clear-reference() => { root.sniffer-clear-reference(); }
                     set-paused(p) => { root.sniffer-set-paused(p); }
                     set-recording(p) => { root.sniffer-set-recording(p); }
                 }
@@ -1208,19 +1222,17 @@ export component AppWindow inherits Window {
                     stick-rx: root.stick-rx;
                     stick-ry: root.stick-ry;
                     manual-control-armed: root.manual-control-armed;
-                    goto-x-text <=> root.unit-goto-x-text;
-                    goto-y-text <=> root.unit-goto-y-text;
-                    goto-z-text <=> root.unit-goto-z-text;
                     viz-unit-clicked(x, y) => { root.viz-unit-clicked(x, y); }
                     open-journal-requested(row) => { open-journal(row); }
                     add-journal-entry-requested(row, text) => { add-journal-entry(row, text); }
                     open-console-requested(row) => { open-console(row); }
                     clear-console-requested(row) => { clear-console(row); }
                     upload-trajectory-requested(row) => { upload-trajectory(row); }
+                    download-trajectory-requested(row) => { download-trajectory(row); }
                     fly-trajectory-requested(row) => { fly-trajectory(row); }
                     clear-trajectory-requested(row) => { clear-trajectory(row); }
-                    generate-primitive-requested(row, shape, size) => { generate-primitive(row, shape, size); }
-                    generate-wave-requested(row, x, y, reps, sim, speed) => { generate-wave(row, x, y, reps, sim, speed); }
+                    generate-primitive-requested(row, shape, size, sizey, zoff, ziter) => { generate-primitive(row, shape, size, sizey, zoff, ziter); }
+                    generate-wave-requested(row, x, y, reps, sim, speed, zoff, ziter) => { generate-wave(row, x, y, reps, sim, speed, zoff, ziter); }
                     takeoff-requested(row, height, yaw, time, relative) => { hlc-takeoff(row, height, yaw, time, relative); }
                     goto-requested(row, x, y, z, yaw, relative, speed) => { hlc-goto(row, x, y, z, yaw, relative, speed); }
                     random-goto-requested(row) => { random-goto(row); }

@@ -1,0 +1,142 @@
+// Shared, persisted UI state for the Units and Visualization tabs.
+//
+// Both tabs embed the *same* UnitSidebar, so anything the user types there used
+// to exist twice (once per embed) and reset on every restart. Keeping the values
+// in this global means the two tabs show the same thing, and Rust can round-trip
+// them through the settings file: it seeds the properties at startup and the
+// `changed` handlers below fire `save()` (debounced on the Rust side) whenever
+// something is edited.
+export global ViewSettings {
+    callback save();
+
+    // --- Unit sidebar: takeoff ---
+    in-out property <string> takeoff-height: "0.5";
+    in-out property <string> takeoff-yaw: "0";
+    in-out property <string> takeoff-time: "2";
+    in-out property <bool> takeoff-relative: true;
+
+    changed takeoff-height => { save(); }
+    changed takeoff-yaw => { save(); }
+    changed takeoff-time => { save(); }
+    changed takeoff-relative => { save(); }
+
+    // --- Unit sidebar: goto (x/y/z are also written by Rust on "goto here") ---
+    in-out property <string> goto-x: "0";
+    in-out property <string> goto-y: "0";
+    in-out property <string> goto-z: "0";
+    in-out property <string> goto-yaw: "0";
+    in-out property <string> goto-speed: "1.0";
+    in-out property <bool> goto-relative: false;
+
+    changed goto-x => { save(); }
+    changed goto-y => { save(); }
+    changed goto-z => { save(); }
+    changed goto-yaw => { save(); }
+    changed goto-speed => { save(); }
+    changed goto-relative => { save(); }
+
+    // --- Unit sidebar: trajectory generators ---
+    in-out property <string> z-offset: "0.0";
+    in-out property <string> z-iterations: "1";
+    in-out property <string> primitive-size: "0.5";
+    in-out property <string> primitive-size-y: "1.0";
+    in-out property <string> wave-x: "0.3";
+    in-out property <string> wave-y: "0.3";
+    in-out property <string> wave-reps: "3";
+    in-out property <string> wave-speed: "0.5";
+    in-out property <bool> wave-simultaneous: false;
+
+    changed z-offset => { save(); }
+    changed z-iterations => { save(); }
+    changed primitive-size => { save(); }
+    changed primitive-size-y => { save(); }
+    changed wave-x => { save(); }
+    changed wave-y => { save(); }
+    changed wave-reps => { save(); }
+    changed wave-speed => { save(); }
+    changed wave-simultaneous => { save(); }
+
+    // --- Unit sidebar: collapsible sections ---
+    in-out property <bool> section-status-expanded: true;
+    in-out property <bool> section-info-expanded: false;
+    in-out property <bool> section-link-expanded: false;
+    in-out property <bool> section-flight-expanded: true;
+    in-out property <bool> section-trajectory-expanded: false;
+    in-out property <bool> section-tools-expanded: false;
+    in-out property <bool> section-power-expanded: false;
+
+    changed section-status-expanded => { save(); }
+    changed section-info-expanded => { save(); }
+    changed section-link-expanded => { save(); }
+    changed section-flight-expanded => { save(); }
+    changed section-trajectory-expanded => { save(); }
+    changed section-tools-expanded => { save(); }
+    changed section-power-expanded => { save(); }
+
+    // --- Units tab: table layout and sorting ---
+    in-out property <length> sidebar-width: 360px;
+    in-out property <int> sort-column: -1;
+    in-out property <bool> sort-ascending: true;
+    in-out property <length> col-indicator-w: 40px;
+    in-out property <length> col-status-w: 90px;
+    in-out property <length> col-name-w: 100px;
+    in-out property <length> col-uri-w: 160px;
+    in-out property <length> col-x-w: 60px;
+    in-out property <length> col-y-w: 60px;
+    in-out property <length> col-z-w: 60px;
+    in-out property <length> col-battery-w: 110px;
+    in-out property <length> col-link-w: 90px;
+    in-out property <length> col-power-w: 80px;
+    in-out property <length> col-supervisor-w: 90px;
+    in-out property <length> col-lh-w: 50px;
+    in-out property <length> col-loco-w: 50px;
+    in-out property <length> col-ledup-w: 55px;
+    in-out property <length> col-leddn-w: 55px;
+
+    changed sidebar-width => { save(); }
+    changed sort-column => { save(); }
+    changed sort-ascending => { save(); }
+    changed col-indicator-w => { save(); }
+    changed col-status-w => { save(); }
+    changed col-name-w => { save(); }
+    changed col-uri-w => { save(); }
+    changed col-x-w => { save(); }
+    changed col-y-w => { save(); }
+    changed col-z-w => { save(); }
+    changed col-battery-w => { save(); }
+    changed col-link-w => { save(); }
+    changed col-power-w => { save(); }
+    changed col-supervisor-w => { save(); }
+    changed col-lh-w => { save(); }
+    changed col-loco-w => { save(); }
+    changed col-ledup-w => { save(); }
+    changed col-leddn-w => { save(); }
+
+    // --- Visualization tab: camera ---
+    in-out property <float> cam-yaw: 0.8;
+    in-out property <float> cam-pitch: 0.6;
+    in-out property <float> cam-distance: 6.0;
+    in-out property <float> cam-pan-x: 0;
+    in-out property <float> cam-pan-y: 0;
+
+    changed cam-yaw => { save(); }
+    changed cam-pitch => { save(); }
+    changed cam-distance => { save(); }
+    changed cam-pan-x => { save(); }
+    changed cam-pan-y => { save(); }
+
+    // --- Visualization tab: overlays ---
+    in-out property <bool> show-cf-labels: false;
+    in-out property <bool> show-lh-labels: false;
+    in-out property <bool> show-loco-labels: false;
+    in-out property <bool> show-axis-labels: false;
+    in-out property <bool> show-grid-labels: false;
+    in-out property <bool> show-scene-overlay: true;
+
+    changed show-cf-labels => { save(); }
+    changed show-lh-labels => { save(); }
+    changed show-loco-labels => { save(); }
+    changed show-axis-labels => { save(); }
+    changed show-grid-labels => { save(); }
+    changed show-scene-overlay => { save(); }
+}

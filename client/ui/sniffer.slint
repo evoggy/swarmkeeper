@@ -34,8 +34,15 @@ export struct SnifferSurveyRow {
     x: float,
     y: float,
     z: float,
-    residual: float,   // metres
-    has-known: bool,   // a reference (LPP) position was available for this anchor
+    residual: float,   // metres, solved-vs-measured distance self-consistency
+    links: string,     // "used/total" links after NLOS rejection
+    thin: bool,        // fewer than half this anchor's links survived rejection
+    has-ref: bool,     // a reference position was available for this anchor
+    dx: string,        // solved minus reference, per axis, pre-formatted [mm]
+    dy: string,
+    dz: string,
+    delta-text: string, // |solved - reference|, pre-formatted [mm]
+    delta: float,       // |solved - reference| [m], for colouring
 }
 
 // Sniffer tab: drives an LPS node in binary sniffer mode over serial, decodes
@@ -70,6 +77,16 @@ export component SnifferContent inherits Rectangle {
     in property <[SnifferSurveyRow]> survey-rows;
     callback solve-survey();
     callback save-survey();
+
+    // Reference geometry: the configured anchor positions read back from a
+    // Crazyflie, which the survey is both aligned to and compared against.
+    in property <[string]> ref-unit-names;
+    in-out property <int> ref-unit-index;
+    in property <int> ref-count;      // anchors in the reference set
+    in property <bool> ref-reading;   // a read is in flight
+    in property <string> ref-status;
+    callback read-reference(int);
+    callback clear-reference();
 
     // Packet feed
     in property <[SnifferFeedRow]> feed-rows;
@@ -255,6 +272,35 @@ export component SnifferContent inherits Rectangle {
             HorizontalBox {
                 alignment: start;
                 spacing: 12px;
+                Text {
+                    text: "Reference geometry:";
+                    vertical-alignment: center;
+                }
+                ComboBox {
+                    width: 180px;
+                    model: root.ref-unit-names;
+                    current-index <=> root.ref-unit-index;
+                    enabled: !root.ref-reading;
+                }
+                Button {
+                    text: "Read from Crazyflie";
+                    enabled: !root.ref-reading;
+                    clicked => { root.read-reference(root.ref-unit-index); }
+                }
+                Button {
+                    text: "Clear";
+                    enabled: root.ref-count > 0 && !root.ref-reading;
+                    clicked => { root.clear-reference(); }
+                }
+                Text {
+                    text: root.ref-status;
+                    vertical-alignment: center;
+                    color: #888;
+                }
+            }
+            HorizontalBox {
+                alignment: start;
+                spacing: 12px;
                 Button {
                     text: "Solve geometry";
                     clicked => { root.solve-survey(); }
@@ -277,8 +323,12 @@ export component SnifferContent inherits Rectangle {
                 Text { text: "x [m]"; width: 80px; font-weight: 700; }
                 Text { text: "y [m]"; width: 80px; font-weight: 700; }
                 Text { text: "z [m]"; width: 80px; font-weight: 700; }
-                Text { text: "Residual"; width: 100px; font-weight: 700; }
-                Text { text: "Ref"; font-weight: 700; }
+                Text { text: "Residual"; width: 90px; font-weight: 700; }
+                Text { text: "Links"; width: 60px; font-weight: 700; }
+                Text { text: "Δx [mm]"; width: 70px; font-weight: 700; }
+                Text { text: "Δy [mm]"; width: 70px; font-weight: 700; }
+                Text { text: "Δz [mm]"; width: 70px; font-weight: 700; }
+                Text { text: "|Δ| [mm]"; width: 70px; font-weight: 700; }
             }
             for s in root.survey-rows: HorizontalBox {
                 padding-left: 4px;
@@ -289,14 +339,27 @@ export component SnifferContent inherits Rectangle {
                 Text { text: Math.round(s.z * 100) / 100; width: 80px; vertical-alignment: center; }
                 Text {
                     text: Math.round(s.residual * 1000) + " mm";
-                    width: 100px;
+                    width: 90px;
                     vertical-alignment: center;
                     color: s.residual > 0.1 ? #ff851b : #2ecc40;
                 }
                 Text {
-                    text: s.has-known ? "✓" : "—";
+                    text: s.links;
+                    width: 60px;
                     vertical-alignment: center;
-                    color: #888;
+                    color: s.thin ? #ff851b : #888;
+                }
+                Text { text: s.dx; width: 70px; vertical-alignment: center; color: #888; }
+                Text { text: s.dy; width: 70px; vertical-alignment: center; color: #888; }
+                Text { text: s.dz; width: 70px; vertical-alignment: center; color: #888; }
+                Text {
+                    text: s.delta-text;
+                    width: 70px;
+                    vertical-alignment: center;
+                    color: !s.has-ref ? #888
+                         : s.delta > 1.0 ? #ff4136
+                         : s.delta > 0.3 ? #ff851b
+                         : #2ecc40;
                 }
             }
 

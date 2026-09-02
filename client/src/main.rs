@@ -57,6 +57,175 @@ struct AppSettings {
     tuning_vy_ki: Option<f32>,
     tuning_prop_test_threshold: Option<f32>,
     tuning_prop_test_pwm_ratio: Option<u16>,
+    // Keep last: serialized as a [view] table, which TOML requires after the
+    // plain values above.
+    #[serde(default)]
+    view: ViewState,
+}
+
+/// Conversion glue between the property types of the `ViewSettings` Slint global
+/// and the plain Rust types stored in the settings file.
+trait ViewValue {
+    type Slint;
+    fn from_slint(value: Self::Slint) -> Self;
+    fn to_slint(&self) -> Self::Slint;
+}
+
+impl ViewValue for String {
+    type Slint = slint::SharedString;
+    fn from_slint(value: slint::SharedString) -> Self {
+        value.to_string()
+    }
+    fn to_slint(&self) -> slint::SharedString {
+        self.as_str().into()
+    }
+}
+
+impl ViewValue for bool {
+    type Slint = bool;
+    fn from_slint(value: bool) -> Self {
+        value
+    }
+    fn to_slint(&self) -> bool {
+        *self
+    }
+}
+
+impl ViewValue for i32 {
+    type Slint = i32;
+    fn from_slint(value: i32) -> Self {
+        value
+    }
+    fn to_slint(&self) -> i32 {
+        *self
+    }
+}
+
+impl ViewValue for f32 {
+    type Slint = f32;
+    fn from_slint(value: f32) -> Self {
+        value
+    }
+    fn to_slint(&self) -> f32 {
+        *self
+    }
+}
+
+/// Declares the persisted view state once: the struct, its defaults, and the
+/// conversions to and from the `ViewSettings` Slint global. Persisting one more
+/// value is one more line in the table below (plus the property and its
+/// `changed` handler in view-settings.slint).
+macro_rules! view_state {
+    ($($field:ident: $ty:ty = $default:expr, $getter:ident / $setter:ident;)*) => {
+        /// State of the Units and Visualization tabs that survives both a tab
+        /// switch (the two tabs share one copy through the Slint global) and a
+        /// restart (this is its on-disk mirror). Defaults must match the ones
+        /// declared in view-settings.slint.
+        #[derive(Serialize, Deserialize)]
+        #[serde(default)]
+        struct ViewState {
+            $($field: $ty,)*
+        }
+
+        impl Default for ViewState {
+            fn default() -> Self {
+                Self { $($field: $default,)* }
+            }
+        }
+
+        impl ViewState {
+            /// Seed the Slint global from the settings file.
+            fn apply(&self, view: &ViewSettings<'_>) {
+                $(view.$setter(ViewValue::to_slint(&self.$field));)*
+            }
+
+            /// Read the Slint global back out, for saving.
+            fn capture(view: &ViewSettings<'_>) -> Self {
+                Self { $($field: ViewValue::from_slint(view.$getter()),)* }
+            }
+        }
+    };
+}
+
+view_state! {
+    // Unit sidebar: takeoff
+    takeoff_height: String = "0.5".into(), get_takeoff_height / set_takeoff_height;
+    takeoff_yaw: String = "0".into(), get_takeoff_yaw / set_takeoff_yaw;
+    takeoff_time: String = "2".into(), get_takeoff_time / set_takeoff_time;
+    takeoff_relative: bool = true, get_takeoff_relative / set_takeoff_relative;
+
+    // Unit sidebar: goto
+    goto_x: String = "0".into(), get_goto_x / set_goto_x;
+    goto_y: String = "0".into(), get_goto_y / set_goto_y;
+    goto_z: String = "0".into(), get_goto_z / set_goto_z;
+    goto_yaw: String = "0".into(), get_goto_yaw / set_goto_yaw;
+    goto_speed: String = "1.0".into(), get_goto_speed / set_goto_speed;
+    goto_relative: bool = false, get_goto_relative / set_goto_relative;
+
+    // Unit sidebar: trajectory generators
+    z_offset: String = "0.0".into(), get_z_offset / set_z_offset;
+    z_iterations: String = "1".into(), get_z_iterations / set_z_iterations;
+    primitive_size: String = "0.5".into(), get_primitive_size / set_primitive_size;
+    primitive_size_y: String = "1.0".into(), get_primitive_size_y / set_primitive_size_y;
+    wave_x: String = "0.3".into(), get_wave_x / set_wave_x;
+    wave_y: String = "0.3".into(), get_wave_y / set_wave_y;
+    wave_reps: String = "3".into(), get_wave_reps / set_wave_reps;
+    wave_speed: String = "0.5".into(), get_wave_speed / set_wave_speed;
+    wave_simultaneous: bool = false, get_wave_simultaneous / set_wave_simultaneous;
+
+    // Unit sidebar: collapsible sections
+    section_status_expanded: bool = true, get_section_status_expanded / set_section_status_expanded;
+    section_info_expanded: bool = false, get_section_info_expanded / set_section_info_expanded;
+    section_link_expanded: bool = false, get_section_link_expanded / set_section_link_expanded;
+    section_flight_expanded: bool = true, get_section_flight_expanded / set_section_flight_expanded;
+    section_trajectory_expanded: bool = false, get_section_trajectory_expanded / set_section_trajectory_expanded;
+    section_tools_expanded: bool = false, get_section_tools_expanded / set_section_tools_expanded;
+    section_power_expanded: bool = false, get_section_power_expanded / set_section_power_expanded;
+
+    // Units tab: table layout and sorting
+    sidebar_width: f32 = 360.0, get_sidebar_width / set_sidebar_width;
+    sort_column: i32 = -1, get_sort_column / set_sort_column;
+    sort_ascending: bool = true, get_sort_ascending / set_sort_ascending;
+    col_indicator_w: f32 = 40.0, get_col_indicator_w / set_col_indicator_w;
+    col_status_w: f32 = 90.0, get_col_status_w / set_col_status_w;
+    col_name_w: f32 = 100.0, get_col_name_w / set_col_name_w;
+    col_uri_w: f32 = 160.0, get_col_uri_w / set_col_uri_w;
+    col_x_w: f32 = 60.0, get_col_x_w / set_col_x_w;
+    col_y_w: f32 = 60.0, get_col_y_w / set_col_y_w;
+    col_z_w: f32 = 60.0, get_col_z_w / set_col_z_w;
+    col_battery_w: f32 = 110.0, get_col_battery_w / set_col_battery_w;
+    col_link_w: f32 = 90.0, get_col_link_w / set_col_link_w;
+    col_power_w: f32 = 80.0, get_col_power_w / set_col_power_w;
+    col_supervisor_w: f32 = 90.0, get_col_supervisor_w / set_col_supervisor_w;
+    col_lh_w: f32 = 50.0, get_col_lh_w / set_col_lh_w;
+    col_loco_w: f32 = 50.0, get_col_loco_w / set_col_loco_w;
+    col_ledup_w: f32 = 55.0, get_col_ledup_w / set_col_ledup_w;
+    col_leddn_w: f32 = 55.0, get_col_leddn_w / set_col_leddn_w;
+
+    // Visualization tab: camera
+    cam_yaw: f32 = 0.8, get_cam_yaw / set_cam_yaw;
+    cam_pitch: f32 = 0.6, get_cam_pitch / set_cam_pitch;
+    cam_distance: f32 = 6.0, get_cam_distance / set_cam_distance;
+    cam_pan_x: f32 = 0.0, get_cam_pan_x / set_cam_pan_x;
+    cam_pan_y: f32 = 0.0, get_cam_pan_y / set_cam_pan_y;
+
+    // Visualization tab: overlays
+    show_cf_labels: bool = false, get_show_cf_labels / set_show_cf_labels;
+    show_lh_labels: bool = false, get_show_lh_labels / set_show_lh_labels;
+    show_loco_labels: bool = false, get_show_loco_labels / set_show_loco_labels;
+    show_axis_labels: bool = false, get_show_axis_labels / set_show_axis_labels;
+    show_grid_labels: bool = false, get_show_grid_labels / set_show_grid_labels;
+    show_scene_overlay: bool = true, get_show_scene_overlay / set_show_scene_overlay;
+}
+
+/// Write the current Units/Visualization view state to the settings file,
+/// leaving the rest of the file untouched.
+fn save_view_state(ui: &AppWindow) {
+    let mut settings: AppSettings = confy::load("swarmkeeper", None).unwrap_or_default();
+    settings.view = ViewState::capture(&ui.global::<ViewSettings>());
+    if let Err(e) = confy::store("swarmkeeper", None, &settings) {
+        eprintln!("Failed to save view settings: {}", e);
+    }
 }
 
 #[derive(Deserialize)]
@@ -185,6 +354,9 @@ fn apply_swarm_config(ui: &AppWindow, config: &SwarmConfig) {
 
     ui.set_radio_test_unit_names(slint::ModelRc::new(slint::VecModel::from(unit_names.clone())));
     ui.set_radio_test_selected_unit(0);
+
+    ui.set_sniffer_ref_unit_names(slint::ModelRc::new(slint::VecModel::from(unit_names.clone())));
+    ui.set_sniffer_ref_unit_index(0);
 
     // Populate wizard CF names
     ui.set_lh_wizard_cf_names(slint::ModelRc::new(slint::VecModel::from(unit_names.clone())));
@@ -457,6 +629,83 @@ fn update_loco_anchors(ui_weak: &slint::Weak<AppWindow>, pd: &PositioningData) {
         }
     })
     .ok();
+}
+
+/// Read the anchor positions a Crazyflie has stored in its Loco2 memory, plus
+/// the ids it is currently hearing.
+///
+/// Reads the memory raw rather than going through `LocoMemory2::read_all()`,
+/// which rejects anchor IDs >= 16 — TDoA3 anchor IDs can be any byte value
+/// (0-255). Layout matches the firmware:
+///   0x0000: id list      (count byte + ids)
+///   0x1000: active list  (count byte + ids)
+///   0x2000 + id*0x100: 3x f32 LE position + 1 valid byte
+async fn read_loco_anchor_positions(
+    cf: &Arc<crazyflie_lib::Crazyflie>,
+) -> (Vec<(u8, [f32; 3])>, Vec<u8>) {
+    use crazyflie_lib::subsystems::memory::{MemoryType, RawMemory};
+
+    const ADR_ID_LIST: usize = 0x0000;
+    const ADR_ACTIVE_ID_LIST: usize = 0x1000;
+    const ADR_ANCHOR_BASE: usize = 0x2000;
+    const ANCHOR_PAGE_SIZE: usize = 0x0100;
+    const MAX_ANCHORS: usize = 16;
+
+    let mut positions = Vec::new();
+    let mut active_ids = Vec::new();
+
+    let mems = cf.memory.get_memories(Some(MemoryType::Loco2));
+    let Some(mem) = mems.first() else {
+        return (positions, active_ids);
+    };
+    let Some(Ok(raw)) = cf.memory.open_memory::<RawMemory>((*mem).clone()).await else {
+        return (positions, active_ids);
+    };
+
+    let parse_id_list = |buf: Vec<u8>| -> Vec<u8> {
+        if buf.is_empty() {
+            return Vec::new();
+        }
+        let count = (buf[0] as usize)
+            .min(MAX_ANCHORS)
+            .min(buf.len().saturating_sub(1));
+        buf[1..1 + count].to_vec()
+    };
+
+    let all_ids = match raw.read(ADR_ID_LIST, 1 + MAX_ANCHORS).await {
+        Ok(buf) => parse_id_list(buf),
+        Err(e) => {
+            eprintln!("Failed to read loco id list: {:?}", e);
+            Vec::new()
+        }
+    };
+    active_ids = match raw.read(ADR_ACTIVE_ID_LIST, 1 + MAX_ANCHORS).await {
+        Ok(buf) => parse_id_list(buf),
+        Err(e) => {
+            eprintln!("Failed to read loco active list: {:?}", e);
+            Vec::new()
+        }
+    };
+
+    for id in all_ids {
+        let addr = ADR_ANCHOR_BASE + ANCHOR_PAGE_SIZE * id as usize;
+        match raw.read(addr, 13).await {
+            Ok(b) if b.len() >= 13 => {
+                let x = f32::from_le_bytes([b[0], b[1], b[2], b[3]]);
+                let y = f32::from_le_bytes([b[4], b[5], b[6], b[7]]);
+                let z = f32::from_le_bytes([b[8], b[9], b[10], b[11]]);
+                let is_valid = b[12] != 0;
+                if is_valid {
+                    positions.push((id, [x, y, z]));
+                }
+            }
+            Ok(_) => {}
+            Err(e) => eprintln!("Failed to read loco anchor {}: {:?}", id, e),
+        }
+    }
+    cf.memory.close_memory(raw).await.ok();
+
+    (positions, active_ids)
 }
 
 struct ConnectedUnit {
@@ -829,12 +1078,12 @@ struct SweepEntry {
     ogeephase: f64,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize, Clone)]
 struct TrajectoryConfig {
     segments: Vec<TrajectorySegmentYaml>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize, Clone)]
 struct TrajectorySegmentYaml {
     duration: f32,
     x: Vec<f32>,
@@ -877,12 +1126,23 @@ fn sample_trajectory(config: &TrajectoryConfig) -> Vec<[f32; 3]> {
     points
 }
 
+/// The polynomial trajectory last uploaded to a unit, kept so it can be written back
+/// out to a YAML file by "Download Trajectory". Generated shapes (circle, wave, ...) only
+/// ever exist in memory otherwise, so without this they cannot be saved or replayed later.
+/// `name` seeds the save dialog's filename.
+#[derive(Clone)]
+struct UploadedTrajectory {
+    name: String,
+    config: TrajectoryConfig,
+}
+
 #[derive(Default, Clone)]
 struct TrajectoryData {
     points: Vec<[f32; 3]>,
     duration: f32,
     anchor: Option<[f32; 3]>,
     saved_points: Option<Vec<[f32; 3]>>,
+    uploaded: Option<UploadedTrajectory>,
 }
 
 type SharedTrajectoryData = Arc<Mutex<HashMap<usize, TrajectoryData>>>;
@@ -950,10 +1210,18 @@ fn bezier_segment(
     }
 }
 
+/// Clamp a shape side to a sane minimum length while keeping its sign: a negative side
+/// builds the shape towards decreasing coordinates instead of increasing ones, so a
+/// drone parked at the far end of the arena can still fly a box back into it.
+fn signed_extent(side: f32) -> f32 {
+    if side < 0.0 { side.min(-0.05) } else { side.max(0.05) }
+}
+
 /// Circle of the given radius in the horizontal plane, built from four
 /// quarter-arc cubic Béziers (starts and ends at (r, 0), traversed CCW).
+/// A negative radius describes the same circle, so only the magnitude is used.
 fn generate_circle(radius: f32, speed: f32) -> TrajectoryConfig {
-    let r = radius.max(0.05);
+    let r = radius.abs().max(0.05);
     // Control-point offset for a 90° cubic-Bézier circle approximation.
     let kappa = 0.552_284_75 * r;
     let dur = (std::f32::consts::FRAC_PI_2 * r / speed.max(0.05)).max(0.4);
@@ -973,9 +1241,11 @@ fn generate_circle(radius: f32, speed: f32) -> TrajectoryConfig {
 }
 
 /// Square of the given side length in the horizontal plane (four min-jerk edges).
+/// A negative side mirrors the square into -X/-Y, so it grows away from the start
+/// position in the other direction.
 fn generate_square(side: f32, speed: f32) -> TrajectoryConfig {
-    let l = side.max(0.05);
-    let dur = (l / speed.max(0.05)).max(0.4);
+    let l = signed_extent(side);
+    let dur = (l.abs() / speed.max(0.05)).max(0.4);
     let corners = [
         [0.0, 0.0, 0.0],
         [l, 0.0, 0.0],
@@ -987,12 +1257,39 @@ fn generate_square(side: f32, speed: f32) -> TrajectoryConfig {
     TrajectoryConfig { segments }
 }
 
+/// Rectangle `width` (X) by `depth` (Y) in the horizontal plane (four min-jerk edges).
+/// Each edge is timed from its own length, so the drone holds the same path speed on the
+/// long and the short sides instead of racing along the long ones. Either side may be
+/// negative to extend the rectangle along -X and/or -Y instead of +X/+Y.
+fn generate_rectangle(width: f32, depth: f32, speed: f32) -> TrajectoryConfig {
+    let w = signed_extent(width);
+    let d = signed_extent(depth);
+    let v = speed.max(0.05);
+    let dur_w = (w.abs() / v).max(0.4);
+    let dur_d = (d.abs() / v).max(0.4);
+    let corners = [
+        [0.0, 0.0, 0.0],
+        [w, 0.0, 0.0],
+        [w, d, 0.0],
+        [0.0, d, 0.0],
+        [0.0, 0.0, 0.0],
+    ];
+    let durations = [dur_w, dur_d, dur_w, dur_d];
+    let segments = (0..4)
+        .map(|i| min_jerk_segment(corners[i], corners[i + 1], durations[i]))
+        .collect();
+    TrajectoryConfig { segments }
+}
+
 /// Cube wireframe of the given side length: a closed 16-edge walk that traces all
 /// 12 edges of the cube (four edges are retraced), each edge a min-jerk segment.
+/// A negative side mirrors the footprint into -X/-Y; the cube is always built *upwards*
+/// from the start height, since the layer below it is usually the floor.
 fn generate_cube(side: f32, speed: f32) -> TrajectoryConfig {
-    let l = side.max(0.05);
-    let dur = (l / speed.max(0.05)).max(0.4);
-    let v = |x: f32, y: f32, z: f32| [x * l, y * l, z * l];
+    let l = signed_extent(side);
+    let up = l.abs();
+    let dur = (up / speed.max(0.05)).max(0.4);
+    let v = |x: f32, y: f32, z: f32| [x * l, y * l, z * up];
     let seq = [
         v(0., 0., 0.), v(1., 0., 0.), v(1., 1., 0.), v(0., 1., 0.), v(0., 0., 0.),
         v(0., 0., 1.), v(1., 0., 1.), v(1., 1., 1.), v(0., 1., 1.), v(0., 0., 1.),
@@ -1003,15 +1300,130 @@ fn generate_cube(side: f32, speed: f32) -> TrajectoryConfig {
     TrajectoryConfig { segments }
 }
 
-/// Build a primitive trajectory by name. `size` is the radius for a circle and the
-/// side length for a square/cube. Returns None for an unknown shape.
-fn generate_primitive(shape: &str, size: f32) -> Option<TrajectoryConfig> {
+/// Build a primitive trajectory by name. `size` is the radius for a circle, the side
+/// length for a square/cube and the X side for a rectangle; `size_y` is the rectangle's
+/// Y side and is ignored by every other shape. Returns None for an unknown shape.
+fn generate_primitive(shape: &str, size: f32, size_y: f32) -> Option<TrajectoryConfig> {
     match shape {
         "circle" => Some(generate_circle(size, PRIMITIVE_SPEED)),
         "square" => Some(generate_square(size, PRIMITIVE_SPEED)),
+        "rectangle" => Some(generate_rectangle(size, size_y, PRIMITIVE_SPEED)),
         "cube" => Some(generate_cube(size, PRIMITIVE_SPEED)),
         _ => None,
     }
+}
+
+/// Bytes one uncompressed Poly4D segment occupies in the Crazyflie trajectory memory.
+const POLY4D_SEGMENT_BYTES: usize = 132;
+
+/// Size of the trajectory memory on the Crazyflie.
+const TRAJECTORY_MEMORY_BYTES: usize = 4096;
+
+/// Position of a polynomial segment at time `t`.
+fn segment_point(seg: &TrajectorySegmentYaml, t: f32) -> [f32; 3] {
+    [eval_poly(&seg.x, t), eval_poly(&seg.y, t), eval_poly(&seg.z, t)]
+}
+
+/// Reverse one polynomial in time so it traces the same curve from its end back to its
+/// start. Substituting `t -> T - t` into `p(t) = sum_k a_k t^k` and re-expanding gives
+/// `b_j = (-1)^j * sum_{k>=j} a_k * C(k,j) * T^(k-j)`.
+fn reverse_poly(coeffs: &[f32], duration: f32) -> Vec<f32> {
+    let n = coeffs.len();
+    let mut out = vec![0.0f32; n];
+    for j in 0..n {
+        let mut acc = 0.0f32;
+        let mut binom = 1.0f32; // C(j, j)
+        for k in j..n {
+            acc += coeffs[k] * binom * duration.powi((k - j) as i32);
+            // C(k, j) -> C(k+1, j)
+            binom = binom * (k + 1) as f32 / (k + 1 - j) as f32;
+        }
+        out[j] = if j % 2 == 0 { acc } else { -acc };
+    }
+    out
+}
+
+/// The whole trajectory flown backwards: segments in reverse order, each reversed in time.
+fn reverse_trajectory(config: &TrajectoryConfig) -> TrajectoryConfig {
+    let segments = config
+        .segments
+        .iter()
+        .rev()
+        .map(|s| TrajectorySegmentYaml {
+            duration: s.duration,
+            x: reverse_poly(&s.x, s.duration),
+            y: reverse_poly(&s.y, s.duration),
+            z: reverse_poly(&s.z, s.duration),
+            yaw: reverse_poly(&s.yaw, s.duration),
+        })
+        .collect();
+    TrajectoryConfig { segments }
+}
+
+/// Lift a trajectory by `dz` metres (only the constant term of z moves).
+fn shift_trajectory_z(config: &TrajectoryConfig, dz: f32) -> TrajectoryConfig {
+    let segments = config
+        .segments
+        .iter()
+        .map(|s| {
+            let mut z = s.z.clone();
+            if z.is_empty() {
+                z.push(dz);
+            } else {
+                z[0] += dz;
+            }
+            TrajectorySegmentYaml { duration: s.duration, x: s.x.clone(), y: s.y.clone(), z, yaw: s.yaw.clone() }
+        })
+        .collect();
+    TrajectoryConfig { segments }
+}
+
+/// Stack `iterations` copies of `config` `z_offset` metres apart. Every copy after the
+/// first is the previous one flown *backwards*, so it begins directly above the point
+/// where the previous one ended and the only move in between is a straight climb (added
+/// here as a min-jerk segment). `iterations <= 1` or a zero offset returns `config`
+/// unchanged.
+fn stack_trajectory_z(
+    config: TrajectoryConfig,
+    z_offset: f32,
+    iterations: u32,
+    speed: f32,
+) -> TrajectoryConfig {
+    if iterations <= 1 || z_offset.abs() < 1e-4 || config.segments.is_empty() {
+        return config;
+    }
+    let climb_dur = (z_offset.abs() / speed.max(0.05)).max(0.4);
+    let mut out: Vec<TrajectorySegmentYaml> = config.segments.clone();
+    let mut layer = config;
+    for _ in 1..iterations {
+        let next = shift_trajectory_z(&reverse_trajectory(&layer), z_offset);
+        let last = out.last().expect("layer is non-empty");
+        let from = segment_point(last, last.duration);
+        let to = segment_point(&next.segments[0], 0.0);
+        out.push(min_jerk_segment(from, to, climb_dur));
+        out.extend(next.segments.iter().cloned());
+        layer = next;
+    }
+    TrajectoryConfig { segments: out }
+}
+
+/// Stack `iterations` copies of a waypoint path `z_offset` metres apart, every copy after
+/// the first reversed, so each layer starts directly above where the previous one ended
+/// and the joining leg is a pure vertical climb. The compressed-trajectory counterpart of
+/// [`stack_trajectory_z`].
+fn stack_waypoints_z(pts: Vec<[f32; 3]>, z_offset: f32, iterations: u32) -> Vec<[f32; 3]> {
+    if iterations <= 1 || z_offset.abs() < 1e-4 || pts.is_empty() {
+        return pts;
+    }
+    let mut out = pts.clone();
+    let mut layer = pts;
+    for _ in 1..iterations {
+        let next: Vec<[f32; 3]> =
+            layer.iter().rev().map(|p| [p[0], p[1], p[2] + z_offset]).collect();
+        out.extend_from_slice(&next);
+        layer = next;
+    }
+    out
 }
 
 /// Ordered waypoint list for a back-and-forth "wave" in the horizontal plane at a
@@ -1055,10 +1467,14 @@ fn wave_waypoints(x_step: f32, y_amp: f32, cycles: u32, simultaneous: bool) -> V
 /// Build a back-and-forth wave as a *compressed* trajectory: each leg is a straight,
 /// constant-velocity move that the firmware interpolates from the previous endpoint to
 /// the stored endpoint, so only the axes that actually change cost any bytes (the rest
-/// are flagged "constant"). Z and yaw are held throughout. Compressed trajectories are
+/// are flagged "constant"). Yaw is held throughout, and z within a layer. Compressed trajectories are
 /// terminated by the firmware at the first zero-duration piece, so a sentinel segment is
 /// appended (the 4 KB trajectory memory is persistent and otherwise still holds stale
 /// bytes from a previous upload, which would be parsed as bogus extra pieces).
+///
+/// `z_offset` / `z_iterations` stack the wave at several heights (see
+/// [`stack_waypoints_z`]); each extra layer is flown backwards from where the previous
+/// one ended, so the joining leg is a pure vertical climb.
 ///
 /// Returns the compressed start point, the segment list (sentinel included), the polyline
 /// points for visualization, and the total duration in seconds.
@@ -1068,19 +1484,31 @@ fn build_wave_compressed(
     cycles: u32,
     simultaneous: bool,
     speed: f32,
+    z_offset: f32,
+    z_iterations: u32,
 ) -> (
     crazyflie_lib::subsystems::memory::CompressedStart,
     Vec<crazyflie_lib::subsystems::memory::CompressedSegment>,
     Vec<[f32; 3]>,
     f32,
+    TrajectoryConfig,
 ) {
     use crazyflie_lib::subsystems::memory::{CompressedSegment, CompressedStart};
 
-    let pts = wave_waypoints(x_step, y_amp, cycles, simultaneous);
+    let pts = stack_waypoints_z(
+        wave_waypoints(x_step, y_amp, cycles, simultaneous),
+        z_offset,
+        z_iterations,
+    );
     let speed = speed.max(0.05);
     let start = CompressedStart::new(pts[0][0], pts[0][1], pts[0][2], 0.0);
 
     let mut segments = Vec::new();
+    // The same legs in the uncompressed poly4d form, so "Download Trajectory" can write
+    // the generated wave out as a YAML file the upload path can read back. A compressed
+    // piece with one control point interpolates linearly over its duration, so the exact
+    // equivalent is a first-degree polynomial per axis.
+    let mut poly_segments: Vec<TrajectorySegmentYaml> = Vec::new();
     let mut total = 0.0f32;
     for w in pts.windows(2) {
         let (from, to) = (w[0], w[1]);
@@ -1100,6 +1528,13 @@ fn build_wave_compressed(
         if let Ok(seg) = CompressedSegment::new(dur, xe, ye, ze, vec![]) {
             segments.push(seg);
         }
+        poly_segments.push(TrajectorySegmentYaml {
+            duration: dur,
+            x: vec![from[0], dx / dur],
+            y: vec![from[1], dy / dur],
+            z: vec![from[2], dz / dur],
+            yaw: vec![0.0],
+        });
     }
     // Terminating sentinel: a zero-duration, all-constant piece packs to [0, 0, 0],
     // which the firmware parser reads as "duration 0" and stops.
@@ -1107,24 +1542,47 @@ fn build_wave_compressed(
         segments.push(term);
     }
 
-    (start, segments, pts, total)
+    (start, segments, pts, total, TrajectoryConfig { segments: poly_segments })
 }
 
 /// Upload a trajectory definition to a single unit's trajectory memory, define it
 /// as trajectory id 1, and store its sampled points for visualization. Shared by
 /// the file-based upload and the generated-primitive buttons. If the unit is not
 /// connected, the visualization data is still stored so the path can be previewed.
+///
+/// On failure the unit's stored trajectory is *removed* rather than left untouched: a
+/// half-written or rejected upload means the points we hold no longer describe what the
+/// Crazyflie would fly, and a stale path would silently be reused by the visualization
+/// and the pre-flight geofence check.
 async fn upload_trajectory_config_to_unit(
     original_index: usize,
     traj_config: TrajectoryConfig,
+    name: &str,
     swarm_state: SwarmState,
     trajectory_data: SharedTrajectoryData,
-) {
+) -> Result<(), String> {
     use crazyflie_lib::subsystems::memory::{MemoryType, Poly, Poly4D, TrajectoryMemory};
 
     let viz_points = sample_trajectory(&traj_config);
+    let uploaded = UploadedTrajectory { name: name.to_string(), config: traj_config.clone() };
     let total_duration: f32 = traj_config.segments.iter().map(|s| s.duration).sum();
     let segment_count = traj_config.segments.len();
+
+    // The firmware rejects any write past the end of its 4 KB trajectory buffer
+    // (crtpCommanderHighLevelWriteTrajectory), and a rejected chunk aborts the transfer
+    // part-way, leaving the unit's memory holding a mix of old and new bytes. Refuse
+    // up front so nothing is written at all.
+    let needed_bytes = segment_count * POLY4D_SEGMENT_BYTES;
+    if needed_bytes > TRAJECTORY_MEMORY_BYTES {
+        let max_segments = TRAJECTORY_MEMORY_BYTES / POLY4D_SEGMENT_BYTES;
+        trajectory_data.lock().await.remove(&original_index);
+        return Err(format!(
+            "The trajectory has {} segments ({} bytes) but the Crazyflie's trajectory \
+             memory holds at most {} segments ({} bytes). Reduce the Z iterations or pick \
+             a simpler shape.",
+            segment_count, needed_bytes, max_segments, TRAJECTORY_MEMORY_BYTES
+        ));
+    }
 
     let segments: Vec<Poly4D> = traj_config
         .segments
@@ -1153,8 +1611,9 @@ async fn upload_trajectory_config_to_unit(
                     duration: total_duration,
                     anchor: None,
                     saved_points: None,
+                    uploaded: Some(uploaded),
                 });
-                return;
+                return Ok(());
             }
         }
     };
@@ -1162,15 +1621,21 @@ async fn upload_trajectory_config_to_unit(
     let traj_mems = cf.memory.get_memories(Some(MemoryType::Trajectory));
     if let Some(mem) = traj_mems.first() {
         if let Some(Ok(traj_mem)) = cf.memory.open_memory::<TrajectoryMemory>((*mem).clone()).await {
-            match traj_mem.write_uncompressed(&segments, 0).await {
+            let written = traj_mem.write_uncompressed(&segments, 0).await;
+            cf.memory.close_memory(traj_mem).await.ok();
+            match written {
                 Ok(bytes) => eprintln!("Uploaded {} bytes of trajectory data", bytes),
                 Err(e) => {
                     eprintln!("Failed to upload trajectory: {:?}", e);
-                    cf.memory.close_memory(traj_mem).await.ok();
-                    return;
+                    trajectory_data.lock().await.remove(&original_index);
+                    return Err(format!(
+                        "Writing the trajectory to unit {} failed: {:?}. The unit's \
+                         trajectory memory may be partly overwritten - upload again before \
+                         flying it.",
+                        original_index, e
+                    ));
                 }
             }
-            cf.memory.close_memory(traj_mem).await.ok();
         }
     }
 
@@ -1180,6 +1645,8 @@ async fn upload_trajectory_config_to_unit(
         .await
     {
         eprintln!("Failed to define trajectory: {:?}", e);
+        trajectory_data.lock().await.remove(&original_index);
+        return Err(format!("Defining the trajectory on unit {} failed: {:?}", original_index, e));
     }
 
     eprintln!("Trajectory uploaded and defined ({} segments, {:.1}s)", segment_count, total_duration);
@@ -1190,7 +1657,9 @@ async fn upload_trajectory_config_to_unit(
         duration: total_duration,
         anchor: None,
         saved_points: None,
+        uploaded: Some(uploaded),
     });
+    Ok(())
 }
 
 /// Upload a *compressed* trajectory to a unit's trajectory memory, define it as
@@ -1205,9 +1674,10 @@ async fn upload_compressed_trajectory_to_unit(
     segments: Vec<crazyflie_lib::subsystems::memory::CompressedSegment>,
     viz_points: Vec<[f32; 3]>,
     total_duration: f32,
+    uploaded: Option<UploadedTrajectory>,
     swarm_state: SwarmState,
     trajectory_data: SharedTrajectoryData,
-) {
+) -> Result<(), String> {
     use crazyflie_lib::subsystems::high_level_commander::TRAJECTORY_TYPE_POLY4D_COMPRESSED;
     use crazyflie_lib::subsystems::memory::{MemoryType, TrajectoryMemory};
 
@@ -1226,8 +1696,9 @@ async fn upload_compressed_trajectory_to_unit(
                     duration: total_duration,
                     anchor: None,
                     saved_points: None,
+                    uploaded,
                 });
-                return;
+                return Ok(());
             }
         }
     };
@@ -1235,15 +1706,21 @@ async fn upload_compressed_trajectory_to_unit(
     let traj_mems = cf.memory.get_memories(Some(MemoryType::Trajectory));
     if let Some(mem) = traj_mems.first() {
         if let Some(Ok(traj_mem)) = cf.memory.open_memory::<TrajectoryMemory>((*mem).clone()).await {
-            match traj_mem.write_compressed(&start, &segments, 0).await {
+            let written = traj_mem.write_compressed(&start, &segments, 0).await;
+            cf.memory.close_memory(traj_mem).await.ok();
+            match written {
                 Ok(bytes) => eprintln!("Uploaded {} bytes of compressed trajectory data", bytes),
                 Err(e) => {
                     eprintln!("Failed to upload compressed trajectory: {:?}", e);
-                    cf.memory.close_memory(traj_mem).await.ok();
-                    return;
+                    trajectory_data.lock().await.remove(&original_index);
+                    return Err(format!(
+                        "Writing the compressed trajectory to unit {} failed: {:?}. The \
+                         unit's trajectory memory may be partly overwritten - upload again \
+                         before flying it.",
+                        original_index, e
+                    ));
                 }
             }
-            cf.memory.close_memory(traj_mem).await.ok();
         }
     }
 
@@ -1255,6 +1732,11 @@ async fn upload_compressed_trajectory_to_unit(
         .await
     {
         eprintln!("Failed to define compressed trajectory: {:?}", e);
+        trajectory_data.lock().await.remove(&original_index);
+        return Err(format!(
+            "Defining the compressed trajectory on unit {} failed: {:?}",
+            original_index, e
+        ));
     }
 
     eprintln!("Compressed trajectory uploaded and defined ({} pieces, {:.1}s)", piece_count, total_duration);
@@ -1265,13 +1747,18 @@ async fn upload_compressed_trajectory_to_unit(
         duration: total_duration,
         anchor: None,
         saved_points: None,
+        uploaded,
     });
+    Ok(())
 }
 
-/// Absolute Z (metres) that units take off to before executing a trajectory. Kept
-/// as a constant so the pre-flight geofence check anchors the trajectory at the same
-/// height the unit will actually fly at.
-const TRAJECTORY_TAKEOFF_HEIGHT: f32 = 0.5;
+/// How far (metres) units rise above the surface they launched from before executing a
+/// trajectory. This is a *relative* rise, not a world-frame height: the world origin is
+/// not necessarily the floor and can sit above the units (making their z negative), so
+/// the absolute target handed to `take_off` is always `current_z + TRAJECTORY_TAKEOFF_RISE`.
+/// Kept as a constant so the pre-flight geofence check anchors the trajectory at exactly
+/// the height the unit will actually fly at.
+const TRAJECTORY_TAKEOFF_RISE: f32 = 0.5;
 
 /// Verify that a trajectory, anchored at `anchor` with the firmware's relative shift
 /// applied (trajectory point 0 maps to `anchor`), stays inside the flight area(s).
@@ -1390,6 +1877,30 @@ async fn main() {
     let ui = AppWindow::new().expect("Failed to create window");
 
     let settings: AppSettings = confy::load("swarmkeeper", None).unwrap_or_default();
+
+    // Restore the shared Units/Visualization state (sidebar fields, table layout,
+    // camera, overlays) before anything builds a table or renders a frame, so the
+    // persisted sort order and camera pose are the ones used from the first draw.
+    settings.view.apply(&ui.global::<ViewSettings>());
+    {
+        // The `changed` handlers in the global fire on every keystroke and on
+        // every mouse move while orbiting, so coalesce them into one write.
+        let ui_weak = ui.as_weak();
+        let save_timer = slint::Timer::default();
+        ui.global::<ViewSettings>().on_save(move || {
+            let ui_weak = ui_weak.clone();
+            save_timer.start(
+                slint::TimerMode::SingleShot,
+                std::time::Duration::from_millis(500),
+                move || {
+                    if let Some(ui) = ui_weak.upgrade() {
+                        save_view_state(&ui);
+                    }
+                },
+            );
+        });
+    }
+
     if let Some(ref path) = settings.last_swarm_config {
         match load_swarm_config(std::path::Path::new(path)) {
             Ok(config) => apply_swarm_config(&ui, &config),
@@ -2427,6 +2938,10 @@ async fn main() {
                 let viz_points = sample_trajectory(&traj_config);
                 let total_duration: f32 = traj_config.segments.iter().map(|s| s.duration).sum();
                 let segment_count = traj_config.segments.len();
+                let uploaded = UploadedTrajectory {
+                    name: path.file_stem().and_then(|n| n.to_str()).unwrap_or("trajectory").to_string(),
+                    config: traj_config.clone(),
+                };
 
                 // Convert to Poly4D segments
                 use crazyflie_lib::subsystems::memory::{Poly4D, Poly};
@@ -2531,6 +3046,7 @@ async fn main() {
                             duration: total_duration,
                             anchor: None,
                             saved_points: None,
+                            uploaded: Some(uploaded.clone()),
                         });
                     }
                 }
@@ -2600,7 +3116,7 @@ async fn main() {
                             for (idx, _) in &connected_units {
                                 let Some(pos) = positions.get(idx) else { continue };
                                 let Some(data) = td.get(idx) else { continue };
-                                let anchor = [pos[0], pos[1], TRAJECTORY_TAKEOFF_HEIGHT];
+                                let anchor = [pos[0], pos[1], pos[2] + TRAJECTORY_TAKEOFF_RISE];
                                 if trajectory_within_flight_areas(&data.points, anchor, &areas).is_err() {
                                     offenders.push(*idx);
                                 }
@@ -2639,8 +3155,10 @@ async fn main() {
                 // Wait for propellers to spin up before taking off
                 tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
 
-                // Snapshot positions before takeoff and show takeoff line
-                {
+                // Snapshot positions before takeoff and show takeoff line. The supervisor's
+                // "is flying" bit comes along so we can tell a ground start from a unit that
+                // is still hovering after a previous run.
+                let launch_positions = {
                     let (tx, rx) = tokio::sync::oneshot::channel();
                     let ui_weak_inner = ui_weak.clone();
                     let unit_indices: Vec<usize> = connected_units.iter().map(|(idx, _)| *idx).collect();
@@ -2650,33 +3168,71 @@ async fn main() {
                             let units = ui.get_units();
                             for idx in &unit_indices {
                                 if let Some(u) = units.row_data(*idx) {
-                                    positions.insert(*idx, [u.pos_x, u.pos_y, u.pos_z]);
+                                    positions.insert(
+                                        *idx,
+                                        ([u.pos_x, u.pos_y, u.pos_z], u.state == UnitState::Flying),
+                                    );
                                 }
                             }
                         }
                         let _ = tx.send(positions);
                     });
-                    if let Ok(positions) = rx.await {
+                    let positions: HashMap<usize, ([f32; 3], bool)> = rx.await.unwrap_or_default();
+                    {
                         let mut td = trajectory_data.lock().await;
-                        for (idx, pos) in &positions {
+                        for (idx, (pos, _)) in &positions {
                             if let Some(data) = td.get_mut(idx) {
                                 // Save real trajectory points and show a takeoff line instead
                                 data.saved_points = Some(std::mem::take(&mut data.points));
-                                data.points = vec![[0.0, 0.0, 0.0], [0.0, 0.0, 0.5]];
+                                data.points = vec![[0.0, 0.0, 0.0], [0.0, 0.0, TRAJECTORY_TAKEOFF_RISE]];
                                 data.anchor = Some(*pos);
                             }
                         }
                     }
-                }
+                    // Record each launch surface for "Land", but only for units actually
+                    // standing on it. A unit still hovering from a previous run would
+                    // otherwise register its mid-air position as the ground, and Land would
+                    // cut its motors at that height. See the single-unit path for detail.
+                    {
+                        let mut state = swarm_state.lock().await;
+                        for (idx, (pos, flying)) in &positions {
+                            if !flying {
+                                if let Some(cu) = state.get_mut(idx) {
+                                    cu.launch_z = Some(pos[2]);
+                                }
+                            }
+                        }
+                    }
+                    positions
+                };
 
-                // Take off all units in parallel
+                // Take off all units in parallel. take_off() wants an absolute world-frame
+                // height, so each unit rises above its own launch surface - the origin is not
+                // necessarily the floor, and rising above the *current* position would stack
+                // another 0.5 m on top every time this is pressed while units still hover.
+                let takeoff_heights: HashMap<usize, f32> = {
+                    let state = swarm_state.lock().await;
+                    connected_units
+                        .iter()
+                        .map(|(idx, _)| {
+                            let base_z = state
+                                .get(idx)
+                                .and_then(|cu| cu.launch_z)
+                                .or(launch_positions.get(idx).map(|(p, _)| p[2]))
+                                .unwrap_or(0.0);
+                            (*idx, base_z + TRAJECTORY_TAKEOFF_RISE)
+                        })
+                        .collect()
+                };
+
                 eprintln!("Taking off...");
                 let mut join_set = tokio::task::JoinSet::new();
                 for (idx, cf) in &connected_units {
                     let cf = cf.clone();
                     let idx = *idx;
+                    let takeoff_z = takeoff_heights.get(&idx).copied().unwrap_or(TRAJECTORY_TAKEOFF_RISE);
                     join_set.spawn(async move {
-                        if let Err(e) = cf.high_level_commander.take_off(0.5, None, 2.0, None).await {
+                        if let Err(e) = cf.high_level_commander.take_off(takeoff_z, None, 2.0, None).await {
                             eprintln!("Unit {}: take-off failed: {:?}", idx, e);
                         }
                     });
@@ -2733,18 +3289,48 @@ async fn main() {
     // Land all connected units
     {
         let swarm_state = swarm_state.clone();
+        let ui_weak = ui.as_weak();
         ui.on_land_swarm(move || {
             let swarm_state = swarm_state.clone();
 
+            // Current Z per unit, needed to scale each descent. Read here on the event
+            // loop rather than inside the task.
+            let positions: HashMap<usize, f32> = match ui_weak.upgrade() {
+                Some(ui) => {
+                    let units = ui.get_units();
+                    (0..units.row_count())
+                        .filter_map(|i| units.row_data(i).map(|u| (i, u.pos_z)))
+                        .collect()
+                }
+                None => HashMap::new(),
+            };
+
             tokio::spawn(async move {
-                let connected_units: Vec<(usize, Arc<crazyflie_lib::Crazyflie>)> = {
+                // Each unit lands back on the surface it launched from. land() takes an
+                // absolute world-frame height, and the origin is not the floor once it has
+                // been moved - descending to a hard-coded 0.0 would cut the motors while
+                // still airborne (or drive the unit into the floor). Mirrors the per-unit
+                // Land button; falls back to 0.0 for units that never took off through
+                // this app.
+                let targets: Vec<(usize, Arc<crazyflie_lib::Crazyflie>, f32)> = {
                     let state = swarm_state.lock().await;
-                    state.iter().map(|(idx, cu)| (*idx, cu.cf.clone())).collect()
+                    state
+                        .iter()
+                        .map(|(idx, cu)| (*idx, cu.cf.clone(), cu.launch_z.unwrap_or(0.0)))
+                        .collect()
                 };
 
-                eprintln!("Landing {} units...", connected_units.len());
-                for (idx, cf) in &connected_units {
-                    if let Err(e) = cf.high_level_commander.land(0.0, None, 2.0, None).await {
+                eprintln!("Landing {} units...", targets.len());
+                for (idx, cf, target_z) in &targets {
+                    let pos_z = positions.get(idx).copied().unwrap_or(*target_z);
+                    // 2 seconds per metre of actual descent, minimum 1 second. The absolute
+                    // distance keeps this right when pos_z or target_z is negative.
+                    let duration: f32 = ((pos_z - target_z).abs() * 2.0).max(1.0);
+                    eprintln!(
+                        "Landing unit {} from {:.2}m to {:.2}m over {:.1}s...",
+                        idx, pos_z, target_z, duration
+                    );
+                    if let Err(e) = cf.high_level_commander.land(*target_z, None, duration, None).await {
                         eprintln!("Unit {}: land failed: {:?}", idx, e);
                     }
                 }
@@ -3192,7 +3778,6 @@ async fn main() {
                 use crazyflie_lib::subsystems::memory::MemoryType;
 
                 let mut lighthouse_positions = Vec::new();
-                let mut loco_positions = Vec::new();
 
                 // Read Lighthouse base station geometries
                 let lh_mems = cf.memory.get_memories(Some(MemoryType::Lighthouse));
@@ -3214,67 +3799,7 @@ async fn main() {
                 }
 
                 // Read Loco anchor positions and the list of currently-received anchors.
-                // We read the Loco2 memory raw rather than via LocoMemory2::read_all(),
-                // because that helper rejects anchor IDs >= 16, while TDoA3 anchor IDs
-                // can be any byte value (0-255). Layout matches the firmware:
-                //   0x0000: id list      (count byte + ids)
-                //   0x1000: active list  (count byte + ids)
-                //   0x2000 + id*0x100: 3x f32 LE position + 1 valid byte
-                let mut loco_active_ids: Vec<u8> = Vec::new();
-                let loco_mems = cf.memory.get_memories(Some(MemoryType::Loco2));
-                if let Some(mem) = loco_mems.first() {
-                    use crazyflie_lib::subsystems::memory::RawMemory;
-                    if let Some(Ok(raw)) = cf.memory.open_memory::<RawMemory>((*mem).clone()).await {
-                        const ADR_ID_LIST: usize = 0x0000;
-                        const ADR_ACTIVE_ID_LIST: usize = 0x1000;
-                        const ADR_ANCHOR_BASE: usize = 0x2000;
-                        const ANCHOR_PAGE_SIZE: usize = 0x0100;
-                        const MAX_ANCHORS: usize = 16;
-
-                        let parse_id_list = |buf: Vec<u8>| -> Vec<u8> {
-                            if buf.is_empty() {
-                                return Vec::new();
-                            }
-                            let count = (buf[0] as usize)
-                                .min(MAX_ANCHORS)
-                                .min(buf.len().saturating_sub(1));
-                            buf[1..1 + count].to_vec()
-                        };
-
-                        let all_ids = match raw.read(ADR_ID_LIST, 1 + MAX_ANCHORS).await {
-                            Ok(buf) => parse_id_list(buf),
-                            Err(e) => {
-                                eprintln!("Failed to read loco id list: {:?}", e);
-                                Vec::new()
-                            }
-                        };
-                        loco_active_ids = match raw.read(ADR_ACTIVE_ID_LIST, 1 + MAX_ANCHORS).await {
-                            Ok(buf) => parse_id_list(buf),
-                            Err(e) => {
-                                eprintln!("Failed to read loco active list: {:?}", e);
-                                Vec::new()
-                            }
-                        };
-
-                        for id in all_ids {
-                            let addr = ADR_ANCHOR_BASE + ANCHOR_PAGE_SIZE * id as usize;
-                            match raw.read(addr, 13).await {
-                                Ok(b) if b.len() >= 13 => {
-                                    let x = f32::from_le_bytes([b[0], b[1], b[2], b[3]]);
-                                    let y = f32::from_le_bytes([b[4], b[5], b[6], b[7]]);
-                                    let z = f32::from_le_bytes([b[8], b[9], b[10], b[11]]);
-                                    let is_valid = b[12] != 0;
-                                    if is_valid {
-                                        loco_positions.push((id, [x, y, z]));
-                                    }
-                                }
-                                Ok(_) => {}
-                                Err(e) => eprintln!("Failed to read loco anchor {}: {:?}", id, e),
-                            }
-                        }
-                        cf.memory.close_memory(raw).await.ok();
-                    }
-                }
+                let (loco_positions, loco_active_ids) = read_loco_anchor_positions(&cf).await;
 
                 // Store positioning data and work out which anchor targets
                 // still need (re)sending. We compute the send list while holding
@@ -3769,6 +4294,7 @@ async fn main() {
 
             let swarm_state = swarm_state.clone();
             let trajectory_data = trajectory_data.clone();
+            let ui_weak = ui_weak.clone();
 
             tokio::spawn(async move {
                 // Open file dialog
@@ -3795,7 +4321,17 @@ async fn main() {
                     }
                 };
 
-                upload_trajectory_config_to_unit(original_index, traj_config, swarm_state, trajectory_data).await;
+                let name = path
+                    .file_stem()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("trajectory")
+                    .to_string();
+
+                if let Err(msg) =
+                    upload_trajectory_config_to_unit(original_index, traj_config, &name, swarm_state, trajectory_data).await
+                {
+                    show_error_dialog(&ui_weak, "Trajectory upload failed".into(), msg);
+                }
             });
         });
     }
@@ -3807,7 +4343,7 @@ async fn main() {
         let trajectory_data = trajectory_data.clone();
         let ui_weak = ui.as_weak();
 
-        ui.on_generate_primitive(move |row_index, shape, size_str| {
+        ui.on_generate_primitive(move |row_index, shape, size_str, size_y_str, z_offset_str, z_iters_str| {
             if row_index < 0 {
                 return;
             }
@@ -3825,18 +4361,40 @@ async fn main() {
                 indices[row]
             };
 
-            let size: f32 = size_str.parse().unwrap_or(0.5);
+            let size: f32 = size_str.trim().parse().unwrap_or(0.5);
+            let size_y: f32 = size_y_str.trim().parse().unwrap_or(size);
+            let z_offset: f32 = z_offset_str.trim().parse().unwrap_or(0.0);
+            let z_iterations: u32 = z_iters_str.trim().parse().unwrap_or(1).max(1);
             let shape = shape.to_string();
             let swarm_state = swarm_state.clone();
             let trajectory_data = trajectory_data.clone();
+            let ui_weak = ui_weak.clone();
 
             tokio::spawn(async move {
-                let Some(traj_config) = generate_primitive(&shape, size) else {
+                let Some(traj_config) = generate_primitive(&shape, size, size_y) else {
                     eprintln!("Unknown primitive shape: {}", shape);
                     return;
                 };
-                eprintln!("Generated {} trajectory (size {:.2}m)", shape, size);
-                upload_trajectory_config_to_unit(original_index, traj_config, swarm_state, trajectory_data).await;
+                let traj_config =
+                    stack_trajectory_z(traj_config, z_offset, z_iterations, PRIMITIVE_SPEED);
+                let size_text = if shape == "rectangle" {
+                    format!("{:.2} x {:.2}m", size, size_y)
+                } else {
+                    format!("{:.2}m", size)
+                };
+                eprintln!(
+                    "Generated {} trajectory (size {}, {} z-layer(s) {:.2}m apart, {} segments)",
+                    shape,
+                    size_text,
+                    z_iterations,
+                    z_offset,
+                    traj_config.segments.len()
+                );
+                if let Err(msg) =
+                    upload_trajectory_config_to_unit(original_index, traj_config, &shape, swarm_state, trajectory_data).await
+                {
+                    show_error_dialog(&ui_weak, "Trajectory upload failed".into(), msg);
+                }
             });
         });
     }
@@ -3848,7 +4406,7 @@ async fn main() {
         let trajectory_data = trajectory_data.clone();
         let ui_weak = ui.as_weak();
 
-        ui.on_generate_wave(move |row_index, x_str, y_str, reps_str, simultaneous, speed_str| {
+        ui.on_generate_wave(move |row_index, x_str, y_str, reps_str, simultaneous, speed_str, z_offset_str, z_iters_str| {
             if row_index < 0 {
                 return;
             }
@@ -3870,30 +4428,136 @@ async fn main() {
             let y_amp: f32 = y_str.trim().parse().unwrap_or(0.3);
             let cycles: u32 = reps_str.trim().parse().unwrap_or(3);
             let speed: f32 = speed_str.trim().parse().unwrap_or(PRIMITIVE_SPEED);
+            let z_offset: f32 = z_offset_str.trim().parse().unwrap_or(0.0);
+            let z_iterations: u32 = z_iters_str.trim().parse().unwrap_or(1).max(1);
             let swarm_state = swarm_state.clone();
             let trajectory_data = trajectory_data.clone();
+            let ui_weak = ui_weak.clone();
 
             tokio::spawn(async move {
-                let (start, segments, viz_points, total_duration) =
-                    build_wave_compressed(x_step, y_amp, cycles, simultaneous, speed);
+                let (start, segments, viz_points, total_duration, poly_config) = build_wave_compressed(
+                    x_step,
+                    y_amp,
+                    cycles,
+                    simultaneous,
+                    speed,
+                    z_offset,
+                    z_iterations,
+                );
                 eprintln!(
-                    "Generated {} trajectory (x step {:.2}m, y amp {:.2}m, {} reps, {:.2} m/s)",
+                    "Generated {} trajectory (x step {:.2}m, y amp {:.2}m, {} reps, {:.2} m/s, \
+                     {} z-layer(s) {:.2}m apart)",
                     if simultaneous { "zig-zag" } else { "square-wave" },
                     x_step,
                     y_amp,
                     cycles,
-                    speed
+                    speed,
+                    z_iterations,
+                    z_offset
                 );
-                upload_compressed_trajectory_to_unit(
+                let uploaded = UploadedTrajectory {
+                    name: if simultaneous { "zigzag".into() } else { "square-wave".into() },
+                    config: poly_config,
+                };
+                if let Err(msg) = upload_compressed_trajectory_to_unit(
                     original_index,
                     start,
                     segments,
                     viz_points,
                     total_duration,
+                    Some(uploaded),
                     swarm_state,
                     trajectory_data,
                 )
-                .await;
+                .await
+                {
+                    show_error_dialog(&ui_weak, "Trajectory upload failed".into(), msg);
+                }
+            });
+        });
+    }
+
+    // Save the trajectory currently loaded for a unit back out to a YAML file. Generated
+    // shapes only ever live in memory (and in the unit's trajectory memory), so this is the
+    // only way to keep one after generating and flying it.
+    {
+        let trajectory_data = trajectory_data.clone();
+        let ui_weak = ui.as_weak();
+
+        ui.on_download_trajectory(move |row_index| {
+            if row_index < 0 {
+                return;
+            }
+
+            let original_index = {
+                let Some(ui) = ui_weak.upgrade() else { return };
+                let units = ui.get_units();
+                let col = ui.get_sort_column();
+                let ascending = ui.get_sort_ascending();
+                let indices = sort_unit_indices(&units, col, ascending);
+                let row = row_index as usize;
+                if row >= indices.len() {
+                    return;
+                }
+                indices[row]
+            };
+
+            let trajectory_data = trajectory_data.clone();
+            let ui_weak = ui_weak.clone();
+
+            tokio::spawn(async move {
+                let uploaded = {
+                    let td = trajectory_data.lock().await;
+                    td.get(&original_index).and_then(|d| d.uploaded.clone())
+                };
+                let Some(uploaded) = uploaded else {
+                    show_error_dialog(
+                        &ui_weak,
+                        "No trajectory to download".into(),
+                        format!(
+                            "Unit {} has no trajectory loaded. Upload one or generate a \
+                             shape first, then download it.",
+                            original_index
+                        ),
+                    );
+                    return;
+                };
+
+                let yaml = match serde_yaml::to_string(&uploaded.config) {
+                    Ok(y) => y,
+                    Err(e) => {
+                        show_error_dialog(
+                            &ui_weak,
+                            "Trajectory download failed".into(),
+                            format!("Serializing the trajectory failed: {}", e),
+                        );
+                        return;
+                    }
+                };
+
+                let Some(handle) = rfd::AsyncFileDialog::new()
+                    .add_filter("YAML", &["yaml", "yml"])
+                    .set_file_name(format!("{}.yaml", uploaded.name))
+                    .set_directory(std::env::current_dir().unwrap_or_default())
+                    .save_file()
+                    .await
+                else { return };
+                let path = handle.path().to_path_buf();
+
+                if let Err(e) = std::fs::write(&path, yaml) {
+                    show_error_dialog(
+                        &ui_weak,
+                        "Trajectory download failed".into(),
+                        format!("Writing {} failed: {}", path.display(), e),
+                    );
+                    return;
+                }
+                eprintln!(
+                    "Saved trajectory for unit {} ({} segments) to {:?}",
+                    original_index,
+                    uploaded.config.segments.len(),
+                    path
+                );
             });
         });
     }
@@ -3963,7 +4627,7 @@ async fn main() {
                         let _ = tx.send(pos);
                     });
                     if let Ok(Some(pos)) = rx.await {
-                        let anchor = [pos[0], pos[1], TRAJECTORY_TAKEOFF_HEIGHT];
+                        let anchor = [pos[0], pos[1], pos[2] + TRAJECTORY_TAKEOFF_RISE];
                         let areas = match viz_scene_state.lock() {
                             Ok(s) => s.flight_areas.clone(),
                             Err(_) => Vec::new(),
@@ -3996,31 +4660,65 @@ async fn main() {
                 // Wait for propellers to spin up before taking off
                 tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
 
-                // Snapshot position before takeoff and show takeoff line
-                {
+                // Snapshot position before takeoff and show takeoff line. The supervisor's
+                // "is flying" bit comes along so we can tell a ground start from a unit that
+                // is still hovering after a previous run.
+                let launch_pos = {
                     let (tx, rx) = tokio::sync::oneshot::channel();
                     let ui_weak_inner = ui_weak.clone();
                     let _ = slint::invoke_from_event_loop(move || {
-                        let pos = if let Some(ui) = ui_weak_inner.upgrade() {
+                        let snapshot = if let Some(ui) = ui_weak_inner.upgrade() {
                             let units = ui.get_units();
-                            units.row_data(original_index).map(|u| [u.pos_x, u.pos_y, u.pos_z])
+                            units.row_data(original_index).map(|u| {
+                                ([u.pos_x, u.pos_y, u.pos_z], u.state == UnitState::Flying)
+                            })
                         } else {
                             None
                         };
-                        let _ = tx.send(pos);
+                        let _ = tx.send(snapshot);
                     });
-                    if let Ok(Some(pos)) = rx.await {
+                    let snapshot = rx.await.ok().flatten();
+                    if let Some((pos, _)) = snapshot {
                         let mut td = trajectory_data.lock().await;
                         if let Some(data) = td.get_mut(&original_index) {
                             data.saved_points = Some(std::mem::take(&mut data.points));
-                            data.points = vec![[0.0, 0.0, 0.0], [0.0, 0.0, 0.5]];
+                            data.points = vec![[0.0, 0.0, 0.0], [0.0, 0.0, TRAJECTORY_TAKEOFF_RISE]];
                             data.anchor = Some(pos);
+                        }
+                    }
+                    snapshot
+                };
+
+                // Record the launch surface for "Land", but only while the unit is actually
+                // standing on it. Flying a trajectory leaves the unit hovering at its final
+                // setpoint, so on a second run this position is mid-air - taking that as the
+                // launch surface would make Land "arrive" at the current height and cut the
+                // motors, dropping the unit. While airborne, keep whatever surface we already
+                // captured.
+                if let Some((pos, flying)) = launch_pos {
+                    if !flying {
+                        let mut state = swarm_state.lock().await;
+                        if let Some(cu) = state.get_mut(&original_index) {
+                            cu.launch_z = Some(pos[2]);
                         }
                     }
                 }
 
-                eprintln!("Taking off...");
-                if let Err(e) = cf.high_level_commander.take_off(0.5, None, 2.0, None).await {
+                // take_off() wants an absolute world-frame height. Rise above the *launch
+                // surface* rather than above wherever the unit currently is, so pressing Fly
+                // Trajectory again while it hovers returns it to the same height instead of
+                // stacking another rise on top of the last one.
+                let takeoff_z = {
+                    let base_z = {
+                        let state = swarm_state.lock().await;
+                        state.get(&original_index).and_then(|cu| cu.launch_z)
+                    }
+                    .or(launch_pos.map(|(p, _)| p[2]))
+                    .unwrap_or(0.0);
+                    base_z + TRAJECTORY_TAKEOFF_RISE
+                };
+                eprintln!("Taking off to {:.2}m...", takeoff_z);
+                if let Err(e) = cf.high_level_commander.take_off(takeoff_z, None, 2.0, None).await {
                     eprintln!("Take-off failed: {:?}", e);
                 }
                 tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
@@ -10971,6 +11669,96 @@ async fn main() {
         }
 
         {
+            let ui_weak = ui.as_weak();
+            let state = sniffer_state.clone();
+            let ss = swarm_state.clone();
+            ui.on_sniffer_read_reference(move |index| {
+                let Some(ui) = ui_weak.upgrade() else { return };
+                if index < 0 {
+                    return;
+                }
+                let unit_index = index as usize;
+                let name: String = ui
+                    .get_sniffer_ref_unit_names()
+                    .row_data(unit_index)
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| format!("unit {unit_index}"));
+                ui.set_sniffer_ref_reading(true);
+                ui.set_sniffer_ref_status(format!("Reading anchors from {name}…").into());
+
+                let ui_weak = ui_weak.clone();
+                let state = state.clone();
+                let ss = ss.clone();
+                tokio::spawn(async move {
+                    let cf = { ss.lock().await.get(&unit_index).map(|u| u.cf.clone()) };
+                    let result = match cf {
+                        Some(cf) => {
+                            let (positions, _active) = read_loco_anchor_positions(&cf).await;
+                            if positions.is_empty() {
+                                Err(format!("{name} has no anchor positions stored"))
+                            } else {
+                                Ok(positions)
+                            }
+                        }
+                        None => Err(format!("{name} is not connected")),
+                    };
+
+                    slint::invoke_from_event_loop(move || {
+                        let Some(ui) = ui_weak.upgrade() else { return };
+                        ui.set_sniffer_ref_reading(false);
+                        match result {
+                            Ok(positions) => {
+                                let count = positions.len();
+                                if let Ok(mut st) = state.lock() {
+                                    st.reference = positions.into_iter().collect();
+                                    st.reference_source = name.clone();
+                                    // A survey already on screen was aligned to
+                                    // the old reference, so its offsets would be
+                                    // measured against a frame that no longer
+                                    // applies. Re-solve rather than show stale
+                                    // numbers.
+                                    if !st.survey.is_empty() {
+                                        st.solve_survey();
+                                    }
+                                }
+                                ui.set_sniffer_ref_count(count as i32);
+                                ui.set_sniffer_ref_status(
+                                    format!("{count} anchors from {name}").into(),
+                                );
+                            }
+                            Err(e) => {
+                                ui.set_sniffer_ref_status(e.into());
+                            }
+                        }
+                        update_sniffer_ui(&ui.as_weak(), &state, None);
+                    })
+                    .ok();
+                });
+            });
+        }
+
+        {
+            let ui_weak = ui.as_weak();
+            let state = sniffer_state.clone();
+            ui.on_sniffer_clear_reference(move || {
+                if let Ok(mut st) = state.lock() {
+                    st.reference.clear();
+                    st.reference_source.clear();
+                    // Fall back to the anchors' own LPP broadcast, which means a
+                    // different alignment frame — re-solve for the same reason.
+                    if !st.survey.is_empty() {
+                        st.solve_survey();
+                    }
+                }
+                if let Some(ui) = ui_weak.upgrade() {
+                    ui.set_sniffer_ref_count(0);
+                    ui.set_sniffer_ref_status("".into());
+                }
+                update_sniffer_ui(&ui_weak, &state, None);
+            });
+        }
+
+        {
             let state = sniffer_state.clone();
             ui.on_sniffer_save_survey(move || {
                 let survey = match state.lock() {
@@ -11031,10 +11819,23 @@ async fn main() {
     }
 
     ui.run().expect("Failed to run UI");
+
+    // Flush any view-state edit that the debounce timer above didn't get to
+    // before the window closed.
+    save_view_state(&ui);
 }
 
 /// Build the Slint models from the current sniffer state and push them to the
 /// UI thread. Safe to call from the serial reader thread.
+/// Format one axis of a survey-vs-reference offset as signed millimetres, or an
+/// em dash when the anchor had no reference position to compare against.
+fn axis_delta_mm(delta: Option<[f32; 3]>, axis: usize) -> slint::SharedString {
+    match delta {
+        Some(d) => format!("{:+.0}", d[axis] * 1000.0).into(),
+        None => "—".into(),
+    }
+}
+
 fn update_sniffer_ui(
     ui_weak: &slint::Weak<AppWindow>,
     state: &Arc<std::sync::Mutex<sniffer::SnifferState>>,
@@ -11126,7 +11927,18 @@ fn update_sniffer_ui(
             y: s.pos[1],
             z: s.pos[2],
             residual: s.residual,
-            has_known: st.lpp_positions.contains_key(&s.id),
+            links: format!("{}/{}", s.links_used, s.links_total).into(),
+            thin: s.links_used * 2 < s.links_total,
+            has_ref: s.reference.is_some(),
+            // Signed per-axis offsets in millimetres, so a systematic tilt or a
+            // single mis-typed coordinate is obvious at a glance.
+            dx: axis_delta_mm(s.delta(), 0),
+            dy: axis_delta_mm(s.delta(), 1),
+            dz: axis_delta_mm(s.delta(), 2),
+            delta_text: s
+                .delta_norm()
+                .map_or_else(|| "—".into(), |d| format!("{:.0}", d * 1000.0).into()),
+            delta: s.delta_norm().unwrap_or(0.0),
         })
         .collect();
 
@@ -11933,3 +12745,135 @@ async fn start_telemetry(
         u.firmware_version = "".into();
     });
 }
+
+#[cfg(test)]
+mod settings_tests {
+    use super::*;
+
+    /// The view state is a TOML table, so it has to come after every plain value
+    /// in AppSettings - and settings files written before it existed must still
+    /// load, falling back to the defaults.
+    #[test]
+    fn view_state_round_trips_and_tolerates_older_files() {
+        let path = std::env::temp_dir().join("swarmkeeper-view-state-test.toml");
+        let mut settings = AppSettings::default();
+        settings.last_swarm_config = Some("swarm.yaml".into());
+        settings.view.takeoff_height = "1.25".into();
+        settings.view.sort_column = 3;
+        settings.view.cam_pitch = 0.42;
+        confy::store_path(&path, &settings).expect("store");
+
+        let loaded: AppSettings = confy::load_path(&path).expect("load");
+        assert_eq!(loaded.view.takeoff_height, "1.25");
+        assert_eq!(loaded.view.sort_column, 3);
+        assert_eq!(loaded.view.cam_pitch, 0.42);
+
+        std::fs::write(&path, "last_swarm_config = \"swarm.yaml\"\n").expect("write");
+        let legacy: AppSettings = confy::load_path(&path).expect("load legacy");
+        assert_eq!(legacy.view.takeoff_height, ViewState::default().takeoff_height);
+        assert_eq!(legacy.view.sort_column, -1);
+
+        std::fs::remove_file(&path).ok();
+    }
+}
+
+#[cfg(test)]
+mod trajectory_tests {
+    use super::*;
+
+    /// Reversing a segment in time must trace the same curve backwards.
+    #[test]
+    fn reverse_poly_mirrors_the_curve() {
+        let seg = min_jerk_segment([0.3, -1.0, 0.5], [2.1, 0.4, 0.5], 1.7);
+        let rev = reverse_poly(&seg.x, seg.duration);
+        for i in 0..=20 {
+            let t = seg.duration * i as f32 / 20.0;
+            let expected = eval_poly(&seg.x, seg.duration - t);
+            assert!((eval_poly(&rev, t) - expected).abs() < 1e-3, "t={t}");
+        }
+    }
+
+    /// Each stacked layer must begin exactly above where the previous one ended, with the
+    /// climb segment as the only thing in between.
+    #[test]
+    fn stacked_layers_are_continuous() {
+        let base = generate_square(0.5, PRIMITIVE_SPEED);
+        let base_len = base.segments.len();
+        let stacked = stack_trajectory_z(base, 0.25, 3, PRIMITIVE_SPEED);
+
+        // 3 layers plus 2 connecting climbs.
+        assert_eq!(stacked.segments.len(), 3 * base_len + 2);
+
+        for pair in stacked.segments.windows(2) {
+            let end = segment_point(&pair[0], pair[0].duration);
+            let start = segment_point(&pair[1], 0.0);
+            for axis in 0..3 {
+                assert!((end[axis] - start[axis]).abs() < 1e-3, "gap on axis {axis}");
+            }
+        }
+
+        let first = segment_point(&stacked.segments[0], 0.0);
+        let last = stacked.segments.last().unwrap();
+        let end = segment_point(last, last.duration);
+        // Odd iteration count: the top layer runs forwards again, so it ends above the start.
+        assert!((end[0] - first[0]).abs() < 1e-3);
+        assert!((end[1] - first[1]).abs() < 1e-3);
+        assert!((end[2] - (first[2] + 0.5)).abs() < 1e-3);
+    }
+
+    /// Stacking multiplies the segment count, and uncompressed segments are 132 bytes in a
+    /// 4 KB buffer - so the fit has to be checked before anything is written to the unit.
+    #[test]
+    fn stacking_can_overflow_the_trajectory_memory() {
+        let max_segments = TRAJECTORY_MEMORY_BYTES / POLY4D_SEGMENT_BYTES;
+        assert_eq!(max_segments, 31);
+
+        // A cube is 16 segments; two layers plus the climb is 33 - over the limit.
+        let cube = stack_trajectory_z(generate_cube(0.5, PRIMITIVE_SPEED), 0.5, 2, PRIMITIVE_SPEED);
+        assert!(cube.segments.len() > max_segments);
+
+        // A 4-segment square still fits at 6 layers (4*6 + 5 climbs = 29).
+        let square =
+            stack_trajectory_z(generate_square(0.5, PRIMITIVE_SPEED), 0.3, 6, PRIMITIVE_SPEED);
+        assert!(square.segments.len() <= max_segments);
+    }
+
+    /// A zero offset or a single iteration must leave the path untouched.
+    #[test]
+    fn stacking_is_a_no_op_when_disabled() {
+        let n = generate_circle(0.5, PRIMITIVE_SPEED).segments.len();
+        assert_eq!(
+            stack_trajectory_z(generate_circle(0.5, PRIMITIVE_SPEED), 0.3, 1, PRIMITIVE_SPEED)
+                .segments
+                .len(),
+            n
+        );
+        assert_eq!(
+            stack_trajectory_z(generate_circle(0.5, PRIMITIVE_SPEED), 0.0, 4, PRIMITIVE_SPEED)
+                .segments
+                .len(),
+            n
+        );
+    }
+
+    /// The compressed (waypoint) stacker mirrors the polynomial one: reversed layers,
+    /// joined by a pure vertical step.
+    #[test]
+    fn stacked_waypoints_join_vertically() {
+        let base = wave_waypoints(0.3, 0.3, 2, true);
+        let n = base.len();
+        let stacked = stack_waypoints_z(base.clone(), 0.25, 3);
+
+        assert_eq!(stacked.len(), 3 * n);
+        // Layer boundary: same XY, one offset up.
+        assert_eq!(stacked[n - 1][0], stacked[n][0]);
+        assert_eq!(stacked[n - 1][1], stacked[n][1]);
+        assert!((stacked[n][2] - (stacked[n - 1][2] + 0.25)).abs() < 1e-6);
+        // Second layer is the first reversed.
+        for i in 0..n {
+            assert_eq!(stacked[n + i][0], base[n - 1 - i][0]);
+            assert_eq!(stacked[n + i][1], base[n - 1 - i][1]);
+        }
+    }
+}
+

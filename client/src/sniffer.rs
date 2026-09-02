@@ -402,36 +402,59 @@ fn ema(prev: Option<f32>, new: f32) -> f32 {
     }
 }
 
-/// Exponentially-smoothed directed distance measurement between two anchors.
-#[derive(Clone)]
-struct DistEma {
-    meters: f32,
-    samples: u64,
+/// Readings retained per directed anchor pair. The survey takes the median over
+/// this window; captures show only a few centimetres of spread within a pair, so
+/// 256 is ample and still bounds memory at a few hundred kB for a full arena.
+const PAIR_WINDOW: usize = 256;
+
+/// How far below the antenna offset a reading may sit before it is discarded.
+/// The DW1000 cannot measure a flight time shorter than the delay the firmware
+/// bakes in, so anything meaningfully below it is a corrupt reading rather than
+/// a short link.
+const MAX_UNDERSHOOT_M: f64 = 0.5;
+
+/// Pooled readings a pair needs (both directions together) before the survey
+/// will trust it. Thinly-sampled pairs carry by far the largest residual errors
+/// in real captures, and dropping them costs nothing once a link is established.
+pub const MIN_PAIR_SAMPLES: u64 = 20;
+
+/// Links an anchor needs before it can be positioned in 3D. Four is the
+/// algebraic minimum; six leaves enough redundancy that one bad link cannot drag
+/// the anchor off. Sparser anchors are reported as unsolved rather than placed
+/// somewhere arbitrary — and, critically, are kept out of the gauge fit, where a
+/// single badly-placed anchor would otherwise rotate the whole frame.
+pub const MIN_ANCHOR_LINKS: usize = 6;
+
+/// Recent tick readings for one directed anchor pair.
+#[derive(Clone, Default)]
+struct PairSamples {
+    /// Ring of the most recent raw readings, oldest first.
+    ticks: VecDeque<u16>,
+    /// Every reading ever accepted, including those aged out of `ticks`.
+    total: u64,
 }
 
 /// Accumulates inter-anchor distances reported in TDoA3 packets.
 #[derive(Default)]
 pub struct DistanceMatrix {
     /// Directed measurements keyed by (from, to).
-    directed: HashMap<(u8, u8), DistEma>,
+    directed: HashMap<(u8, u8), PairSamples>,
 }
 
 impl DistanceMatrix {
     fn record(&mut self, from: u8, to: u8, ticks: u16) {
-        // Remove the antenna-delay offset the firmware leaves in; clamp so
-        // measurement noise near zero can't produce a negative distance.
-        let meters = (ticks as f64 * METERS_PER_TICK - ANTENNA_OFFSET_M).max(0.0) as f32;
-        let e = self
-            .directed
-            .entry((from, to))
-            .or_insert(DistEma { meters, samples: 0 });
-        // EMA once seeded.
-        if e.samples == 0 {
-            e.meters = meters;
-        } else {
-            e.meters = e.meters * 0.8 + meters * 0.2;
+        // Reject the physically impossible instead of clamping it: the old
+        // clamp-to-zero turned a corrupt short reading into a fake 0 m link and
+        // fed it straight to the survey.
+        if ticks as f64 * METERS_PER_TICK < ANTENNA_OFFSET_M - MAX_UNDERSHOOT_M {
+            return;
         }
-        e.samples += 1;
+        let e = self.directed.entry((from, to)).or_default();
+        if e.ticks.len() >= PAIR_WINDOW {
+            e.ticks.pop_front();
+        }
+        e.ticks.push_back(ticks);
+        e.total += 1;
     }
 
     /// Sorted list of anchor ids that participate in any measurement.
@@ -446,16 +469,40 @@ impl DistanceMatrix {
         set
     }
 
-    /// Symmetric distance (metres) between `a` and `b`, averaging both directions.
+    /// Symmetric distance (metres) between `a` and `b`: the median of the
+    /// readings pooled from both directions.
+    ///
+    /// A median rather than the mean of two exponential averages. Inter-anchor
+    /// readings are tight — a few centimetres of spread — but do contain
+    /// occasional gross outliers, and unlike an EMA a median does not depend on
+    /// arrival order, so replaying a recording solves identically every time.
     pub fn distance(&self, a: u8, b: u8) -> Option<f32> {
-        let f = self.directed.get(&(a, b));
-        let r = self.directed.get(&(b, a));
-        match (f, r) {
-            (Some(f), Some(r)) => Some((f.meters + r.meters) / 2.0),
-            (Some(f), None) => Some(f.meters),
-            (None, Some(r)) => Some(r.meters),
-            (None, None) => None,
+        let mut pooled: Vec<u16> = Vec::new();
+        for key in [(a, b), (b, a)] {
+            if let Some(s) = self.directed.get(&key) {
+                pooled.extend(s.ticks.iter().copied());
+            }
         }
+        if pooled.is_empty() {
+            return None;
+        }
+        pooled.sort_unstable();
+        let median = pooled[pooled.len() / 2] as f64;
+        Some((median * METERS_PER_TICK - ANTENNA_OFFSET_M).max(0.0) as f32)
+    }
+
+    /// Readings behind [`Self::distance`] for this pair, both directions summed.
+    pub fn sample_count(&self, a: u8, b: u8) -> u64 {
+        [(a, b), (b, a)]
+            .iter()
+            .filter_map(|k| self.directed.get(k))
+            .map(|s| s.total)
+            .sum()
+    }
+
+    /// Whether this pair is sampled well enough to enter the survey.
+    fn is_usable(&self, a: u8, b: u8) -> bool {
+        self.sample_count(a, b) >= MIN_PAIR_SAMPLES && self.distance(a, b).is_some()
     }
 }
 
@@ -464,8 +511,62 @@ impl DistanceMatrix {
 pub struct SurveyAnchor {
     pub id: u8,
     pub pos: [f32; 3],
-    /// RMS error (metres) between solved and measured distances for this anchor.
+    /// RMS error (metres) between solved and measured distances for this anchor,
+    /// over the links that survived NLOS rejection.
     pub residual: f32,
+    /// Links to this anchor the robust fit kept.
+    pub links_used: usize,
+    /// Links to this anchor that entered the fit, before rejection.
+    pub links_total: usize,
+    /// Reference position this anchor is compared against, when one was
+    /// available: the configured position read back from a Crazyflie, or failing
+    /// that the anchor's own LPP broadcast.
+    pub reference: Option<[f32; 3]>,
+}
+
+impl SurveyAnchor {
+    /// Offset from the reference position to the solved one [m], per axis.
+    ///
+    /// Meaningful only because the survey is gauge-fixed onto the very same
+    /// reference set: the fit recovers a shape, and it is the alignment that
+    /// puts it in the reference's frame. Comparing against a *different* set of
+    /// positions than the one the solve aligned to would measure the frame
+    /// mismatch, not the anchor placement.
+    pub fn delta(&self) -> Option<[f32; 3]> {
+        let r = self.reference?;
+        Some([
+            self.pos[0] - r[0],
+            self.pos[1] - r[1],
+            self.pos[2] - r[2],
+        ])
+    }
+
+    /// Straight-line distance between the solved and reference positions [m].
+    pub fn delta_norm(&self) -> Option<f32> {
+        let d = self.delta()?;
+        Some((d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt())
+    }
+}
+
+/// Everything one auto-survey run produced, including what it threw away.
+#[derive(Clone, Debug, Default)]
+pub struct SurveySolution {
+    /// Solved anchors, in ascending id order.
+    pub anchors: Vec<SurveyAnchor>,
+    /// Anchors left unsolved for want of links, with the link count they had.
+    pub excluded: Vec<(u8, usize)>,
+    /// Pairs that entered the robust fit.
+    pub pairs_total: usize,
+    /// Pairs the robust fit rejected as non-line-of-sight.
+    pub pairs_rejected: usize,
+    /// RMS residual [m] over the pairs the fit kept.
+    pub rms: f32,
+    /// Anchors that had a reference position to compare against.
+    pub ref_count: usize,
+    /// Mean distance [m] between solved and reference positions.
+    pub ref_mean: f32,
+    /// Worst distance [m] between solved and reference positions.
+    pub ref_max: f32,
 }
 
 /// A sniffed packet tagged with the host capture time (seconds since the reader
@@ -532,6 +633,12 @@ pub struct SnifferState {
     pub feed: VecDeque<SniffedPacket>,
     /// Anchor self-reported positions seen in LPP packets.
     pub lpp_positions: HashMap<u8, [f32; 3]>,
+    /// Configured anchor positions read back from a Crazyflie's Loco memory.
+    /// When set these are the survey's reference frame, in preference to the
+    /// anchors' own LPP broadcast.
+    pub reference: HashMap<u8, [f32; 3]>,
+    /// Name of the unit `reference` was read from; empty when unset.
+    pub reference_source: String,
     pub survey: Vec<SurveyAnchor>,
     pub survey_status: String,
     /// Latest monotonic time (seconds) observed by the reader, for "ago" display.
@@ -548,6 +655,28 @@ pub struct SnifferState {
     pub rec_count: u64,
     /// Path of the active recording file (empty when not recording).
     pub rec_path: String,
+}
+
+/// Replay a recorded capture (JSONL, as written by [`SnifferRecorder`]) into a
+/// fresh [`SnifferState`], ingesting every packet exactly as the live reader
+/// would have. Lets a capture be re-solved offline, so a real arena can serve as
+/// a survey regression fixture. Malformed lines are skipped rather than fatal —
+/// a capture truncated by a crash is still worth replaying.
+#[allow(dead_code)] // used by the survey regression tests, not by the running app
+pub fn replay_recording(path: &Path) -> std::io::Result<SnifferState> {
+    use std::io::BufRead;
+    let file = std::fs::File::open(path)?;
+    let mut state = SnifferState::default();
+    for line in std::io::BufReader::new(file).lines() {
+        let line = line?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        if let Ok(rec) = serde_json::from_str::<RecordedPacket>(&line) {
+            state.ingest(rec.packet, rec.t);
+        }
+    }
+    Ok(state)
 }
 
 /// Enumerate available serial ports (device paths).
@@ -608,11 +737,44 @@ impl SnifferState {
     /// string and stores the result in `self.survey`.
     pub fn solve_survey(&mut self) {
         let ids = self.matrix.ids();
-        match solve_geometry(&ids, &self.matrix, &self.lpp_positions) {
-            Ok(result) => {
-                let n = result.len();
-                self.survey = result;
-                self.survey_status = format!("Solved {n} anchors");
+        // Anchor the solution to whichever reference the operator supplied: an
+        // explicit read-back from a Crazyflie is their declared ground truth, so
+        // it wins over the anchors' own LPP broadcast. With neither, the fit
+        // falls back to a canonical frame and there is nothing to compare to.
+        let refs = if self.reference.is_empty() {
+            self.lpp_positions.clone()
+        } else {
+            self.reference.clone()
+        };
+        let solved = solve_geometry(&ids, &self.matrix, &refs);
+        match solved {
+            Ok(sol) => {
+                let mut status = format!(
+                    "Solved {} anchors · {}/{} pairs rejected as NLOS · rms {:.0} mm",
+                    sol.anchors.len(),
+                    sol.pairs_rejected,
+                    sol.pairs_total,
+                    sol.rms * 1000.0
+                );
+                if sol.ref_count > 0 {
+                    status.push_str(&format!(
+                        " · vs {}: mean Δ {:.0} mm, max {:.0} mm over {} anchors",
+                        self.reference_label(),
+                        sol.ref_mean * 1000.0,
+                        sol.ref_max * 1000.0,
+                        sol.ref_count
+                    ));
+                }
+                if !sol.excluded.is_empty() {
+                    let list: Vec<String> = sol
+                        .excluded
+                        .iter()
+                        .map(|(id, links)| format!("A{id} ({links} links)"))
+                        .collect();
+                    status.push_str(&format!(" · too few links: {}", list.join(", ")));
+                }
+                self.survey = sol.anchors;
+                self.survey_status = status;
             }
             Err(e) => {
                 self.survey.clear();
@@ -620,64 +782,156 @@ impl SnifferState {
             }
         }
     }
+
+    /// Human-readable name for whatever the survey is being compared against.
+    pub fn reference_label(&self) -> String {
+        if self.reference.is_empty() {
+            "anchor LPP broadcast".to_string()
+        } else if self.reference_source.is_empty() {
+            "configured positions".to_string()
+        } else {
+            self.reference_source.clone()
+        }
+    }
 }
+
+/// Weight below which a link counts as rejected.
+const REJECTED_WEIGHT: f64 = 0.05;
+
+/// Robust-fit cutoffs, in units of the residual scale, applied in order. The
+/// schedule is deliberately graduated: starting tight would let a contaminated
+/// first fit decide which links are outliers and lock the solution into the
+/// wrong basin, so the first passes only shave the wildest links and each
+/// subsequent pass re-fits before tightening.
+const IRLS_CUTOFFS: [f64; 10] = [6.0, 4.0, 3.0, 2.5, 2.0, 1.8, 1.6, 1.5, 1.5, 1.5];
+
+/// Floor on the estimated residual scale [m], so a near-perfect fit can't drive
+/// the cutoff to zero and start rejecting healthy links.
+const SCALE_FLOOR_M: f64 = 0.10;
 
 /// Solve 3D anchor positions from an inter-anchor distance matrix.
 ///
-/// Uses classical MDS for an initial embedding, refines it with weighted
-/// SMACOF stress majorisation (so missing pairs simply carry zero weight), then
-/// fixes the gauge: if at least three anchors have a self-reported LPP position
-/// the solution is aligned to those by Kabsch; otherwise a canonical frame is
-/// imposed (first id at origin, second on +x, third in the +y half-plane).
+/// Uses classical MDS for an initial embedding, then refines it with weighted
+/// SMACOF stress majorisation (so missing pairs simply carry zero weight) under
+/// iteratively reweighted least squares, and finally fixes the gauge: if at
+/// least three anchors have a self-reported LPP position the solution is aligned
+/// to those by Kabsch; otherwise a canonical frame is imposed.
+///
+/// The reweighting is what makes the result usable in a real arena. Inter-anchor
+/// readings are individually precise — a few centimetres of spread over minutes —
+/// but a handful of *pairs* carry a large static bias, because a blocked direct
+/// path means the first path the radio detects is a reflection. Those errors
+/// don't average out no matter how long you sniff, and plain least squares
+/// smears them across every anchor in the fit. They are also one-sided: a
+/// reflection can only ever look *longer* than the truth, never shorter, so an
+/// over-long residual is treated as more suspicious than an equally large
+/// short one.
 pub fn solve_geometry(
     ids: &[u8],
     matrix: &DistanceMatrix,
     known: &HashMap<u8, [f32; 3]>,
-) -> Result<Vec<SurveyAnchor>, String> {
-    let n = ids.len();
-    if n < 4 {
-        return Err(format!("Need ≥4 anchors with distances (have {n})"));
-    }
-
-    // Build symmetric distance + weight matrices.
-    let mut d = DMatrix::<f64>::zeros(n, n);
-    let mut w = DMatrix::<f64>::zeros(n, n);
-    let mut known_pairs = 0usize;
-    for i in 0..n {
-        for j in (i + 1)..n {
-            if let Some(m) = matrix.distance(ids[i], ids[j]) {
-                d[(i, j)] = m as f64;
-                d[(j, i)] = m as f64;
-                w[(i, j)] = 1.0;
-                w[(j, i)] = 1.0;
-                known_pairs += 1;
-            }
+) -> Result<SurveySolution, String> {
+    // Keep only anchors with enough well-sampled neighbours. Dropping one anchor
+    // lowers its neighbours' counts, so repeat to a fixed point, always removing
+    // the sparsest first. The requirement relaxes for small installations, where
+    // there simply aren't six other anchors to see.
+    let mut kept: Vec<u8> = ids.to_vec();
+    let mut excluded: Vec<(u8, usize)> = Vec::new();
+    loop {
+        if kept.len() <= 4 {
+            break;
         }
+        let required = MIN_ANCHOR_LINKS.min(kept.len() - 1).max(4);
+        let degrees: Vec<usize> = kept
+            .iter()
+            .map(|&id| {
+                kept.iter()
+                    .filter(|&&o| o != id && matrix.is_usable(id, o))
+                    .count()
+            })
+            .collect();
+        let Some((worst, &deg)) = degrees
+            .iter()
+            .enumerate()
+            .min_by_key(|&(_, d)| *d)
+            .map(|(i, d)| (i, d))
+        else {
+            break;
+        };
+        if deg >= required {
+            break;
+        }
+        excluded.push((kept[worst], deg));
+        kept.remove(worst);
     }
-    if known_pairs < n {
+    excluded.sort_unstable();
+
+    let n = kept.len();
+    if n < 4 {
         return Err(format!(
-            "Too few measured pairs ({known_pairs}); keep sniffing"
+            "Need ≥4 well-connected anchors (have {n} of {})",
+            ids.len()
         ));
     }
 
-    // Fill unknown distances with the median of known ones for the MDS seed.
-    let mut known_vals: Vec<f64> = Vec::new();
+    // Build symmetric distance + weight matrices over the surviving anchors.
+    let mut d = DMatrix::<f64>::zeros(n, n);
+    let mut w0 = DMatrix::<f64>::zeros(n, n);
+    let mut pairs_total = 0usize;
     for i in 0..n {
         for j in (i + 1)..n {
-            if w[(i, j)] > 0.0 {
-                known_vals.push(d[(i, j)]);
+            if !matrix.is_usable(kept[i], kept[j]) {
+                continue;
+            }
+            let Some(m) = matrix.distance(kept[i], kept[j]) else {
+                continue;
+            };
+            d[(i, j)] = m as f64;
+            d[(j, i)] = m as f64;
+            w0[(i, j)] = 1.0;
+            w0[(j, i)] = 1.0;
+            pairs_total += 1;
+        }
+    }
+    if pairs_total < n {
+        return Err(format!(
+            "Too few measured pairs ({pairs_total}); keep sniffing"
+        ));
+    }
+
+    // Seed the MDS with graph shortest paths for the pairs that were never
+    // measured. Walking the measured links to an out-of-earshot anchor lands far
+    // closer to the truth than a constant does, and on a sparse matrix that
+    // difference decides which basin the whole fit falls into.
+    let mut d_filled = DMatrix::<f64>::from_element(n, n, f64::INFINITY);
+    for i in 0..n {
+        d_filled[(i, i)] = 0.0;
+        for j in 0..n {
+            if i != j && w0[(i, j)] > 0.0 {
+                d_filled[(i, j)] = d[(i, j)];
             }
         }
     }
-    known_vals.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    let median = known_vals[known_vals.len() / 2];
-    let mut d_filled = d.clone();
-    for i in 0..n {
-        for j in 0..n {
-            if i != j && w[(i, j)] == 0.0 {
-                d_filled[(i, j)] = median;
+    for k in 0..n {
+        for i in 0..n {
+            for j in 0..n {
+                let via = d_filled[(i, k)] + d_filled[(k, j)];
+                if via < d_filled[(i, j)] {
+                    d_filled[(i, j)] = via;
+                }
             }
         }
+    }
+    if let Some((i, j)) = (0..n)
+        .flat_map(|i| ((i + 1)..n).map(move |j| (i, j)))
+        .find(|&(i, j)| !d_filled[(i, j)].is_finite())
+    {
+        // No chain of measured links joins these two, so their relative
+        // placement is unconstrained — no amount of fitting can recover it.
+        return Err(format!(
+            "Anchors split into disconnected groups (no path A{} → A{})",
+            kept[i], kept[j]
+        ));
     }
 
     // Classical MDS: B = -1/2 J D2 J, take top-3 eigenpairs.
@@ -701,10 +955,180 @@ pub fn solve_geometry(
         }
     }
 
-    // Weighted SMACOF refinement via the Guttman transform
-    // X⁺ = V⁺ · B(X) · X, where V is the weighted Laplacian. Using the
-    // pseudo-inverse (rather than a diagonal approximation) is what makes the
-    // iteration converge to the true geometry and handle missing pairs.
+    // Robust fit: alternate SMACOF with a Tukey biweight reweighting of the
+    // links, tightening the cutoff on each pass.
+    let mut w = w0.clone();
+    x = smacof(&d, &w, x);
+    for &cutoff in &IRLS_CUTOFFS {
+        let mut residuals: Vec<f64> = Vec::with_capacity(pairs_total);
+        let mut r = DMatrix::<f64>::zeros(n, n);
+        for i in 0..n {
+            for j in 0..n {
+                if i == j || w0[(i, j)] == 0.0 {
+                    continue;
+                }
+                // Positive residual: measured longer than modelled, i.e. the
+                // signature of a reflected (non-line-of-sight) path.
+                r[(i, j)] = d[(i, j)] - row_dist(&x, i, j);
+                if j > i {
+                    residuals.push(r[(i, j)]);
+                }
+            }
+        }
+        let scale = mad_scale(&residuals).max(SCALE_FLOOR_M);
+
+        for i in 0..n {
+            for j in 0..n {
+                if i == j || w0[(i, j)] == 0.0 {
+                    continue;
+                }
+                // One-sided: over-long links are cut at `cutoff` scales, short
+                // ones only at 1.5× that, since only reflections inflate a range.
+                let u = if r[(i, j)] > 0.0 {
+                    r[(i, j)] / (cutoff * scale)
+                } else {
+                    -r[(i, j)] / (cutoff * scale * 1.5)
+                };
+                w[(i, j)] = if u < 1.0 {
+                    let t = 1.0 - u * u;
+                    t * t
+                } else {
+                    0.0
+                };
+            }
+        }
+        // Never orphan an anchor: if every one of its links was rejected the
+        // solve has no opinion on where it goes at all, so re-attach them all at
+        // a low weight and let the next pass decide.
+        for i in 0..n {
+            let deg: f64 = (0..n).filter(|&j| j != i).map(|j| w[(i, j)]).sum();
+            if deg <= REJECTED_WEIGHT {
+                for j in 0..n {
+                    if i != j && w0[(i, j)] > 0.0 {
+                        w[(i, j)] = 0.1;
+                        w[(j, i)] = 0.1;
+                    }
+                }
+            }
+        }
+        x = smacof(&d, &w, x);
+    }
+
+    // Gauge fixing against the anchors that reported their own position. Only
+    // the anchors that survived the link gate are candidates, so one sparsely
+    // connected anchor can't drag the whole frame round.
+    let aligned = gauge_fix(&x, &kept, known);
+
+    // Per-anchor residual and link accounting, over the links the fit kept.
+    let mut anchors = Vec::with_capacity(n);
+    let mut all_sq = 0.0f64;
+    let mut all_cnt = 0u32;
+    let mut pairs_rejected = 0usize;
+    for i in 0..n {
+        for j in (i + 1)..n {
+            if w0[(i, j)] > 0.0 && w[(i, j)] <= REJECTED_WEIGHT {
+                pairs_rejected += 1;
+            }
+        }
+    }
+    for i in 0..n {
+        let mut sq = 0.0f64;
+        let mut used = 0usize;
+        let mut total = 0usize;
+        for j in 0..n {
+            if i == j || w0[(i, j)] == 0.0 {
+                continue;
+            }
+            total += 1;
+            if w[(i, j)] <= REJECTED_WEIGHT {
+                continue;
+            }
+            used += 1;
+            let model = row_dist(&aligned, i, j);
+            sq += (model - d[(i, j)]).powi(2);
+            if j > i {
+                all_sq += (model - d[(i, j)]).powi(2);
+                all_cnt += 1;
+            }
+        }
+        let residual = if used > 0 {
+            (sq / used as f64).sqrt() as f32
+        } else {
+            f32::NAN
+        };
+        anchors.push(SurveyAnchor {
+            id: kept[i],
+            pos: [
+                aligned[(i, 0)] as f32,
+                aligned[(i, 1)] as f32,
+                aligned[(i, 2)] as f32,
+            ],
+            residual,
+            links_used: used,
+            links_total: total,
+            reference: known.get(&kept[i]).copied(),
+        });
+    }
+    anchors.sort_by_key(|a| a.id);
+
+    // How far the solved geometry sits from the reference it was aligned to.
+    // Unlike the residual, this can catch a survey that is perfectly
+    // self-consistent but doesn't match the positions actually in use.
+    let deltas: Vec<f32> = anchors.iter().filter_map(|a| a.delta_norm()).collect();
+    let ref_count = deltas.len();
+    let ref_mean = if ref_count > 0 {
+        deltas.iter().sum::<f32>() / ref_count as f32
+    } else {
+        0.0
+    };
+    let ref_max = deltas.iter().copied().fold(0.0f32, f32::max);
+
+    Ok(SurveySolution {
+        anchors,
+        excluded,
+        pairs_total,
+        pairs_rejected,
+        rms: if all_cnt > 0 {
+            (all_sq / all_cnt as f64).sqrt() as f32
+        } else {
+            0.0
+        },
+        ref_count,
+        ref_mean,
+        ref_max,
+    })
+}
+
+/// Median absolute deviation about the median, scaled to a normal-consistent
+/// standard deviation. Robust to the outliers we're trying to find, unlike the
+/// plain standard deviation, which they would dominate.
+fn mad_scale(values: &[f64]) -> f64 {
+    if values.is_empty() {
+        return 0.0;
+    }
+    let mut v = values.to_vec();
+    v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let med = v[v.len() / 2];
+    let mut dev: Vec<f64> = v.iter().map(|x| (x - med).abs()).collect();
+    dev.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    1.4826 * dev[dev.len() / 2]
+}
+
+/// Maximum Guttman transforms per SMACOF run, if it hasn't converged first.
+const MAX_SMACOF_ITERS: usize = 300;
+/// Positional change [m] below which a SMACOF run is considered converged.
+const SMACOF_TOLERANCE: f64 = 1e-9;
+
+/// Weighted SMACOF refinement via the Guttman transform
+/// X⁺ = V⁺ · B(X) · X, where V is the weighted Laplacian. Using the
+/// pseudo-inverse (rather than a diagonal approximation) is what makes the
+/// iteration converge to the true geometry and handle missing pairs.
+///
+/// Iterates to convergence rather than a fixed count — the robust fit calls this
+/// once per reweighting pass, and after the first pass each run starts from an
+/// almost-converged embedding and finishes in a handful of steps.
+fn smacof(d: &DMatrix<f64>, w: &DMatrix<f64>, mut x: DMatrix<f64>) -> DMatrix<f64> {
+    let n = d.nrows();
     let mut v_lap = DMatrix::<f64>::zeros(n, n);
     for i in 0..n {
         for j in 0..n {
@@ -719,7 +1143,7 @@ pub fn solve_geometry(
         .pseudo_inverse(1e-9)
         .unwrap_or_else(|_| DMatrix::<f64>::identity(n, n));
 
-    for _ in 0..300 {
+    for _ in 0..MAX_SMACOF_ITERS {
         let mut bx = DMatrix::<f64>::zeros(n, n);
         for i in 0..n {
             for j in 0..n {
@@ -736,44 +1160,16 @@ pub fn solve_geometry(
             let off: f64 = (0..n).filter(|&j| j != i).map(|j| bx[(i, j)]).sum();
             bx[(i, i)] = -off;
         }
-        x = &v_plus * &bx * &x;
-    }
-
-    // Gauge fixing.
-    let aligned = gauge_fix(&x, ids, known);
-
-    // Per-anchor residual.
-    let mut survey = Vec::with_capacity(n);
-    for i in 0..n {
-        let mut sq = 0.0f64;
-        let mut cnt = 0u32;
-        for j in 0..n {
-            if i != j && w[(i, j)] > 0.0 {
-                let model = ((aligned[(i, 0)] - aligned[(j, 0)]).powi(2)
-                    + (aligned[(i, 1)] - aligned[(j, 1)]).powi(2)
-                    + (aligned[(i, 2)] - aligned[(j, 2)]).powi(2))
-                .sqrt();
-                sq += (model - d[(i, j)]).powi(2);
-                cnt += 1;
-            }
+        let next = &v_plus * &bx * &x;
+        let delta = (&next - &x).iter().fold(0.0f64, |m, v| m.max(v.abs()));
+        x = next;
+        if delta < SMACOF_TOLERANCE {
+            break;
         }
-        let residual = if cnt > 0 {
-            (sq / cnt as f64).sqrt() as f32
-        } else {
-            0.0
-        };
-        survey.push(SurveyAnchor {
-            id: ids[i],
-            pos: [
-                aligned[(i, 0)] as f32,
-                aligned[(i, 1)] as f32,
-                aligned[(i, 2)] as f32,
-            ],
-            residual,
-        });
     }
-    Ok(survey)
+    x
 }
+
 
 fn row_dist(x: &DMatrix<f64>, i: usize, j: usize) -> f64 {
     ((x[(i, 0)] - x[(j, 0)]).powi(2)
@@ -925,28 +1321,253 @@ mod tests {
             (3u8, [0.0, 4.0, 0.0]),
             (4u8, [0.0, 0.0, 3.0]),
         ];
-        let mut matrix = DistanceMatrix::default();
-        for (a, pa) in &pts {
-            for (b, pb) in &pts {
-                if a != b {
-                    let d = ((pa[0] - pb[0]).powi(2)
-                        + (pa[1] - pb[1]).powi(2)
-                        + (pa[2] - pb[2]).powi(2))
-                    .sqrt();
-                    // The firmware reports true distance plus the antenna offset.
-                    let ticks = ((d as f64 + ANTENNA_OFFSET_M) / METERS_PER_TICK) as u16;
-                    matrix.record(*a, *b, ticks);
-                }
-            }
-        }
+        let matrix = matrix_from(&pts, &[]);
         let known: HashMap<u8, [f32; 3]> = pts.iter().cloned().collect();
-        let survey = solve_geometry(&[1, 2, 3, 4], &matrix, &known).unwrap();
-        for s in &survey {
+        let sol = solve_geometry(&[1, 2, 3, 4], &matrix, &known).unwrap();
+        assert_eq!(sol.anchors.len(), 4);
+        assert_eq!(sol.pairs_rejected, 0);
+        for s in &sol.anchors {
             assert!(s.residual < 0.05, "residual too high: {}", s.residual);
             let want = known[&s.id];
             for k in 0..3 {
                 assert!((s.pos[k] - want[k]).abs() < 0.1, "pos mismatch");
             }
         }
+    }
+
+    /// Build a matrix from exact geometry, applying `bias` metres to the named
+    /// pairs — the way a reflected (non-line-of-sight) path lengthens a reading.
+    fn matrix_from(pts: &[(u8, [f32; 3])], bias: &[(u8, u8, f64)]) -> DistanceMatrix {
+        let mut matrix = DistanceMatrix::default();
+        for (a, pa) in pts {
+            for (b, pb) in pts {
+                if a == b {
+                    continue;
+                }
+                let d = ((pa[0] - pb[0]).powi(2) + (pa[1] - pb[1]).powi(2) + (pa[2] - pb[2]).powi(2))
+                    .sqrt() as f64;
+                let extra = bias
+                    .iter()
+                    .find(|(x, y, _)| (x, y) == (a, b) || (x, y) == (b, a))
+                    .map_or(0.0, |&(_, _, m)| m);
+                // The firmware reports true distance plus the antenna offset.
+                let ticks = ((d + extra + ANTENNA_OFFSET_M) / METERS_PER_TICK) as u16;
+                for _ in 0..MIN_PAIR_SAMPLES {
+                    matrix.record(*a, *b, ticks);
+                }
+            }
+        }
+        matrix
+    }
+
+    /// The eight corners of a box — enough redundancy that one bad link can be
+    /// identified and dropped.
+    fn box_anchors() -> Vec<(u8, [f32; 3])> {
+        let mut pts = Vec::new();
+        for (i, (x, y, z)) in [
+            (0.0f32, 0.0f32, 0.0f32),
+            (8.0, 0.0, 0.0),
+            (8.0, 6.0, 0.0),
+            (0.0, 6.0, 0.0),
+            (0.0, 0.0, 3.0),
+            (8.0, 0.0, 3.0),
+            (8.0, 6.0, 3.0),
+            (0.0, 6.0, 3.0),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            pts.push((i as u8 + 1, [x, y, z]));
+        }
+        pts
+    }
+
+    #[test]
+    fn rejects_a_reflected_link() {
+        let pts = box_anchors();
+        let ids: Vec<u8> = pts.iter().map(|(id, _)| *id).collect();
+        let known: HashMap<u8, [f32; 3]> = pts.iter().cloned().collect();
+
+        // Anchors 1 and 7 are diagonally opposite; pretend the direct path is
+        // blocked and the radio locks onto a reflection 3 m longer.
+        let matrix = matrix_from(&pts, &[(1, 7, 3.0)]);
+        let sol = solve_geometry(&ids, &matrix, &known).unwrap();
+
+        assert_eq!(sol.pairs_rejected, 1, "expected exactly the bad link dropped");
+        assert!(sol.rms < 0.05, "rms should be clean once dropped: {}", sol.rms);
+        for a in &sol.anchors {
+            let want = known[&a.id];
+            let err = ((a.pos[0] - want[0]).powi(2)
+                + (a.pos[1] - want[1]).powi(2)
+                + (a.pos[2] - want[2]).powi(2))
+            .sqrt();
+            assert!(err < 0.1, "A{} off by {err:.3} m", a.id);
+        }
+        // The two ends of the rejected link lost one usable neighbour each.
+        for a in sol.anchors.iter().filter(|a| a.id == 1 || a.id == 7) {
+            assert_eq!(a.links_used + 1, a.links_total);
+        }
+    }
+
+    #[test]
+    fn excludes_an_underconnected_anchor() {
+        let mut pts = box_anchors();
+        // A ninth anchor that only ever hears three of the others.
+        pts.push((9u8, [4.0, 3.0, 1.5]));
+        let ids: Vec<u8> = pts.iter().map(|(id, _)| *id).collect();
+        let known: HashMap<u8, [f32; 3]> = pts.iter().cloned().collect();
+
+        let mut matrix = matrix_from(&pts, &[]);
+        // Erase A9's links except to 1, 2 and 3 by rebuilding without them.
+        matrix.directed.retain(|&(a, b), _| {
+            (a != 9 && b != 9) || matches!(a.min(b), 1..=3) && a.max(b) == 9
+        });
+
+        let sol = solve_geometry(&ids, &matrix, &known).unwrap();
+        assert_eq!(sol.excluded, vec![(9u8, 3usize)]);
+        assert!(sol.anchors.iter().all(|a| a.id != 9));
+        assert_eq!(sol.anchors.len(), 8);
+    }
+
+    #[test]
+    fn reports_offset_from_the_reference_geometry() {
+        let pts = box_anchors();
+        let ids: Vec<u8> = pts.iter().map(|(id, _)| *id).collect();
+        let matrix = matrix_from(&pts, &[]);
+
+        // The reference says A6 sits a metre higher than the radios place it —
+        // an anchor that was moved without the configuration being updated.
+        let mut reference: HashMap<u8, [f32; 3]> = pts.iter().cloned().collect();
+        reference.get_mut(&6).unwrap()[2] += 1.0;
+
+        let sol = solve_geometry(&ids, &matrix, &reference).unwrap();
+        assert_eq!(sol.ref_count, 8);
+
+        let a6 = sol.anchors.iter().find(|a| a.id == 6).unwrap();
+        let d6 = a6.delta_norm().unwrap();
+        // Kabsch spreads part of the discrepancy over the whole set, so A6 keeps
+        // most of the metre rather than all of it — but it must stand out.
+        assert!(d6 > 0.6, "A6 offset should dominate, got {d6:.3} m");
+        assert!((sol.ref_max - d6).abs() < 1e-5, "A6 should be the worst");
+        for a in sol.anchors.iter().filter(|a| a.id != 6) {
+            let d = a.delta_norm().unwrap();
+            assert!(d < 0.35, "A{} should stay put, moved {d:.3} m", a.id);
+        }
+        // The fit itself is still perfectly self-consistent: the disagreement is
+        // with the configuration, not within the measurements.
+        assert!(sol.rms < 0.01, "rms {} should stay clean", sol.rms);
+    }
+
+    #[test]
+    fn reference_geometry_wins_over_lpp() {
+        let pts = box_anchors();
+        let mut state = SnifferState::default();
+        state.matrix = matrix_from(&pts, &[]);
+        // The anchors broadcast one frame; the Crazyflie is configured with the
+        // same geometry shifted 10 m along x. The explicit read-back is the
+        // operator's declared truth, so the survey must land in that frame.
+        for (id, p) in &pts {
+            state.lpp_positions.insert(*id, *p);
+            state.reference.insert(*id, [p[0] + 10.0, p[1], p[2]]);
+        }
+        state.reference_source = "cf1".into();
+        state.solve_survey();
+
+        assert_eq!(state.survey.len(), 8);
+        for a in &state.survey {
+            let want = state.reference[&a.id];
+            assert!(
+                (a.pos[0] - want[0]).abs() < 0.1,
+                "A{} solved at x={:.2}, expected the reference frame at {:.2}",
+                a.id,
+                a.pos[0],
+                want[0]
+            );
+            assert_eq!(a.reference, Some(want));
+        }
+        assert!(state.survey_status.contains("cf1"), "{}", state.survey_status);
+    }
+
+    #[test]
+    fn median_ignores_a_gross_outlier() {
+        let mut matrix = DistanceMatrix::default();
+        let good = ((5.0 + ANTENNA_OFFSET_M) / METERS_PER_TICK) as u16;
+        for _ in 0..40 {
+            matrix.record(1, 2, good);
+        }
+        // One reading 10 m long, one physically impossible short one.
+        matrix.record(1, 2, good + (10.0 / METERS_PER_TICK) as u16);
+        matrix.record(1, 2, 1000);
+        let d = matrix.distance(1, 2).unwrap();
+        assert!((d - 5.0).abs() < 0.01, "median dragged to {d}");
+        // The impossible reading was dropped outright, the long one retained.
+        assert_eq!(matrix.sample_count(1, 2), 41);
+    }
+
+    /// Replay every capture under `client/recordings/sniffer/` and check the
+    /// survey against the anchors' self-reported (LPP) positions. Recordings
+    /// aren't committed, so this reports and passes when there are none.
+    #[test]
+    fn replays_recorded_captures() {
+        let dir = Path::new("recordings/sniffer");
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            eprintln!("no {} — skipping replay regression", dir.display());
+            return;
+        };
+        let mut files: Vec<PathBuf> = entries
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.extension().is_some_and(|e| e == "jsonl"))
+            .collect();
+        files.sort();
+        let mut checked = 0;
+        for file in &files {
+            let state = replay_recording(file).expect("read recording");
+            // Only captures where the anchors broadcast their own positions can
+            // be scored; the rest just have to solve without erroring.
+            let sol = match solve_geometry(
+                &state.matrix.ids(),
+                &state.matrix,
+                &state.lpp_positions,
+            ) {
+                Ok(sol) => sol,
+                Err(e) => panic!("{}: solve failed: {e}", file.display()),
+            };
+            let scored: Vec<f32> = sol
+                .anchors
+                .iter()
+                .filter_map(|a| {
+                    let p = state.lpp_positions.get(&a.id)?;
+                    Some(
+                        ((a.pos[0] - p[0]).powi(2)
+                            + (a.pos[1] - p[1]).powi(2)
+                            + (a.pos[2] - p[2]).powi(2))
+                        .sqrt(),
+                    )
+                })
+                .collect();
+            if scored.len() < 4 {
+                eprintln!("{}: no reference positions, skipped", file.display());
+                continue;
+            }
+            let mean = scored.iter().sum::<f32>() / scored.len() as f32;
+            let max = scored.iter().cloned().fold(0.0f32, f32::max);
+            eprintln!(
+                "{}: {} anchors, {}/{} pairs rejected, ref err mean {:.2} m max {:.2} m",
+                file.file_name().unwrap().to_string_lossy(),
+                sol.anchors.len(),
+                sol.pairs_rejected,
+                sol.pairs_total,
+                mean,
+                max
+            );
+            assert!(
+                mean < 0.6,
+                "{}: mean error vs reference regressed to {mean:.2} m",
+                file.display()
+            );
+            checked += 1;
+        }
+        eprintln!("replayed {} capture(s), scored {checked}", files.len());
     }
 }
