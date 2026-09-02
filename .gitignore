@@ -20,3 +20,5 @@ app/**/cf2.map
 # OS
 .DS_Store
 Thumbs.db
+
+recordings/
