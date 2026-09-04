@@ -561,6 +561,8 @@ export component AppWindow inherits Window {
     in-out property <image> viz-texture;
     in-out property <[JournalEntryData]> journal-entries;
     in-out property <[string]> console-lines;
+    in-out property <string> assert-text;
+    in-out property <bool> assert-busy;
     out property <float> viz-width: viz-content.viewport-width;
     out property <float> viz-height: viz-content.viewport-height;
     out property <float> cam-yaw: viz-content.cam-yaw;
@@ -635,6 +637,7 @@ export component AppWindow inherits Window {
     callback open-console(/* row index */ int);
     callback clear-console(/* row index */ int);
     callback clear-all-console();
+    callback read-assert(/* row index */ int);
     callback upload-trajectory(/* row index */ int);
     callback download-trajectory(/* row index */ int);
     callback fly-trajectory(/* row index */ int);
@@ -1091,11 +1094,14 @@ export component AppWindow inherits Window {
                     sort-ascending: root.sort-ascending;
                     journal-entries: root.journal-entries;
                     console-lines: root.console-lines;
+                    assert-text: root.assert-text;
+                    assert-busy: root.assert-busy;
                     sort-requested(col, ascending) => { sort-units(col, ascending); }
                     open-journal-requested(row) => { open-journal(row); }
                     add-journal-entry-requested(row, text) => { add-journal-entry(row, text); }
                     open-console-requested(row) => { open-console(row); }
                     clear-console-requested(row) => { clear-console(row); }
+                    read-assert-requested(row) => { read-assert(row); }
                     upload-trajectory-requested(row) => { upload-trajectory(row); }
                     download-trajectory-requested(row) => { download-trajectory(row); }
                     fly-trajectory-requested(row) => { fly-trajectory(row); }
@@ -1216,6 +1222,8 @@ export component AppWindow inherits Window {
                     // Shared unit sidebar (same component as the Units tab)
                     sorted-units: root.sorted-units;
                     journal-entries: root.journal-entries;
+                    assert-text: root.assert-text;
+                    assert-busy: root.assert-busy;
                     joystick-names: root.joystick-names;
                     stick-lx: root.stick-lx;
                     stick-ly: root.stick-ly;
@@ -1227,6 +1235,7 @@ export component AppWindow inherits Window {
                     add-journal-entry-requested(row, text) => { add-journal-entry(row, text); }
                     open-console-requested(row) => { open-console(row); }
                     clear-console-requested(row) => { clear-console(row); }
+                    read-assert-requested(row) => { read-assert(row); }
                     upload-trajectory-requested(row) => { upload-trajectory(row); }
                     download-trajectory-requested(row) => { download-trajectory(row); }
                     fly-trajectory-requested(row) => { fly-trajectory(row); }

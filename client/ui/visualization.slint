@@ -55,6 +55,8 @@ export component VisualizationContent inherits Rectangle {
     in-out property <int> selected-unit: -1;
     in property <[JournalEntryData]> journal-entries;
     in property <[string]> console-lines;
+    in property <string> assert-text;
+    in property <bool> assert-busy;
     in property <[string]> joystick-names;
     in property <float> stick-lx;
     in property <float> stick-ly;
@@ -71,6 +73,7 @@ export component VisualizationContent inherits Rectangle {
     callback add-journal-entry-requested(/* row index */ int, /* text */ string);
     callback open-console-requested(/* row index */ int);
     callback clear-console-requested(/* row index */ int);
+    callback read-assert-requested(/* row index */ int);
     callback upload-trajectory-requested(/* row index */ int);
     callback download-trajectory-requested(/* row index */ int);
     callback fly-trajectory-requested(/* row index */ int);
@@ -99,6 +102,7 @@ export component VisualizationContent inherits Rectangle {
 
     private property <bool> journal-open: false;
     private property <bool> console-open: false;
+    private property <bool> assert-open: false;
     private property <bool> manual-control-open: false;
     private property <bool> confirm-power-off-open: false;
     private property <bool> confirm-clear-tlv-open: false;
@@ -384,6 +388,7 @@ export component VisualizationContent inherits Rectangle {
             add-journal-entry(text) => { add-journal-entry-requested(selected-unit, text); }
             console-clicked => { open-console-requested(selected-unit); console-open = true; }
             clear-console-clicked => { clear-console-requested(selected-unit); }
+            read-assert-clicked => { read-assert-requested(selected-unit); assert-open = true; }
             upload-trajectory-clicked => { upload-trajectory-requested(selected-unit); }
             download-trajectory-clicked => { download-trajectory-requested(selected-unit); }
             fly-trajectory-clicked => { fly-trajectory-requested(selected-unit); }
@@ -421,6 +426,8 @@ export component VisualizationContent inherits Rectangle {
         sorted-units: root.sorted-units;
         journal-entries: root.journal-entries;
         console-lines: root.console-lines;
+        assert-text: root.assert-text;
+        assert-busy: root.assert-busy;
         joystick-names: root.joystick-names;
         stick-lx: root.stick-lx;
         stick-ly: root.stick-ly;
@@ -432,6 +439,7 @@ export component VisualizationContent inherits Rectangle {
         confirm-clear-tlv-open <=> root.confirm-clear-tlv-open;
         journal-open <=> root.journal-open;
         console-open <=> root.console-open;
+        assert-open <=> root.assert-open;
         manual-control-stopped(row) => { root.manual-control-stopped(row); }
         joystick-selected(row, idx) => { root.joystick-selected(row, idx); }
         arm-requested(row, arm) => { root.arm-requested(row, arm); }
@@ -440,5 +448,6 @@ export component VisualizationContent inherits Rectangle {
         add-journal-entry-requested(row, text) => { root.add-journal-entry-requested(row, text); }
         delete-journal-entry-requested(row, entry) => { root.delete-journal-entry-requested(row, entry); }
         clear-console-requested(row) => { root.clear-console-requested(row); }
+        read-assert-requested(row) => { root.read-assert-requested(row); }
     }
 }

@@ -349,6 +349,7 @@ export component UnitSidebar inherits Rectangle {
     callback add-journal-entry(string);
     callback console-clicked();
     callback clear-console-clicked();
+    callback read-assert-clicked();
     callback upload-trajectory-clicked();
     callback download-trajectory-clicked();
     callback fly-trajectory-clicked();
@@ -1043,6 +1044,11 @@ export component UnitSidebar inherits Rectangle {
                         enabled: unit.console-line-count > 0;
                         clicked => { clear-console-clicked(); }
                     }
+
+                    Button {
+                        text: "Read Assert";
+                        clicked => { read-assert-clicked(); }
+                    }
                 }
 
                 // Power & System
@@ -1092,6 +1098,8 @@ export component UnitActionPopups inherits Rectangle {
     in property <[UnitData]> sorted-units;
     in property <[JournalEntryData]> journal-entries;
     in property <[string]> console-lines;
+    in property <string> assert-text;
+    in property <bool> assert-busy;
     in property <[string]> joystick-names;
     in property <float> stick-lx;
     in property <float> stick-ly;
@@ -1104,6 +1112,7 @@ export component UnitActionPopups inherits Rectangle {
     in-out property <bool> confirm-clear-tlv-open: false;
     in-out property <bool> journal-open: false;
     in-out property <bool> console-open: false;
+    in-out property <bool> assert-open: false;
 
     callback manual-control-stopped(/* row index */ int);
     callback joystick-selected(/* row index */ int, /* joystick index */ int);
@@ -1113,6 +1122,7 @@ export component UnitActionPopups inherits Rectangle {
     callback add-journal-entry-requested(/* row index */ int, /* text */ string);
     callback delete-journal-entry-requested(/* row index */ int, /* entry index */ int);
     callback clear-console-requested(/* row index */ int);
+    callback read-assert-requested(/* row index */ int);
 
     // Manual control popup overlay
     if manual-control-open: Rectangle {
@@ -1610,6 +1620,106 @@ export component UnitActionPopups inherits Rectangle {
             }
         }
     }
+
+    // Assert info popup overlay (result of a firmware assert-snapshot dump)
+    if assert-open: Rectangle {
+        TouchArea {
+            // Dim background; click outside closes
+            clicked => { assert-open = false; }
+        }
+
+        Rectangle {
+            width: min(560px, root.width - 40px);
+            max-height: root.height - 40px;
+            background: Palette.background;
+            border-radius: 8px;
+            border-width: 1px;
+            border-color: Palette.border;
+
+            TouchArea {
+                // Block clicks from closing the popup
+            }
+
+            VerticalLayout {
+                spacing: 0px;
+
+                // Header
+                Rectangle {
+                    height: 44px;
+
+                    HorizontalLayout {
+                        padding-left: 16px;
+                        padding-right: 8px;
+                        spacing: 8px;
+
+                        Text {
+                            text: selected-row >= 0 && selected-row < sorted-units.length
+                                ? "Assert Info — " + sorted-units[selected-row].name
+                                : "Assert Info";
+                            font-size: 15px;
+                            font-weight: 700;
+                            vertical-alignment: center;
+                            horizontal-stretch: 1;
+                        }
+
+                        Button {
+                            text: "Read Again";
+                            height: 28px;
+                            enabled: !assert-busy;
+                            clicked => { read-assert-requested(selected-row); }
+                        }
+
+                        Button {
+                            text: "✕";
+                            height: 28px;
+                            width: 28px;
+                            clicked => { assert-open = false; }
+                        }
+                    }
+                }
+
+                Rectangle {
+                    height: 1px;
+                    background: Palette.border;
+                }
+
+                // Assert snapshot text
+                ScrollView {
+                    min-height: 120px;
+                    VerticalLayout {
+                        alignment: start;
+                        padding: 16px;
+                        spacing: 0px;
+
+                        Text {
+                            text: assert-busy ? "Reading assert info…" : assert-text;
+                            font-size: 12px;
+                            font-family: "monospace";
+                            color: assert-busy ? Palette.foreground.transparentize(0.5) : Palette.foreground;
+                            wrap: word-wrap;
+                        }
+                    }
+                }
+
+                Rectangle {
+                    height: 1px;
+                    background: Palette.border;
+                }
+
+                // Footer
+                Rectangle {
+                    height: 28px;
+                    Text {
+                        text: "Triggers system.assertInfo and reads the console snapshot line";
+                        font-size: 10px;
+                        color: Palette.foreground.transparentize(0.5);
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+        }
+    }
 }
 
 export component UnitsContent inherits Rectangle {
@@ -1620,12 +1730,15 @@ export component UnitsContent inherits Rectangle {
     in property <bool> sort-ascending: true;
     in property <[JournalEntryData]> journal-entries;
     in property <[string]> console-lines;
+    in property <string> assert-text;
+    in property <bool> assert-busy;
 
     callback sort-requested(/* column */ int, /* ascending */ bool);
     callback open-journal-requested(/* row index */ int);
     callback add-journal-entry-requested(/* row index */ int, /* text */ string);
     callback open-console-requested(/* row index */ int);
     callback clear-console-requested(/* row index */ int);
+    callback read-assert-requested(/* row index */ int);
     callback upload-trajectory-requested(/* row index */ int);
     callback download-trajectory-requested(/* row index */ int);
     callback fly-trajectory-requested(/* row index */ int);
@@ -1664,6 +1777,7 @@ export component UnitsContent inherits Rectangle {
     private property <bool> sidebar-open: false;
     private property <bool> journal-open: false;
     private property <bool> console-open: false;
+    private property <bool> assert-open: false;
     private property <bool> manual-control-open: false;
     private property <bool> confirm-power-off-open: false;
     private property <bool> confirm-clear-tlv-open: false;
@@ -1836,6 +1950,10 @@ export component UnitsContent inherits Rectangle {
             clear-console-clicked => {
                 clear-console-requested(selected-row);
             }
+            read-assert-clicked => {
+                read-assert-requested(selected-row);
+                assert-open = true;
+            }
             upload-trajectory-clicked => { upload-trajectory-requested(selected-row); }
             download-trajectory-clicked => { download-trajectory-requested(selected-row); }
             fly-trajectory-clicked => { fly-trajectory-requested(selected-row); }
@@ -1877,6 +1995,8 @@ export component UnitsContent inherits Rectangle {
         sorted-units: root.sorted-units;
         journal-entries: root.journal-entries;
         console-lines: root.console-lines;
+        assert-text: root.assert-text;
+        assert-busy: root.assert-busy;
         joystick-names: root.joystick-names;
         stick-lx: root.stick-lx;
         stick-ly: root.stick-ly;
@@ -1888,6 +2008,7 @@ export component UnitsContent inherits Rectangle {
         confirm-clear-tlv-open <=> root.confirm-clear-tlv-open;
         journal-open <=> root.journal-open;
         console-open <=> root.console-open;
+        assert-open <=> root.assert-open;
         manual-control-stopped(row) => { root.manual-control-stopped(row); }
         joystick-selected(row, idx) => { root.joystick-selected(row, idx); }
         arm-requested(row, arm) => { root.arm-requested(row, arm); }
@@ -1896,5 +2017,6 @@ export component UnitsContent inherits Rectangle {
         add-journal-entry-requested(row, text) => { root.add-journal-entry-requested(row, text); }
         delete-journal-entry-requested(row, entry) => { root.delete-journal-entry-requested(row, entry); }
         clear-console-requested(row) => { root.clear-console-requested(row); }
+        read-assert-requested(row) => { root.read-assert-requested(row); }
     }
 }

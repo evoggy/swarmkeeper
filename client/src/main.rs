@@ -1047,6 +1047,73 @@ async fn clear_tlv_storage(
     result.map_err(|e| format!("EEPROM write failed: {}", e).into())
 }
 
+/// Firmware parameter that makes the Crazyflie dump its stored assert snapshot
+/// as a single `DEBUG_PRINT` line on the console (`printAssertSnapshotData()`
+/// in `cfassert.c`). Mirrors `cfcli debug assert`.
+const ASSERT_INFO_PARAM: &str = "system.assertInfo";
+
+/// Markers the firmware uses for the assert snapshot line, so a stray console
+/// line racing with the dump doesn't get mistaken for the result.
+const ASSERT_LINE_MARKERS: [&str; 4] = [
+    "No assert information found",
+    "Assert failed",
+    "Hardfault.",
+    "unknown type",
+];
+
+/// Strip a leading `WORD:` (or `WORD: `) subsystem prefix that the firmware's
+/// `DEBUG_PRINT` prepends. Returns the original line when there is no prefix.
+fn strip_console_prefix(line: &str) -> &str {
+    match line.split_once(':') {
+        Some((_, rest)) => rest.strip_prefix(' ').unwrap_or(rest),
+        None => line,
+    }
+}
+
+/// Trigger a firmware assert-info dump and return the resulting console line.
+/// `printAssertSnapshotData()` emits exactly one line per invocation, so we
+/// listen for new console lines (history excluded), set the parameter and
+/// return the first line that looks like an assert snapshot. Falls back to the
+/// first line seen if none matches, and to a local message on timeout.
+async fn read_assert_info(
+    cf: &crazyflie_lib::Crazyflie,
+    wait_timeout: std::time::Duration,
+) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    use futures::StreamExt;
+
+    // Subscribe before triggering so the dump cannot be missed. No history, so
+    // there is nothing to drain first.
+    let mut stream = cf.console.line_stream_no_history().await;
+
+    cf.param
+        .set(ASSERT_INFO_PARAM, 1u8)
+        .await
+        .map_err(|e| format!("could not set {}: {}", ASSERT_INFO_PARAM, e))?;
+
+    let deadline = tokio::time::Instant::now() + wait_timeout;
+    let mut first_line: Option<String> = None;
+
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        match tokio::time::timeout(remaining, stream.next()).await {
+            Ok(Some(line)) => {
+                let text = strip_console_prefix(&line).trim_end().to_string();
+                if ASSERT_LINE_MARKERS.iter().any(|m| text.contains(m)) {
+                    return Ok(text);
+                }
+                first_line.get_or_insert(text);
+            }
+            // Stream closed (connection lost) or the timeout elapsed.
+            _ => break,
+        }
+    }
+
+    Ok(first_line.unwrap_or_else(|| "No assert info (no response from firmware)".to_string()))
+}
+
 // Lighthouse geometry YAML file format (compatible with crazyflie-lib-python)
 #[derive(Deserialize)]
 struct LighthouseConfigFile {
@@ -4231,6 +4298,105 @@ async fn main() {
                         ui.set_console_lines(slint::ModelRc::new(slint::VecModel::from(Vec::<slint::SharedString>::new())));
                     }
                 }).ok();
+            });
+        });
+    }
+
+    // Read the firmware assert snapshot of the selected unit and show it in the
+    // sidebar's Assert Info popup (same mechanism as `cfcli debug assert`).
+    {
+        let link_context = link_context.clone();
+        let swarm_state = swarm_state.clone();
+        let toc_cache = toc_cache.clone();
+        let ui_weak = ui.as_weak();
+
+        ui.on_read_assert(move |row_index| {
+            if row_index < 0 {
+                return;
+            }
+
+            let (original_index, uri, name) = {
+                let Some(ui) = ui_weak.upgrade() else { return };
+                let units = ui.get_units();
+                let col = ui.get_sort_column();
+                let ascending = ui.get_sort_ascending();
+                let indices = sort_unit_indices(&units, col, ascending);
+                let row = row_index as usize;
+                if row >= indices.len() {
+                    return;
+                }
+                let idx = indices[row];
+                let Some(unit) = units.row_data(idx) else { return };
+                (idx, unit.uri.to_string(), unit.name.to_string())
+            };
+
+            let link_context = link_context.clone();
+            let swarm_state = swarm_state.clone();
+            let toc_cache = toc_cache.clone();
+            let ui_weak = ui_weak.clone();
+
+            // Report the outcome (text + busy cleared) back to the popup.
+            fn finish(ui_weak: &slint::Weak<AppWindow>, text: String) {
+                let ui_weak = ui_weak.clone();
+                slint::invoke_from_event_loop(move || {
+                    if let Some(ui) = ui_weak.upgrade() {
+                        ui.set_assert_text(text.into());
+                        ui.set_assert_busy(false);
+                    }
+                }).ok();
+            }
+
+            if let Some(ui) = ui_weak.upgrade() {
+                ui.set_assert_text("".into());
+                ui.set_assert_busy(true);
+            }
+
+            tokio::spawn(async move {
+                // Reuse the existing connection if the unit is connected, else
+                // connect temporarily for the duration of the read.
+                let existing_cf = {
+                    let state = swarm_state.lock().await;
+                    state.get(&original_index).map(|cu| cu.cf.clone())
+                };
+
+                let (cf, temp_connection) = if let Some(cf) = existing_cf {
+                    (cf, false)
+                } else {
+                    eprintln!("Read assert {}: connecting to {}...", name, uri);
+                    match tokio::time::timeout(
+                        std::time::Duration::from_secs(30),
+                        crazyflie_lib::Crazyflie::connect_from_uri(link_context.as_ref(), &uri_with_link_timeout(&uri), toc_cache),
+                    ).await {
+                        Ok(Ok(cf)) => (Arc::new(cf), true),
+                        Ok(Err(e)) => {
+                            eprintln!("Read assert {}: connect FAILED: {:?}", name, e);
+                            finish(&ui_weak, format!("Connect failed: {}", e));
+                            return;
+                        }
+                        Err(_) => {
+                            eprintln!("Read assert {}: connect timed out", name);
+                            finish(&ui_weak, "Connection timed out".to_string());
+                            return;
+                        }
+                    }
+                };
+
+                let result = read_assert_info(&cf, std::time::Duration::from_secs(3)).await;
+
+                if temp_connection {
+                    cf.disconnect().await;
+                }
+
+                match result {
+                    Ok(text) => {
+                        eprintln!("Read assert {}: {}", name, text);
+                        finish(&ui_weak, text);
+                    }
+                    Err(e) => {
+                        eprintln!("Read assert {}: FAILED: {}", name, e);
+                        finish(&ui_weak, format!("Failed to read assert info: {}", e));
+                    }
+                }
             });
         });
     }
