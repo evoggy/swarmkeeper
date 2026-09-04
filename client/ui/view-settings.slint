@@ -9,6 +9,13 @@
 export global ViewSettings {
     callback save();
 
+    // --- Shared unit selection (Units tab table + Visualization 3D view) ---
+    // Row index into the sorted-units model, -1 = nothing selected. Both tabs
+    // bind to this so a unit picked in one is already selected in the other.
+    // Deliberately *not* persisted: the row index is only meaningful for the
+    // swarm and sort order currently loaded.
+    in-out property <int> selected-unit: -1;
+
     // --- Unit sidebar: takeoff ---
     in-out property <string> takeoff-height: "0.5";
     in-out property <string> takeoff-yaw: "0";

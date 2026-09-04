@@ -582,9 +582,10 @@ export component AppWindow inherits Window {
     callback viz-save-pads();
     callback viz-load-scene();
 
-    // Visualization unit selection (sorted-units row index; -1 = none).
-    // Set by Rust after hit-testing a left-click in the 3D view.
-    in-out property <int> viz-selected-unit <=> viz-content.selected-unit;
+    // Unit selection shared by the Visualization and Units tabs (sorted-units
+    // row index; -1 = none). Set by Rust after hit-testing a left-click in the
+    // 3D view, and by either tab's own selection UI.
+    in-out property <int> viz-selected-unit <=> ViewSettings.selected-unit;
     callback viz-unit-clicked(/* x */ float, /* y */ float);
 
     // Visualization label data (set by Rust)

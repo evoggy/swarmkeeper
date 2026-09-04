@@ -1773,8 +1773,24 @@ export component UnitsContent inherits Rectangle {
     in property <float> stick-ry;
     in property <bool> manual-control-armed;
 
-    private property <int> selected-row: -1;
-    private property <bool> sidebar-open: false;
+    // Selection lives in the ViewSettings global so the Visualization tab shows
+    // the same unit; the sidebar is open exactly when something is selected.
+    property <int> selected-row <=> ViewSettings.selected-unit;
+    // The selection may have been made in the Visualization tab, so bring the
+    // row into view rather than assuming the user just clicked it here.
+    changed selected-row => {
+        // Guard on the height: while the tab is hidden it can still be 0, and
+        // clamping against that would scroll the table to a nonsense offset.
+        if (selected-row >= 0 && rows-flick.height >= 34px) {
+            rows-flick.viewport-y = clamp(
+                rows-flick.viewport-y,
+                // Scrolled far enough down that the row's top is visible...
+                -selected-row * 34px,
+                // ...but not so far that its bottom falls past the viewport.
+                rows-flick.height - (selected-row + 1) * 34px);
+        }
+    }
+    private property <bool> sidebar-open: selected-row >= 0 && selected-row < sorted-units.length;
     private property <bool> journal-open: false;
     private property <bool> console-open: false;
     private property <bool> assert-open: false;
@@ -1848,7 +1864,7 @@ export component UnitsContent inherits Rectangle {
             }
 
             // Data rows
-            Flickable {
+            rows-flick := Flickable {
                 vertical-stretch: 1;
                 viewport-height: table-rows.length * 34px;
 
@@ -1865,12 +1881,10 @@ export component UnitsContent inherits Rectangle {
 
                     TouchArea {
                         clicked => {
-                            if (selected-row == i && sidebar-open) {
-                                sidebar-open = false;
+                            if (selected-row == i) {
                                 selected-row = -1;
                             } else {
                                 selected-row = i;
-                                sidebar-open = true;
                                 row-selected(i);
                             }
                         }
@@ -1980,7 +1994,6 @@ export component UnitsContent inherits Rectangle {
             syson-clicked => { syson-requested(selected-row); }
             clear-tlv-clicked => { confirm-clear-tlv-open = true; }
             close-clicked => {
-                sidebar-open = false;
                 selected-row = -1;
             }
         }

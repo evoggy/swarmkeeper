@@ -65,8 +65,10 @@ export component VisualizationContent inherits Rectangle {
 
     // Unit selection / sidebar (shared with the Units tab).
     // selected-unit is a row index into sorted-units; -1 = nothing selected.
+    // It lives in the ViewSettings global so selecting a unit here also selects
+    // it in the Units tab table, and vice versa.
     in property <[UnitData]> sorted-units;
-    in-out property <int> selected-unit: -1;
+    in-out property <int> selected-unit <=> ViewSettings.selected-unit;
     in property <[JournalEntryData]> journal-entries;
     in property <[string]> console-lines;
     in property <string> assert-text;
