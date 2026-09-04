@@ -143,6 +143,42 @@ pub struct FlightAreaBox {
     pub max: [f32; 3],
 }
 
+/// Which classes of object the main visualization draws.
+///
+/// The 3D view's context menu flips these so a crowded scene can be thinned
+/// down to whatever the user is actually looking at. Lighthouse base stations
+/// and Loco anchors share the `fixed_points` slice and are filtered out by the
+/// caller instead of by a flag here.
+#[derive(Clone, Copy)]
+pub struct VizVisibility {
+    pub grid: bool,
+    pub axes: bool,
+    pub units: bool,
+    /// Vertical lines from units, anchors and goto targets down to the floor.
+    pub drop_lines: bool,
+    pub trajectories: bool,
+    pub goto_targets: bool,
+    pub areas: bool,
+    pub pads: bool,
+    pub obstacles: bool,
+}
+
+impl Default for VizVisibility {
+    fn default() -> Self {
+        Self {
+            grid: true,
+            axes: true,
+            units: true,
+            drop_lines: true,
+            trajectories: true,
+            goto_targets: true,
+            areas: true,
+            pads: true,
+            obstacles: true,
+        }
+    }
+}
+
 /// Wireframe color for flight areas (geofence): amber.
 pub const FLIGHT_AREA_COLOR: [f32; 3] = [0.95, 0.85, 0.20];
 /// Wireframe color for waypoint areas: green.
@@ -294,9 +330,23 @@ impl Scene3DRenderer {
         obstacle_colors: &[[f32; 3]],
         goto_points: &[UnitPos],
         goto_lines: &[f32],
+        vis: VizVisibility,
     ) -> slint::Image {
         let width = width.max(1);
         let height = height.max(1);
+
+        // A switched-off object class simply has nothing left to draw. The grid,
+        // the axes and the drop lines are generated further down and so are
+        // gated inline instead.
+        let units: &[UnitPos] = if vis.units { units } else { &[] };
+        let trajectory_lines: &[f32] = if vis.trajectories { trajectory_lines } else { &[] };
+        let flight_areas: &[FlightAreaBox] = if vis.areas { flight_areas } else { &[] };
+        let waypoint_areas: &[FlightAreaBox] = if vis.areas { waypoint_areas } else { &[] };
+        let pads: &[PadCircle] = if vis.pads { pads } else { &[] };
+        let obstacle_triangles: &[Vec<f32>] = if vis.obstacles { obstacle_triangles } else { &[] };
+        let obstacle_wireframes: &[Vec<f32>] = if vis.obstacles { obstacle_wireframes } else { &[] };
+        let goto_points: &[UnitPos] = if vis.goto_targets { goto_points } else { &[] };
+        let goto_lines: &[f32] = if vis.goto_targets { goto_lines } else { &[] };
 
         unsafe {
             let gl = &self.gl;
@@ -327,37 +377,41 @@ impl Scene3DRenderer {
             gl.uniform_1_f32(Some(&self.u_point_size), 1.0);
 
             // Draw ground grid
-            let mut grid_verts = Vec::new();
-            let grid_range = 5;
-            for i in -grid_range..=grid_range {
-                let v = i as f32;
-                // Line parallel to Y axis
-                grid_verts.extend_from_slice(&[v, -(grid_range as f32), 0.0, v, grid_range as f32, 0.0]);
-                // Line parallel to X axis
-                grid_verts.extend_from_slice(&[-(grid_range as f32), v, 0.0, grid_range as f32, v, 0.0]);
+            if vis.grid {
+                let mut grid_verts = Vec::new();
+                let grid_range = 5;
+                for i in -grid_range..=grid_range {
+                    let v = i as f32;
+                    // Line parallel to Y axis
+                    grid_verts.extend_from_slice(&[v, -(grid_range as f32), 0.0, v, grid_range as f32, 0.0]);
+                    // Line parallel to X axis
+                    grid_verts.extend_from_slice(&[-(grid_range as f32), v, 0.0, grid_range as f32, v, 0.0]);
+                }
+                upload_and_draw(gl, self.vbo, &grid_verts, glow::LINES);
+                gl.uniform_3_f32(Some(&self.u_color), 0.3, 0.3, 0.35);
+                gl.draw_arrays(glow::LINES, 0, grid_verts.len() as i32 / 3);
             }
-            upload_and_draw(gl, self.vbo, &grid_verts, glow::LINES);
-            gl.uniform_3_f32(Some(&self.u_color), 0.3, 0.3, 0.35);
-            gl.draw_arrays(glow::LINES, 0, grid_verts.len() as i32 / 3);
 
             // Draw axes (2m each)
-            // X axis - red
-            gl.uniform_3_f32(Some(&self.u_color), 0.94, 0.27, 0.27);
-            let x_axis = [0.0, 0.0, 0.0, 2.0, 0.0, 0.0];
-            upload_and_draw(gl, self.vbo, &x_axis, glow::LINES);
-            gl.draw_arrays(glow::LINES, 0, 2);
+            if vis.axes {
+                // X axis - red
+                gl.uniform_3_f32(Some(&self.u_color), 0.94, 0.27, 0.27);
+                let x_axis = [0.0, 0.0, 0.0, 2.0, 0.0, 0.0];
+                upload_and_draw(gl, self.vbo, &x_axis, glow::LINES);
+                gl.draw_arrays(glow::LINES, 0, 2);
 
-            // Y axis - green
-            gl.uniform_3_f32(Some(&self.u_color), 0.29, 0.85, 0.50);
-            let y_axis = [0.0, 0.0, 0.0, 0.0, 2.0, 0.0];
-            upload_and_draw(gl, self.vbo, &y_axis, glow::LINES);
-            gl.draw_arrays(glow::LINES, 0, 2);
+                // Y axis - green
+                gl.uniform_3_f32(Some(&self.u_color), 0.29, 0.85, 0.50);
+                let y_axis = [0.0, 0.0, 0.0, 0.0, 2.0, 0.0];
+                upload_and_draw(gl, self.vbo, &y_axis, glow::LINES);
+                gl.draw_arrays(glow::LINES, 0, 2);
 
-            // Z axis - blue
-            gl.uniform_3_f32(Some(&self.u_color), 0.38, 0.65, 0.98);
-            let z_axis = [0.0, 0.0, 0.0, 0.0, 0.0, 2.0];
-            upload_and_draw(gl, self.vbo, &z_axis, glow::LINES);
-            gl.draw_arrays(glow::LINES, 0, 2);
+                // Z axis - blue
+                gl.uniform_3_f32(Some(&self.u_color), 0.38, 0.65, 0.98);
+                let z_axis = [0.0, 0.0, 0.0, 0.0, 0.0, 2.0];
+                upload_and_draw(gl, self.vbo, &z_axis, glow::LINES);
+                gl.draw_arrays(glow::LINES, 0, 2);
+            }
 
             // Draw units as points
             gl.uniform_1_f32(Some(&self.u_point_size), 10.0);
@@ -378,17 +432,19 @@ impl Scene3DRenderer {
                 gl.draw_arrays(glow::POINTS, 0, 1);
 
                 // Vertical line from unit to ground
-                gl.uniform_3_f32(
-                    Some(&self.u_color),
-                    unit.color[0] * 0.4,
-                    unit.color[1] * 0.4,
-                    unit.color[2] * 0.4,
-                );
-                gl.uniform_1_f32(Some(&self.u_point_size), 1.0);
-                let drop_line = [unit.x, unit.y, unit.z, unit.x, unit.y, 0.0];
-                upload_and_draw(gl, self.vbo, &drop_line, glow::LINES);
-                gl.draw_arrays(glow::LINES, 0, 2);
-                gl.uniform_1_f32(Some(&self.u_point_size), 10.0);
+                if vis.drop_lines {
+                    gl.uniform_3_f32(
+                        Some(&self.u_color),
+                        unit.color[0] * 0.4,
+                        unit.color[1] * 0.4,
+                        unit.color[2] * 0.4,
+                    );
+                    gl.uniform_1_f32(Some(&self.u_point_size), 1.0);
+                    let drop_line = [unit.x, unit.y, unit.z, unit.x, unit.y, 0.0];
+                    upload_and_draw(gl, self.vbo, &drop_line, glow::LINES);
+                    gl.draw_arrays(glow::LINES, 0, 2);
+                    gl.uniform_1_f32(Some(&self.u_point_size), 10.0);
+                }
             }
 
             // Draw fixed points (base stations / anchors)
@@ -400,17 +456,19 @@ impl Scene3DRenderer {
                 gl.draw_arrays(glow::POINTS, 0, 1);
 
                 // Drop line to ground
-                gl.uniform_3_f32(
-                    Some(&self.u_color),
-                    pt.color[0] * 0.4,
-                    pt.color[1] * 0.4,
-                    pt.color[2] * 0.4,
-                );
-                gl.uniform_1_f32(Some(&self.u_point_size), 1.0);
-                let drop_line = [pt.x, pt.y, pt.z, pt.x, pt.y, 0.0];
-                upload_and_draw(gl, self.vbo, &drop_line, glow::LINES);
-                gl.draw_arrays(glow::LINES, 0, 2);
-                gl.uniform_1_f32(Some(&self.u_point_size), 8.0);
+                if vis.drop_lines {
+                    gl.uniform_3_f32(
+                        Some(&self.u_color),
+                        pt.color[0] * 0.4,
+                        pt.color[1] * 0.4,
+                        pt.color[2] * 0.4,
+                    );
+                    gl.uniform_1_f32(Some(&self.u_point_size), 1.0);
+                    let drop_line = [pt.x, pt.y, pt.z, pt.x, pt.y, 0.0];
+                    upload_and_draw(gl, self.vbo, &drop_line, glow::LINES);
+                    gl.draw_arrays(glow::LINES, 0, 2);
+                    gl.uniform_1_f32(Some(&self.u_point_size), 8.0);
+                }
             }
 
             // Draw trajectory path
@@ -516,10 +574,12 @@ impl Scene3DRenderer {
                 gl.draw_arrays(glow::LINES, 0, 6);
 
                 // Drop line to ground
-                gl.uniform_3_f32(Some(&self.u_color), c[0] * 0.4, c[1] * 0.4, c[2] * 0.4);
-                let drop_line = [pt.x, pt.y, pt.z, pt.x, pt.y, 0.0];
-                upload_and_draw(gl, self.vbo, &drop_line, glow::LINES);
-                gl.draw_arrays(glow::LINES, 0, 2);
+                if vis.drop_lines {
+                    gl.uniform_3_f32(Some(&self.u_color), c[0] * 0.4, c[1] * 0.4, c[2] * 0.4);
+                    let drop_line = [pt.x, pt.y, pt.z, pt.x, pt.y, 0.0];
+                    upload_and_draw(gl, self.vbo, &drop_line, glow::LINES);
+                    gl.draw_arrays(glow::LINES, 0, 2);
+                }
             }
 
             gl.use_program(None);

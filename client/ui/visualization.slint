@@ -31,6 +31,20 @@ export component VisualizationContent inherits Rectangle {
     in-out property <bool> show-axis-labels <=> ViewSettings.show-axis-labels;
     in-out property <bool> show-grid-labels <=> ViewSettings.show-grid-labels;
 
+    // Per-object visibility (persisted). Read back by Rust through the
+    // ViewSettings global; a label only shows when its object is drawn.
+    in-out property <bool> show-units <=> ViewSettings.show-units;
+    in-out property <bool> show-drop-lines <=> ViewSettings.show-drop-lines;
+    in-out property <bool> show-trajectories <=> ViewSettings.show-trajectories;
+    in-out property <bool> show-goto-targets <=> ViewSettings.show-goto-targets;
+    in-out property <bool> show-lh-stations <=> ViewSettings.show-lh-stations;
+    in-out property <bool> show-loco-anchors <=> ViewSettings.show-loco-anchors;
+    in-out property <bool> show-grid <=> ViewSettings.show-grid;
+    in-out property <bool> show-axes <=> ViewSettings.show-axes;
+    in-out property <bool> show-areas <=> ViewSettings.show-areas;
+    in-out property <bool> show-pads <=> ViewSettings.show-pads;
+    in-out property <bool> show-obstacles <=> ViewSettings.show-obstacles;
+
     // Positioning source selector
     in-out property <[string]> positioning-source-names;
     in-out property <int> positioning-source-index;
@@ -123,7 +137,7 @@ export component VisualizationContent inherits Rectangle {
     }
 
     // Label overlays
-    if show-cf-labels: Rectangle {
+    if show-cf-labels && show-units: Rectangle {
         width: 100%;
         height: 100%;
         for label in root.cf-labels: Text {
@@ -135,7 +149,7 @@ export component VisualizationContent inherits Rectangle {
         }
     }
 
-    if show-lh-labels: Rectangle {
+    if show-lh-labels && show-lh-stations: Rectangle {
         width: 100%;
         height: 100%;
         for label in root.lh-labels: Text {
@@ -147,7 +161,7 @@ export component VisualizationContent inherits Rectangle {
         }
     }
 
-    if show-loco-labels: Rectangle {
+    if show-loco-labels && show-loco-anchors: Rectangle {
         width: 100%;
         height: 100%;
         for label in root.loco-labels: Text {
@@ -159,7 +173,7 @@ export component VisualizationContent inherits Rectangle {
         }
     }
 
-    if show-axis-labels: Rectangle {
+    if show-axis-labels && show-axes: Rectangle {
         width: 100%;
         height: 100%;
         for label in root.axis-labels: Text {
@@ -174,7 +188,7 @@ export component VisualizationContent inherits Rectangle {
         }
     }
 
-    if show-grid-labels: Rectangle {
+    if show-grid-labels && show-grid: Rectangle {
         width: 100%;
         height: 100%;
         for label in root.grid-labels: Text {
@@ -254,88 +268,178 @@ export component VisualizationContent inherits Rectangle {
     context-menu := PopupWindow {
         x: 10px;
         y: 10px;
-        width: 220px;
+        width: 460px;
+        // Stay open while several objects are switched on and off; a click in
+        // the 3D view (or one of the buttons below) dismisses it.
+        close-policy: close-on-click-outside;
 
         Rectangle {
-            width: 220px;
+            width: 460px;
             background: Palette.background;
             border-width: 1px;
             border-color: Palette.border;
             border-radius: 4px;
 
-            VerticalLayout {
+            HorizontalLayout {
                 padding: 8px;
-                spacing: 4px;
+                spacing: 12px;
 
-                Text {
-                    text: "Show Labels";
-                    font-size: 12px;
-                    font-weight: 600;
-                    color: Palette.foreground.transparentize(0.3);
-                }
+                // Left column: what gets drawn in the 3D scene.
+                VerticalLayout {
+                    spacing: 4px;
+                    alignment: start;
 
-                CheckBox {
-                    text: "Crazyflie names";
-                    checked <=> root.show-cf-labels;
-                }
+                    Text {
+                        text: "Show Objects";
+                        font-size: 12px;
+                        font-weight: 600;
+                        color: Palette.foreground.transparentize(0.3);
+                    }
 
-                CheckBox {
-                    text: "Lighthouse base station IDs";
-                    checked <=> root.show-lh-labels;
-                }
+                    CheckBox {
+                        text: "Crazyflies";
+                        checked <=> root.show-units;
+                    }
 
-                CheckBox {
-                    text: "Loco node IDs";
-                    checked <=> root.show-loco-labels;
+                    CheckBox {
+                        text: "Ground drop lines";
+                        checked <=> root.show-drop-lines;
+                    }
+
+                    CheckBox {
+                        text: "Trajectories";
+                        checked <=> root.show-trajectories;
+                    }
+
+                    CheckBox {
+                        text: "Goto targets";
+                        checked <=> root.show-goto-targets;
+                    }
+
+                    CheckBox {
+                        text: "Lighthouse base stations";
+                        checked <=> root.show-lh-stations;
+                    }
+
+                    CheckBox {
+                        text: "Loco anchors";
+                        checked <=> root.show-loco-anchors;
+                    }
+
+                    Rectangle {
+                        height: 1px;
+                        background: Palette.border.transparentize(0.5);
+                    }
+
+                    CheckBox {
+                        text: "Ground grid";
+                        checked <=> root.show-grid;
+                    }
+
+                    CheckBox {
+                        text: "Axes (X, Y, Z)";
+                        checked <=> root.show-axes;
+                    }
                 }
 
                 Rectangle {
-                    height: 1px;
+                    width: 1px;
                     background: Palette.border.transparentize(0.5);
                 }
 
-                CheckBox {
-                    text: "Axis labels (X, Y, Z)";
-                    checked <=> root.show-axis-labels;
-                }
+                // Right column: text overlays and the loaded scene.
+                VerticalLayout {
+                    spacing: 4px;
+                    alignment: start;
 
-                CheckBox {
-                    text: "Grid measurements (m)";
-                    checked <=> root.show-grid-labels;
-                }
+                    Text {
+                        text: "Show Labels";
+                        font-size: 12px;
+                        font-weight: 600;
+                        color: Palette.foreground.transparentize(0.3);
+                    }
 
-                Rectangle {
-                    height: 1px;
-                    background: Palette.border.transparentize(0.5);
-                }
+                    CheckBox {
+                        text: "Crazyflie names";
+                        checked <=> root.show-cf-labels;
+                        enabled: root.show-units;
+                    }
 
-                Text {
-                    text: "Scene";
-                    font-size: 12px;
-                    font-weight: 600;
-                    color: Palette.foreground.transparentize(0.3);
-                }
+                    CheckBox {
+                        text: "Lighthouse base station IDs";
+                        checked <=> root.show-lh-labels;
+                        enabled: root.show-lh-stations;
+                    }
 
-                CheckBox {
-                    text: "Show flight area / pads";
-                    checked <=> root.show-scene-overlay;
-                }
+                    CheckBox {
+                        text: "Loco node IDs";
+                        checked <=> root.show-loco-labels;
+                        enabled: root.show-loco-anchors;
+                    }
 
-                Text {
-                    text: root.loaded-scene-name == "" ? "(no scene loaded)" : root.loaded-scene-name;
-                    font-size: 10px;
-                    color: Palette.foreground.transparentize(0.5);
-                    overflow: elide;
-                }
+                    CheckBox {
+                        text: "Axis labels (X, Y, Z)";
+                        checked <=> root.show-axis-labels;
+                        enabled: root.show-axes;
+                    }
 
-                Button {
-                    text: "Load Scene…";
-                    clicked => { context-menu.close(); root.load-scene(); }
-                }
+                    CheckBox {
+                        text: "Grid measurements (m)";
+                        checked <=> root.show-grid-labels;
+                        enabled: root.show-grid;
+                    }
 
-                Button {
-                    text: "Save Pad Positions";
-                    clicked => { context-menu.close(); root.save-pads(); }
+                    Rectangle {
+                        height: 1px;
+                        background: Palette.border.transparentize(0.5);
+                    }
+
+                    Text {
+                        text: "Scene";
+                        font-size: 12px;
+                        font-weight: 600;
+                        color: Palette.foreground.transparentize(0.3);
+                    }
+
+                    CheckBox {
+                        text: "Show scene overlay";
+                        checked <=> root.show-scene-overlay;
+                    }
+
+                    CheckBox {
+                        text: "Flight / waypoint areas";
+                        checked <=> root.show-areas;
+                        enabled: root.show-scene-overlay;
+                    }
+
+                    CheckBox {
+                        text: "Takeoff pads";
+                        checked <=> root.show-pads;
+                        enabled: root.show-scene-overlay;
+                    }
+
+                    CheckBox {
+                        text: "Obstacles";
+                        checked <=> root.show-obstacles;
+                        enabled: root.show-scene-overlay;
+                    }
+
+                    Text {
+                        text: root.loaded-scene-name == "" ? "(no scene loaded)" : root.loaded-scene-name;
+                        font-size: 10px;
+                        color: Palette.foreground.transparentize(0.5);
+                        overflow: elide;
+                    }
+
+                    Button {
+                        text: "Load Scene…";
+                        clicked => { context-menu.close(); root.load-scene(); }
+                    }
+
+                    Button {
+                        text: "Save Pad Positions";
+                        clicked => { context-menu.close(); root.save-pads(); }
+                    }
                 }
             }
         }

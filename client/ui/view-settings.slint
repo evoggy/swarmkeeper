@@ -139,4 +139,32 @@ export global ViewSettings {
     changed show-axis-labels => { save(); }
     changed show-grid-labels => { save(); }
     changed show-scene-overlay => { save(); }
+
+    // --- Visualization tab: per-object visibility ---
+    // Everything is drawn by default; the 3D view's context menu switches off
+    // whatever is in the way of what the user is actually looking at.
+    in-out property <bool> show-units: true;
+    in-out property <bool> show-drop-lines: true;
+    in-out property <bool> show-trajectories: true;
+    in-out property <bool> show-goto-targets: true;
+    in-out property <bool> show-lh-stations: true;
+    in-out property <bool> show-loco-anchors: true;
+    in-out property <bool> show-grid: true;
+    in-out property <bool> show-axes: true;
+    // Sub-toggles of show-scene-overlay (which stays the master switch).
+    in-out property <bool> show-areas: true;
+    in-out property <bool> show-pads: true;
+    in-out property <bool> show-obstacles: true;
+
+    changed show-units => { save(); }
+    changed show-drop-lines => { save(); }
+    changed show-trajectories => { save(); }
+    changed show-goto-targets => { save(); }
+    changed show-lh-stations => { save(); }
+    changed show-loco-anchors => { save(); }
+    changed show-grid => { save(); }
+    changed show-axes => { save(); }
+    changed show-areas => { save(); }
+    changed show-pads => { save(); }
+    changed show-obstacles => { save(); }
 }

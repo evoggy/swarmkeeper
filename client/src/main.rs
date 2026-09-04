@@ -216,6 +216,19 @@ view_state! {
     show_axis_labels: bool = false, get_show_axis_labels / set_show_axis_labels;
     show_grid_labels: bool = false, get_show_grid_labels / set_show_grid_labels;
     show_scene_overlay: bool = true, get_show_scene_overlay / set_show_scene_overlay;
+
+    // Visualization tab: per-object visibility
+    show_units: bool = true, get_show_units / set_show_units;
+    show_drop_lines: bool = true, get_show_drop_lines / set_show_drop_lines;
+    show_trajectories: bool = true, get_show_trajectories / set_show_trajectories;
+    show_goto_targets: bool = true, get_show_goto_targets / set_show_goto_targets;
+    show_lh_stations: bool = true, get_show_lh_stations / set_show_lh_stations;
+    show_loco_anchors: bool = true, get_show_loco_anchors / set_show_loco_anchors;
+    show_grid: bool = true, get_show_grid / set_show_grid;
+    show_axes: bool = true, get_show_axes / set_show_axes;
+    show_areas: bool = true, get_show_areas / set_show_areas;
+    show_pads: bool = true, get_show_pads / set_show_pads;
+    show_obstacles: bool = true, get_show_obstacles / set_show_obstacles;
 }
 
 /// Write the current Units/Visualization view state to the settings file,
@@ -5573,6 +5586,11 @@ async fn main() {
                 aspect,
             );
 
+            // Nothing to pick while the Crazyflies are switched off in the view.
+            if !ui.global::<ViewSettings>().get_show_units() {
+                return;
+            }
+
             // Pick the nearest unit whose projected position is within the radius.
             let sorted = ui.get_sorted_units();
             let pick_radius = 18.0_f32;
@@ -6717,6 +6735,25 @@ async fn main() {
                             let pan_x = app.get_cam_pan_x();
                             let pan_y = app.get_cam_pan_y();
 
+                            // Per-object visibility, straight from the view settings
+                            // global that backs the 3D view's context menu.
+                            let view = app.global::<ViewSettings>();
+                            let vis = renderer::VizVisibility {
+                                grid: view.get_show_grid(),
+                                axes: view.get_show_axes(),
+                                units: view.get_show_units(),
+                                drop_lines: view.get_show_drop_lines(),
+                                trajectories: view.get_show_trajectories(),
+                                goto_targets: view.get_show_goto_targets(),
+                                // The scene overlay checkbox is the master switch
+                                // for the three scene object classes.
+                                areas: view.get_show_scene_overlay() && view.get_show_areas(),
+                                pads: view.get_show_scene_overlay() && view.get_show_pads(),
+                                obstacles: view.get_show_scene_overlay() && view.get_show_obstacles(),
+                            };
+                            let show_lh_stations = view.get_show_lh_stations();
+                            let show_loco_anchors = view.get_show_loco_anchors();
+
                             // Read unit positions from model
                             let units_model = app.get_units();
 
@@ -6755,34 +6792,38 @@ async fn main() {
                             // Build fixed points from positioning data
                             let mut fixed_points = Vec::new();
                             if let Ok(pd) = positioning_data.try_lock() {
-                                for (id, pos) in pd.lighthouse_bs.iter() {
-                                    let active = (pd.lighthouse_active >> id) & 1 != 0;
-                                    let alpha = if active { 1.0 } else { 0.5 };
-                                    fixed_points.push(renderer::UnitPos {
-                                        x: pos[0], y: pos[1], z: pos[2],
-                                        color: [0.94 * alpha, 0.27 * alpha, 0.27 * alpha],
-                                        selected: false,
-                                    });
-                                }
-                                // Track which loco anchors are currently present
-                                let mut loco_present: std::collections::HashSet<u8> = std::collections::HashSet::new();
-                                for (id, pos) in pd.loco_anchors.iter() {
-                                    loco_present.insert(*id);
-                                    fixed_points.push(renderer::UnitPos {
-                                        x: pos[0], y: pos[1], z: pos[2],
-                                        color: [1.0, 0.85, 0.0],
-                                        selected: false,
-                                    });
-                                }
-                                // Show previously seen anchors that are no longer present at 50%
-                                for (id, pos) in pd.loco_seen.iter() {
-                                    if !loco_present.contains(id) {
-                                        let alpha = 0.5;
+                                if show_lh_stations {
+                                    for (id, pos) in pd.lighthouse_bs.iter() {
+                                        let active = (pd.lighthouse_active >> id) & 1 != 0;
+                                        let alpha = if active { 1.0 } else { 0.5 };
                                         fixed_points.push(renderer::UnitPos {
                                             x: pos[0], y: pos[1], z: pos[2],
-                                            color: [1.0 * alpha, 0.85 * alpha, 0.0],
+                                            color: [0.94 * alpha, 0.27 * alpha, 0.27 * alpha],
                                             selected: false,
                                         });
+                                    }
+                                }
+                                if show_loco_anchors {
+                                    // Track which loco anchors are currently present
+                                    let mut loco_present: std::collections::HashSet<u8> = std::collections::HashSet::new();
+                                    for (id, pos) in pd.loco_anchors.iter() {
+                                        loco_present.insert(*id);
+                                        fixed_points.push(renderer::UnitPos {
+                                            x: pos[0], y: pos[1], z: pos[2],
+                                            color: [1.0, 0.85, 0.0],
+                                            selected: false,
+                                        });
+                                    }
+                                    // Show previously seen anchors that are no longer present at 50%
+                                    for (id, pos) in pd.loco_seen.iter() {
+                                        if !loco_present.contains(id) {
+                                            let alpha = 0.5;
+                                            fixed_points.push(renderer::UnitPos {
+                                                x: pos[0], y: pos[1], z: pos[2],
+                                                color: [1.0 * alpha, 0.85 * alpha, 0.0],
+                                                selected: false,
+                                            });
+                                        }
                                     }
                                 }
                             }
@@ -6831,27 +6872,38 @@ async fn main() {
                                 }
                             }
 
-                            // Scene overlay (flight/waypoint areas + pads + obstacles)
-                            let (flight_areas, waypoint_areas, pads, obs_tris, obs_wires, obs_colors) = if app.get_viz_show_scene_overlay() {
-                                if let Ok(s) = viz_scene_state.try_lock() {
-                                    let to_box = |v: &planning::BoxVolume| renderer::FlightAreaBox { min: v.min, max: v.max };
-                                    let fas: Vec<renderer::FlightAreaBox> = s.flight_areas.iter().map(to_box).collect();
-                                    let was: Vec<renderer::FlightAreaBox> = s.waypoint_areas.iter().map(to_box).collect();
-                                    let pads: Vec<renderer::PadCircle> = s.takeoff_pads.iter()
-                                        .map(|p| renderer::PadCircle { x: p.x, y: p.y, radius: p.radius })
-                                        .collect();
-                                    (fas, was, pads, s.obstacle_triangles.clone(), s.obstacle_wireframes.clone(), s.obstacle_colors.clone())
-                                } else {
-                                    (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new())
-                                }
-                            } else {
-                                (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new())
-                            };
+                            // Scene overlay (flight/waypoint areas + pads + obstacles).
+                            // The obstacle meshes are cloned out of the shared state,
+                            // so only collect what is actually going to be drawn.
+                            let (flight_areas, waypoint_areas, pads, obs_tris, obs_wires, obs_colors) =
+                                match viz_scene_state.try_lock() {
+                                    Ok(s) if vis.areas || vis.pads || vis.obstacles => {
+                                        let to_box = |v: &planning::BoxVolume| renderer::FlightAreaBox { min: v.min, max: v.max };
+                                        let fas: Vec<renderer::FlightAreaBox> = if vis.areas {
+                                            s.flight_areas.iter().map(to_box).collect()
+                                        } else { Vec::new() };
+                                        let was: Vec<renderer::FlightAreaBox> = if vis.areas {
+                                            s.waypoint_areas.iter().map(to_box).collect()
+                                        } else { Vec::new() };
+                                        let pads: Vec<renderer::PadCircle> = if vis.pads {
+                                            s.takeoff_pads.iter()
+                                                .map(|p| renderer::PadCircle { x: p.x, y: p.y, radius: p.radius })
+                                                .collect()
+                                        } else { Vec::new() };
+                                        let (tris, wires, colors) = if vis.obstacles {
+                                            (s.obstacle_triangles.clone(), s.obstacle_wireframes.clone(), s.obstacle_colors.clone())
+                                        } else {
+                                            (Vec::new(), Vec::new(), Vec::new())
+                                        };
+                                        (fas, was, pads, tris, wires, colors)
+                                    }
+                                    _ => (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new()),
+                                };
 
                             let texture = renderer.render(
                                 width, height, yaw, pitch, distance, pan_x, pan_y, &unit_positions, &fixed_points, &trajectory_lines,
                                 &flight_areas, &waypoint_areas, &pads, &obs_tris, &obs_wires, &obs_colors,
-                                &goto_points, &goto_lines,
+                                &goto_points, &goto_lines, vis,
                             );
                             app.set_viz_texture(texture);
 
