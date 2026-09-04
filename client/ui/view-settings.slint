@@ -80,6 +80,12 @@ export global ViewSettings {
     changed section-tools-expanded => { save(); }
     changed section-power-expanded => { save(); }
 
+    // --- Unit sidebar: console popup ---
+    // Whether the captured console output is prefixed with the capture time.
+    in-out property <bool> console-show-timestamps: true;
+
+    changed console-show-timestamps => { save(); }
+
     // --- Units tab: table layout and sorting ---
     in-out property <length> sidebar-width: 360px;
     in-out property <int> sort-column: -1;

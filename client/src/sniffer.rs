@@ -518,20 +518,19 @@ pub struct SurveyAnchor {
     pub links_used: usize,
     /// Links to this anchor that entered the fit, before rejection.
     pub links_total: usize,
-    /// Reference position this anchor is compared against, when one was
-    /// available: the configured position read back from a Crazyflie, or failing
-    /// that the anchor's own LPP broadcast.
+    /// The position this anchor broadcast about itself, when it broadcast one.
+    /// The survey is compared against this.
     pub reference: Option<[f32; 3]>,
 }
 
 impl SurveyAnchor {
-    /// Offset from the reference position to the solved one [m], per axis.
+    /// Offset from the broadcast position to the solved one [m], per axis.
     ///
     /// Meaningful only because the survey is gauge-fixed onto the very same
-    /// reference set: the fit recovers a shape, and it is the alignment that
-    /// puts it in the reference's frame. Comparing against a *different* set of
-    /// positions than the one the solve aligned to would measure the frame
-    /// mismatch, not the anchor placement.
+    /// broadcast positions: the fit recovers a shape, and it is the alignment
+    /// that puts that shape in the anchors' declared frame. Comparing against a
+    /// *different* set of positions than the solve aligned to would measure the
+    /// frame mismatch, not the anchor placement.
     pub fn delta(&self) -> Option<[f32; 3]> {
         let r = self.reference?;
         Some([
@@ -561,11 +560,11 @@ pub struct SurveySolution {
     pub pairs_rejected: usize,
     /// RMS residual [m] over the pairs the fit kept.
     pub rms: f32,
-    /// Anchors that had a reference position to compare against.
+    /// Anchors that broadcast a position to compare against.
     pub ref_count: usize,
-    /// Mean distance [m] between solved and reference positions.
+    /// Mean distance [m] between solved and broadcast positions.
     pub ref_mean: f32,
-    /// Worst distance [m] between solved and reference positions.
+    /// Worst distance [m] between solved and broadcast positions.
     pub ref_max: f32,
 }
 
@@ -631,14 +630,11 @@ pub struct SnifferState {
     pub stats: HashMap<u8, AnchorStat>,
     pub matrix: DistanceMatrix,
     pub feed: VecDeque<SniffedPacket>,
-    /// Anchor self-reported positions seen in LPP packets.
+    /// Positions the anchors report about themselves in the LPP block appended
+    /// to their TDoA3 packets — i.e. the geometry each node actually has stored.
+    /// This is the survey's reference frame: it needs no second device, since
+    /// the sniffer overhears it directly from every anchor.
     pub lpp_positions: HashMap<u8, [f32; 3]>,
-    /// Configured anchor positions read back from a Crazyflie's Loco memory.
-    /// When set these are the survey's reference frame, in preference to the
-    /// anchors' own LPP broadcast.
-    pub reference: HashMap<u8, [f32; 3]>,
-    /// Name of the unit `reference` was read from; empty when unset.
-    pub reference_source: String,
     pub survey: Vec<SurveyAnchor>,
     pub survey_status: String,
     /// Latest monotonic time (seconds) observed by the reader, for "ago" display.
@@ -737,15 +733,12 @@ impl SnifferState {
     /// string and stores the result in `self.survey`.
     pub fn solve_survey(&mut self) {
         let ids = self.matrix.ids();
-        // Anchor the solution to whichever reference the operator supplied: an
-        // explicit read-back from a Crazyflie is their declared ground truth, so
-        // it wins over the anchors' own LPP broadcast. With neither, the fit
-        // falls back to a canonical frame and there is nothing to compare to.
-        let refs = if self.reference.is_empty() {
-            self.lpp_positions.clone()
-        } else {
-            self.reference.clone()
-        };
+        // Anchor the solution to the positions the nodes broadcast about
+        // themselves — the configured geometry straight from the source, since
+        // every TDoA3 packet carries the sender's own stored position. With none
+        // seen, the fit falls back to a canonical frame and there is nothing to
+        // compare against.
+        let refs = self.lpp_positions.clone();
         let solved = solve_geometry(&ids, &self.matrix, &refs);
         match solved {
             Ok(sol) => {
@@ -758,8 +751,7 @@ impl SnifferState {
                 );
                 if sol.ref_count > 0 {
                     status.push_str(&format!(
-                        " · vs {}: mean Δ {:.0} mm, max {:.0} mm over {} anchors",
-                        self.reference_label(),
+                        " · vs broadcast positions: mean Δ {:.0} mm, max {:.0} mm over {} anchors",
                         sol.ref_mean * 1000.0,
                         sol.ref_max * 1000.0,
                         sol.ref_count
@@ -783,14 +775,18 @@ impl SnifferState {
         }
     }
 
-    /// Human-readable name for whatever the survey is being compared against.
-    pub fn reference_label(&self) -> String {
-        if self.reference.is_empty() {
-            "anchor LPP broadcast".to_string()
-        } else if self.reference_source.is_empty() {
-            "configured positions".to_string()
+    /// One-line description of the reference the survey compares against, for
+    /// the UI. Reported continuously: the nodes broadcast their stored positions
+    /// unprompted, so the operator should see the reference is already in hand
+    /// without having to do anything to fetch it.
+    pub fn reference_status(&self) -> String {
+        if self.lpp_positions.is_empty() {
+            "No positions broadcast yet — anchors may have no geometry set".to_string()
         } else {
-            self.reference_source.clone()
+            format!(
+                "{} anchors broadcasting their configured position",
+                self.lpp_positions.len()
+            )
         }
     }
 }
@@ -1071,9 +1067,9 @@ pub fn solve_geometry(
     }
     anchors.sort_by_key(|a| a.id);
 
-    // How far the solved geometry sits from the reference it was aligned to.
-    // Unlike the residual, this can catch a survey that is perfectly
-    // self-consistent but doesn't match the positions actually in use.
+    // How far the solved geometry sits from the broadcast positions it was
+    // aligned to. Unlike the residual, this catches a survey that is perfectly
+    // self-consistent but doesn't match the geometry the nodes have stored.
     let deltas: Vec<f32> = anchors.iter().filter_map(|a| a.delta_norm()).collect();
     let ref_count = deltas.len();
     let ref_mean = if ref_count > 0 {
@@ -1430,17 +1426,18 @@ mod tests {
     }
 
     #[test]
-    fn reports_offset_from_the_reference_geometry() {
+    fn reports_offset_from_the_broadcast_position() {
         let pts = box_anchors();
         let ids: Vec<u8> = pts.iter().map(|(id, _)| *id).collect();
         let matrix = matrix_from(&pts, &[]);
 
-        // The reference says A6 sits a metre higher than the radios place it —
-        // an anchor that was moved without the configuration being updated.
-        let mut reference: HashMap<u8, [f32; 3]> = pts.iter().cloned().collect();
-        reference.get_mut(&6).unwrap()[2] += 1.0;
+        // A6 broadcasts a position a metre above where the radios place it — an
+        // anchor that was physically moved without its stored geometry being
+        // updated, which is the failure this comparison exists to catch.
+        let mut broadcast: HashMap<u8, [f32; 3]> = pts.iter().cloned().collect();
+        broadcast.get_mut(&6).unwrap()[2] += 1.0;
 
-        let sol = solve_geometry(&ids, &matrix, &reference).unwrap();
+        let sol = solve_geometry(&ids, &matrix, &broadcast).unwrap();
         assert_eq!(sol.ref_count, 8);
 
         let a6 = sol.anchors.iter().find(|a| a.id == 6).unwrap();
@@ -1459,33 +1456,38 @@ mod tests {
     }
 
     #[test]
-    fn reference_geometry_wins_over_lpp() {
+    fn compares_against_the_nodes_own_broadcast_by_default() {
         let pts = box_anchors();
         let mut state = SnifferState::default();
         state.matrix = matrix_from(&pts, &[]);
-        // The anchors broadcast one frame; the Crazyflie is configured with the
-        // same geometry shifted 10 m along x. The explicit read-back is the
-        // operator's declared truth, so the survey must land in that frame.
+        // Every TDoA3 packet carries the sending node's stored position, so the
+        // sniffer alone already has the configured geometry to compare against —
+        // no other device is involved.
         for (id, p) in &pts {
             state.lpp_positions.insert(*id, *p);
-            state.reference.insert(*id, [p[0] + 10.0, p[1], p[2]]);
         }
-        state.reference_source = "cf1".into();
-        state.solve_survey();
+        assert!(
+            state.reference_status().contains("8 anchors broadcasting"),
+            "{}",
+            state.reference_status()
+        );
 
+        state.solve_survey();
         assert_eq!(state.survey.len(), 8);
         for a in &state.survey {
-            let want = state.reference[&a.id];
-            assert!(
-                (a.pos[0] - want[0]).abs() < 0.1,
-                "A{} solved at x={:.2}, expected the reference frame at {:.2}",
-                a.id,
-                a.pos[0],
-                want[0]
-            );
+            let want = pts.iter().find(|(id, _)| *id == a.id).unwrap().1;
             assert_eq!(a.reference, Some(want));
+            let d = a.delta_norm().unwrap();
+            assert!(d < 0.05, "A{} off by {d:.3} m from its own broadcast", a.id);
         }
-        assert!(state.survey_status.contains("cf1"), "{}", state.survey_status);
+
+        // With no broadcast at all, say so rather than leaving the field blank.
+        let silent = SnifferState::default();
+        assert!(
+            silent.reference_status().contains("No positions broadcast"),
+            "{}",
+            silent.reference_status()
+        );
     }
 
     #[test]

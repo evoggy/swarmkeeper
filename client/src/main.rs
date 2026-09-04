@@ -48,6 +48,22 @@ impl crazyflie_lib::TocCache for FileTocCache {
     }
 }
 
+/// Receive timeout of the radio link, in milliseconds. The crazyflie-link
+/// default is 1000 ms, which is too tight when a whole swarm shares one radio:
+/// a unit that goes a second without a packet has its link dropped as
+/// "Connection timeout". Applied through the `timeout` URI parameter.
+const LINK_TIMEOUT_MS: u32 = 3000;
+
+/// Add `timeout=`[`LINK_TIMEOUT_MS`] to a Crazyflie URI, leaving a URI that
+/// already sets its own `timeout` untouched.
+fn uri_with_link_timeout(uri: &str) -> String {
+    if uri.contains("timeout=") {
+        return uri.to_string();
+    }
+    let separator = if uri.contains('?') { '&' } else { '?' };
+    format!("{}{}timeout={}", uri, separator, LINK_TIMEOUT_MS)
+}
+
 #[derive(Serialize, Deserialize, Default)]
 struct AppSettings {
     last_swarm_config: Option<String>,
@@ -368,9 +384,6 @@ fn apply_swarm_config(ui: &AppWindow, config: &SwarmConfig) {
 
     ui.set_radio_test_unit_names(slint::ModelRc::new(slint::VecModel::from(unit_names.clone())));
     ui.set_radio_test_selected_unit(0);
-
-    ui.set_sniffer_ref_unit_names(slint::ModelRc::new(slint::VecModel::from(unit_names.clone())));
-    ui.set_sniffer_ref_unit_index(0);
 
     // Populate wizard CF names
     ui.set_lh_wizard_cf_names(slint::ModelRc::new(slint::VecModel::from(unit_names.clone())));
@@ -1914,10 +1927,53 @@ fn save_journal(store: &JournalStore) {
     }
 }
 
+/// One captured console line, stamped with the local wall-clock time it was
+/// received. The stamp is applied on reception rather than coming from the
+/// firmware, so the first lines of a connection (the history the firmware
+/// replays on connect) all carry roughly the connection time.
+#[derive(Serialize, Deserialize, Clone)]
+#[serde(from = "ConsoleLineRepr", into = "ConsoleLineRepr")]
+struct ConsoleLine {
+    /// "HH:MM:SS.mmm", empty for lines captured before timestamps existed.
+    time: String,
+    text: String,
+}
+
+/// On-disk shape of a [`ConsoleLine`]. Console files written before timestamps
+/// existed store a bare string per line, so those still load (with an empty
+/// timestamp) instead of throwing away the whole file.
+#[derive(Serialize, Deserialize)]
+#[serde(untagged)]
+enum ConsoleLineRepr {
+    Stamped { time: String, text: String },
+    Legacy(String),
+}
+
+impl From<ConsoleLineRepr> for ConsoleLine {
+    fn from(repr: ConsoleLineRepr) -> Self {
+        match repr {
+            ConsoleLineRepr::Stamped { time, text } => ConsoleLine { time, text },
+            ConsoleLineRepr::Legacy(text) => ConsoleLine {
+                time: String::new(),
+                text,
+            },
+        }
+    }
+}
+
+impl From<ConsoleLine> for ConsoleLineRepr {
+    fn from(line: ConsoleLine) -> Self {
+        ConsoleLineRepr::Stamped {
+            time: line.time,
+            text: line.text,
+        }
+    }
+}
+
 /// Console history captured for every unit, keyed by CPU serial so it survives
 /// reconnects and app restarts (persisted to disk, like the journal). Each unit
 /// keeps at most [`CONSOLE_MAX_LINES`] lines; older lines are dropped.
-type ConsoleStore = HashMap<String, Vec<String>>;
+type ConsoleStore = HashMap<String, Vec<ConsoleLine>>;
 type SharedConsoleStore = Arc<Mutex<ConsoleStore>>;
 
 /// Maximum number of console lines retained per unit. Console output is
@@ -2141,7 +2197,7 @@ async fn main() {
 
                     let cf = match tokio::time::timeout(
                         std::time::Duration::from_secs(30),
-                        crazyflie_lib::Crazyflie::connect_from_uri(link_context.as_ref(), &uri, toc_cache),
+                        crazyflie_lib::Crazyflie::connect_from_uri(link_context.as_ref(), &uri_with_link_timeout(&uri), toc_cache),
                     ).await {
                         Ok(Ok(cf)) => Arc::new(cf),
                         Ok(Err(e)) => {
@@ -2240,7 +2296,7 @@ async fn main() {
                         }
                     }
 
-                    start_telemetry(i, uri.clone(), cf.clone(), ui_weak, positioning_data, positioning_source, goto_targets).await;
+                    start_telemetry(i, uri.clone(), cf.clone(), ui_weak, positioning_data, positioning_source, goto_targets, unit_count).await;
                 });
             }
         });
@@ -2339,7 +2395,7 @@ async fn main() {
 
                     let cf = match tokio::time::timeout(
                         std::time::Duration::from_secs(30),
-                        crazyflie_lib::Crazyflie::connect_from_uri(link_context.as_ref(), &uri, toc_cache),
+                        crazyflie_lib::Crazyflie::connect_from_uri(link_context.as_ref(), &uri_with_link_timeout(&uri), toc_cache),
                     ).await {
                         Ok(Ok(cf)) => Arc::new(cf),
                         Ok(Err(e)) => {
@@ -2425,7 +2481,7 @@ async fn main() {
                         }
                     }
 
-                    start_telemetry(i, uri.clone(), cf.clone(), ui_weak, positioning_data, positioning_source, goto_targets).await;
+                    start_telemetry(i, uri.clone(), cf.clone(), ui_weak, positioning_data, positioning_source, goto_targets, unit_count).await;
                 });
             }
         });
@@ -2472,7 +2528,7 @@ async fn main() {
 
                     match tokio::time::timeout(
                         std::time::Duration::from_secs(30),
-                        crazyflie_lib::Crazyflie::connect_from_uri(link_context.as_ref(), uri, toc_cache.clone()),
+                        crazyflie_lib::Crazyflie::connect_from_uri(link_context.as_ref(), &uri_with_link_timeout(uri), toc_cache.clone()),
                     ).await {
                         Ok(Ok(cf)) => {
                             eprintln!("TOC downloaded for {}", uri);
@@ -2889,7 +2945,7 @@ async fn main() {
 
                         let connect_result = tokio::time::timeout(
                             std::time::Duration::from_secs(30),
-                            crazyflie_lib::Crazyflie::connect_from_uri(link_context.as_ref(), &uri, toc_cache),
+                            crazyflie_lib::Crazyflie::connect_from_uri(link_context.as_ref(), &uri_with_link_timeout(&uri), toc_cache),
                         ).await;
                         let cf = match connect_result {
                             Ok(Ok(cf)) => cf,
@@ -4248,8 +4304,13 @@ async fn main() {
                     store.get(&serial).cloned().unwrap_or_default()
                 };
 
-                let slint_lines: Vec<slint::SharedString> =
-                    lines.iter().map(|l| l.clone().into()).collect();
+                let slint_lines: Vec<ConsoleLineData> = lines
+                    .iter()
+                    .map(|l| ConsoleLineData {
+                        time: l.time.as_str().into(),
+                        text: l.text.as_str().into(),
+                    })
+                    .collect();
 
                 slint::invoke_from_event_loop(move || {
                     if let Some(ui) = ui_weak.upgrade() {
@@ -4308,7 +4369,7 @@ async fn main() {
 
                 slint::invoke_from_event_loop(move || {
                     if let Some(ui) = ui_weak.upgrade() {
-                        ui.set_console_lines(slint::ModelRc::new(slint::VecModel::from(Vec::<slint::SharedString>::new())));
+                        ui.set_console_lines(slint::ModelRc::new(slint::VecModel::from(Vec::<ConsoleLineData>::new())));
                     }
                 }).ok();
             });
@@ -4440,7 +4501,7 @@ async fn main() {
                                 units.set_row_data(i, u);
                             }
                         }
-                        ui.set_console_lines(slint::ModelRc::new(slint::VecModel::from(Vec::<slint::SharedString>::new())));
+                        ui.set_console_lines(slint::ModelRc::new(slint::VecModel::from(Vec::<ConsoleLineData>::new())));
                         rebuild_table_rows(&ui);
                     }
                 }).ok();
@@ -5640,9 +5701,10 @@ async fn main() {
                 return;
             }
 
-            let (original_index, uri) = {
+            let (original_index, uri, unit_count) = {
                 let Some(ui) = ui_weak.upgrade() else { return };
                 let units = ui.get_units();
+                let unit_count = units.row_count();
                 let col = ui.get_sort_column();
                 let ascending = ui.get_sort_ascending();
                 let indices = sort_unit_indices(&units, col, ascending);
@@ -5657,7 +5719,7 @@ async fn main() {
                     eprintln!("Unit {} is already connected", idx);
                     return;
                 }
-                (idx, unit.uri.to_string())
+                (idx, unit.uri.to_string(), unit_count)
             };
 
             let link_context = link_context.clone();
@@ -5675,7 +5737,7 @@ async fn main() {
 
                 let cf = match tokio::time::timeout(
                     std::time::Duration::from_secs(30),
-                    crazyflie_lib::Crazyflie::connect_from_uri(link_context.as_ref(), &uri, toc_cache),
+                    crazyflie_lib::Crazyflie::connect_from_uri(link_context.as_ref(), &uri_with_link_timeout(&uri), toc_cache),
                 ).await {
                     Ok(Ok(cf)) => Arc::new(cf),
                     Ok(Err(e)) => {
@@ -5766,7 +5828,7 @@ async fn main() {
                     }
                 }
 
-                start_telemetry(original_index, uri.clone(), cf.clone(), ui_weak, positioning_data, positioning_source, goto_targets).await;
+                start_telemetry(original_index, uri.clone(), cf.clone(), ui_weak, positioning_data, positioning_source, goto_targets, unit_count).await;
             });
         });
     }
@@ -6291,7 +6353,7 @@ async fn main() {
                     eprintln!("Clear TLV {}: connecting to {}...", name, uri);
                     match tokio::time::timeout(
                         std::time::Duration::from_secs(30),
-                        crazyflie_lib::Crazyflie::connect_from_uri(link_context.as_ref(), &uri, toc_cache),
+                        crazyflie_lib::Crazyflie::connect_from_uri(link_context.as_ref(), &uri_with_link_timeout(&uri), toc_cache),
                     ).await {
                         Ok(Ok(cf)) => (Arc::new(cf), true),
                         Ok(Err(e)) => {
@@ -7547,7 +7609,7 @@ async fn main() {
                             eprintln!("Tuning {}: connecting to {}...", name, uri);
                             match tokio::time::timeout(
                                 std::time::Duration::from_secs(30),
-                                crazyflie_lib::Crazyflie::connect_from_uri(link_context.as_ref(), &uri, toc_cache),
+                                crazyflie_lib::Crazyflie::connect_from_uri(link_context.as_ref(), &uri_with_link_timeout(&uri), toc_cache),
                             ).await {
                                 Ok(Ok(cf)) => (Arc::new(cf), true),
                                 Ok(Err(e)) => {
@@ -7927,7 +7989,7 @@ async fn main() {
                             eprintln!("Param upload {}: connecting to {}...", name, uri);
                             match tokio::time::timeout(
                                 std::time::Duration::from_secs(30),
-                                crazyflie_lib::Crazyflie::connect_from_uri(link_context.as_ref(), &uri, toc_cache),
+                                crazyflie_lib::Crazyflie::connect_from_uri(link_context.as_ref(), &uri_with_link_timeout(&uri), toc_cache),
                             ).await {
                                 Ok(Ok(cf)) => (Arc::new(cf), true),
                                 Ok(Err(e)) => {
@@ -8081,7 +8143,7 @@ async fn main() {
                         } else {
                             match tokio::time::timeout(
                                 std::time::Duration::from_secs(30),
-                                crazyflie_lib::Crazyflie::connect_from_uri(link_context.as_ref(), &uri, toc_cache),
+                                crazyflie_lib::Crazyflie::connect_from_uri(link_context.as_ref(), &uri_with_link_timeout(&uri), toc_cache),
                             ).await {
                                 Ok(Ok(cf)) => (Arc::new(cf), true),
                                 Ok(Err(e)) => {
@@ -8233,7 +8295,7 @@ async fn main() {
                         eprintln!("Health test {}: connecting to {}...", name, uri);
                         let cf = match tokio::time::timeout(
                             std::time::Duration::from_secs(30),
-                            crazyflie_lib::Crazyflie::connect_from_uri(link_context.as_ref(), &uri, toc_cache),
+                            crazyflie_lib::Crazyflie::connect_from_uri(link_context.as_ref(), &uri_with_link_timeout(&uri), toc_cache),
                         ).await {
                             Ok(Ok(cf)) => Arc::new(cf),
                             Ok(Err(e)) => {
@@ -11888,96 +11950,6 @@ async fn main() {
         }
 
         {
-            let ui_weak = ui.as_weak();
-            let state = sniffer_state.clone();
-            let ss = swarm_state.clone();
-            ui.on_sniffer_read_reference(move |index| {
-                let Some(ui) = ui_weak.upgrade() else { return };
-                if index < 0 {
-                    return;
-                }
-                let unit_index = index as usize;
-                let name: String = ui
-                    .get_sniffer_ref_unit_names()
-                    .row_data(unit_index)
-                    .map(|s| s.to_string())
-                    .unwrap_or_else(|| format!("unit {unit_index}"));
-                ui.set_sniffer_ref_reading(true);
-                ui.set_sniffer_ref_status(format!("Reading anchors from {name}…").into());
-
-                let ui_weak = ui_weak.clone();
-                let state = state.clone();
-                let ss = ss.clone();
-                tokio::spawn(async move {
-                    let cf = { ss.lock().await.get(&unit_index).map(|u| u.cf.clone()) };
-                    let result = match cf {
-                        Some(cf) => {
-                            let (positions, _active) = read_loco_anchor_positions(&cf).await;
-                            if positions.is_empty() {
-                                Err(format!("{name} has no anchor positions stored"))
-                            } else {
-                                Ok(positions)
-                            }
-                        }
-                        None => Err(format!("{name} is not connected")),
-                    };
-
-                    slint::invoke_from_event_loop(move || {
-                        let Some(ui) = ui_weak.upgrade() else { return };
-                        ui.set_sniffer_ref_reading(false);
-                        match result {
-                            Ok(positions) => {
-                                let count = positions.len();
-                                if let Ok(mut st) = state.lock() {
-                                    st.reference = positions.into_iter().collect();
-                                    st.reference_source = name.clone();
-                                    // A survey already on screen was aligned to
-                                    // the old reference, so its offsets would be
-                                    // measured against a frame that no longer
-                                    // applies. Re-solve rather than show stale
-                                    // numbers.
-                                    if !st.survey.is_empty() {
-                                        st.solve_survey();
-                                    }
-                                }
-                                ui.set_sniffer_ref_count(count as i32);
-                                ui.set_sniffer_ref_status(
-                                    format!("{count} anchors from {name}").into(),
-                                );
-                            }
-                            Err(e) => {
-                                ui.set_sniffer_ref_status(e.into());
-                            }
-                        }
-                        update_sniffer_ui(&ui.as_weak(), &state, None);
-                    })
-                    .ok();
-                });
-            });
-        }
-
-        {
-            let ui_weak = ui.as_weak();
-            let state = sniffer_state.clone();
-            ui.on_sniffer_clear_reference(move || {
-                if let Ok(mut st) = state.lock() {
-                    st.reference.clear();
-                    st.reference_source.clear();
-                    // Fall back to the anchors' own LPP broadcast, which means a
-                    // different alignment frame — re-solve for the same reason.
-                    if !st.survey.is_empty() {
-                        st.solve_survey();
-                    }
-                }
-                if let Some(ui) = ui_weak.upgrade() {
-                    ui.set_sniffer_ref_count(0);
-                    ui.set_sniffer_ref_status("".into());
-                }
-                update_sniffer_ui(&ui_weak, &state, None);
-            });
-        }
-
-        {
             let state = sniffer_state.clone();
             ui.on_sniffer_save_survey(move || {
                 let survey = match state.lock() {
@@ -12135,7 +12107,8 @@ fn update_sniffer_ui(
         })
         .collect();
 
-    // Survey results.
+    // Survey results, and what they are being compared against.
+    let ref_status = st.reference_status();
     let survey_status = st.survey_status.clone();
     let survey_rows: Vec<SnifferSurveyRow> = st
         .survey
@@ -12249,6 +12222,7 @@ fn update_sniffer_ui(
             })
             .collect();
         ui.set_sniffer_matrix_rows(slint::ModelRc::new(slint::VecModel::from(matrix_rows)));
+        ui.set_sniffer_ref_status(ref_status.into());
         ui.set_sniffer_survey_status(survey_status.into());
         ui.set_sniffer_survey_rows(slint::ModelRc::new(slint::VecModel::from(survey_rows)));
         ui.set_sniffer_feed_rows(slint::ModelRc::new(slint::VecModel::from(feed_rows)));
@@ -12691,10 +12665,11 @@ fn start_console_capture(
         let mut lines_since_save = 0u32;
 
         while let Some(line) = stream.next().await {
+            let time = chrono::Local::now().format("%H:%M:%S%.3f").to_string();
             let new_count = {
                 let mut store = console_store.lock().await;
                 let entry = store.entry(serial.clone()).or_default();
-                entry.push(line);
+                entry.push(ConsoleLine { time, text: line });
                 // Enforce the per-unit cap, dropping the oldest lines.
                 if entry.len() > CONSOLE_MAX_LINES {
                     let overflow = entry.len() - CONSOLE_MAX_LINES;
@@ -12723,6 +12698,16 @@ fn start_console_capture(
     });
 }
 
+/// Telemetry log period scaled to the size of the swarm, since all units share
+/// the same radio bandwidth: up to 30 units 10 Hz, 31-70 units 5 Hz, above 1 Hz.
+fn telemetry_period_ms(unit_count: usize) -> u64 {
+    match unit_count {
+        0..=30 => 100,
+        31..=70 => 200,
+        _ => 1000,
+    }
+}
+
 async fn start_telemetry(
     index: usize,
     uri: String,
@@ -12731,6 +12716,7 @@ async fn start_telemetry(
     positioning_data: SharedPositioningData,
     positioning_source: Arc<Mutex<Option<usize>>>,
     goto_targets: SharedGotoTargets,
+    unit_count: usize,
 ) {
     let mut log_block = match cf.log.create_block().await {
         Ok(block) => block,
@@ -12766,7 +12752,9 @@ async fn start_telemetry(
     let has_loco_mode = log_block.add_variable("loco.mode").await.is_ok();
     eprintln!("Telemetry {}: has_supervisor_info={}, has_lh_active={}, has_ranging_state={}", uri, has_supervisor_info, has_lh_active, has_ranging_state);
 
-    let period = match crazyflie_lib::subsystems::log::LogPeriod::from_millis(100) {
+    let period_ms = telemetry_period_ms(unit_count);
+    eprintln!("Telemetry {}: logging at {} ms ({} units)", uri, period_ms, unit_count);
+    let period = match crazyflie_lib::subsystems::log::LogPeriod::from_millis(period_ms) {
         Ok(p) => p,
         Err(_) => return,
     };
@@ -12996,6 +12984,38 @@ mod settings_tests {
         assert_eq!(legacy.view.sort_column, -1);
 
         std::fs::remove_file(&path).ok();
+    }
+}
+
+#[cfg(test)]
+mod console_store_tests {
+    use super::*;
+
+    /// Console files written before lines carried a timestamp store a bare
+    /// string per line; those must still load (with an empty stamp) rather than
+    /// failing to parse and dropping the whole history.
+    #[test]
+    fn console_store_reads_legacy_and_stamped_lines() {
+        let yaml = "\
+'0011':
+- 'legacy line'
+- time: '12:34:56.789'
+  text: 'stamped line'
+";
+        let store: ConsoleStore = serde_yaml::from_str(yaml).expect("parse");
+        let lines = store.get("0011").expect("unit present");
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0].time, "");
+        assert_eq!(lines[0].text, "legacy line");
+        assert_eq!(lines[1].time, "12:34:56.789");
+        assert_eq!(lines[1].text, "stamped line");
+
+        // Everything is written back in the stamped form.
+        let round_tripped: ConsoleStore =
+            serde_yaml::from_str(&serde_yaml::to_string(&store).expect("serialize")).expect("reparse");
+        let lines = round_tripped.get("0011").expect("unit present");
+        assert_eq!(lines[0].text, "legacy line");
+        assert_eq!(lines[1].time, "12:34:56.789");
     }
 }
 

@@ -1,7 +1,7 @@
 import { VerticalBox, HorizontalBox, TabWidget, Palette, Button, LineEdit, ScrollView, ComboBox, CheckBox } from "std-widgets.slint";
 import { UnitsContent } from "units.slint";
 import { VisualizationContent, VizLabel } from "visualization.slint";
-import { UnitData, UnitState, JournalEntryData } from "unit-card.slint";
+import { UnitData, UnitState, JournalEntryData, ConsoleLineData } from "unit-card.slint";
 import { RadioTestContent, ChannelResult } from "radio-test.slint";
 import { LocoContent, LocoAnchorStatus } from "loco.slint";
 import { LhBaseStationData } from "lh-coverage.slint";
@@ -560,7 +560,7 @@ export component AppWindow inherits Window {
     in-out property <bool> sort-ascending <=> ViewSettings.sort-ascending;
     in-out property <image> viz-texture;
     in-out property <[JournalEntryData]> journal-entries;
-    in-out property <[string]> console-lines;
+    in-out property <[ConsoleLineData]> console-lines;
     in-out property <string> assert-text;
     in-out property <bool> assert-busy;
     out property <float> viz-width: viz-content.viewport-width;
@@ -752,15 +752,9 @@ export component AppWindow inherits Window {
     callback sniffer-refresh-ports();
     callback sniffer-connect();
     callback sniffer-disconnect();
-    in-out property <[string]> sniffer-ref-unit-names;
-    in-out property <int> sniffer-ref-unit-index;
-    in-out property <int> sniffer-ref-count;
-    in-out property <bool> sniffer-ref-reading;
     in-out property <string> sniffer-ref-status;
     callback sniffer-solve-survey();
     callback sniffer-save-survey();
-    callback sniffer-read-reference(int);
-    callback sniffer-clear-reference();
     callback sniffer-set-paused(bool);
     callback sniffer-set-recording(bool);
 
@@ -1102,6 +1096,7 @@ export component AppWindow inherits Window {
                     add-journal-entry-requested(row, text) => { add-journal-entry(row, text); }
                     open-console-requested(row) => { open-console(row); }
                     clear-console-requested(row) => { clear-console(row); }
+                    clear-all-console-requested() => { clear-all-console(); }
                     read-assert-requested(row) => { read-assert(row); }
                     upload-trajectory-requested(row) => { upload-trajectory(row); }
                     download-trajectory-requested(row) => { download-trajectory(row); }
@@ -1183,10 +1178,6 @@ export component AppWindow inherits Window {
                     matrix-rows: root.sniffer-matrix-rows;
                     survey-rows: root.sniffer-survey-rows;
                     survey-status: root.sniffer-survey-status;
-                    ref-unit-names: root.sniffer-ref-unit-names;
-                    ref-unit-index <=> root.sniffer-ref-unit-index;
-                    ref-count: root.sniffer-ref-count;
-                    ref-reading: root.sniffer-ref-reading;
                     ref-status: root.sniffer-ref-status;
                     feed-rows: root.sniffer-feed-rows;
                     paused <=> root.sniffer-paused;
@@ -1199,8 +1190,6 @@ export component AppWindow inherits Window {
                     disconnect() => { root.sniffer-disconnect(); }
                     solve-survey() => { root.sniffer-solve-survey(); }
                     save-survey() => { root.sniffer-save-survey(); }
-                    read-reference(i) => { root.sniffer-read-reference(i); }
-                    clear-reference() => { root.sniffer-clear-reference(); }
                     set-paused(p) => { root.sniffer-set-paused(p); }
                     set-recording(p) => { root.sniffer-set-recording(p); }
                 }
@@ -1223,6 +1212,7 @@ export component AppWindow inherits Window {
                     // Shared unit sidebar (same component as the Units tab)
                     sorted-units: root.sorted-units;
                     journal-entries: root.journal-entries;
+                    console-lines: root.console-lines;
                     assert-text: root.assert-text;
                     assert-busy: root.assert-busy;
                     joystick-names: root.joystick-names;
@@ -1236,6 +1226,7 @@ export component AppWindow inherits Window {
                     add-journal-entry-requested(row, text) => { add-journal-entry(row, text); }
                     open-console-requested(row) => { open-console(row); }
                     clear-console-requested(row) => { clear-console(row); }
+                    clear-all-console-requested() => { clear-all-console(); }
                     read-assert-requested(row) => { read-assert(row); }
                     upload-trajectory-requested(row) => { upload-trajectory(row); }
                     download-trajectory-requested(row) => { download-trajectory(row); }

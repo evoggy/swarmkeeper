@@ -1,5 +1,5 @@
 import { Button, Palette, ScrollView, VerticalBox, HorizontalBox, LineEdit, CheckBox, ComboBox } from "std-widgets.slint";
-import { UnitData, UnitState, JournalEntryData } from "unit-card.slint";
+import { UnitData, UnitState, JournalEntryData, ConsoleLineData } from "unit-card.slint";
 import { SectionHeader } from "widgets.slint";
 import { PlotPanel, PlotBridge } from "plot.slint";
 import { ViewSettings } from "view-settings.slint";
@@ -1097,7 +1097,7 @@ export component UnitActionPopups inherits Rectangle {
     in property <int> selected-row: -1;
     in property <[UnitData]> sorted-units;
     in property <[JournalEntryData]> journal-entries;
-    in property <[string]> console-lines;
+    in property <[ConsoleLineData]> console-lines;
     in property <string> assert-text;
     in property <bool> assert-busy;
     in property <[string]> joystick-names;
@@ -1122,6 +1122,9 @@ export component UnitActionPopups inherits Rectangle {
     callback add-journal-entry-requested(/* row index */ int, /* text */ string);
     callback delete-journal-entry-requested(/* row index */ int, /* entry index */ int);
     callback clear-console-requested(/* row index */ int);
+    // Drop the saved console history of every unit in the swarm, not just the
+    // selected one.
+    callback clear-all-console-requested();
     callback read-assert-requested(/* row index */ int);
 
     // Manual control popup overlay
@@ -1523,7 +1526,7 @@ export component UnitActionPopups inherits Rectangle {
         }
 
         Rectangle {
-            width: min(640px, root.width - 40px);
+            width: min(800px, root.width - 40px);
             max-height: root.height - 40px;
             background: Palette.background;
             border-radius: 8px;
@@ -1556,11 +1559,25 @@ export component UnitActionPopups inherits Rectangle {
                             horizontal-stretch: 1;
                         }
 
+                        CheckBox {
+                            text: "Timestamps";
+                            height: 28px;
+                            checked <=> ViewSettings.console-show-timestamps;
+                        }
+
                         Button {
                             text: "Clear";
                             height: 28px;
                             enabled: console-lines.length > 0;
                             clicked => { clear-console-requested(selected-row); }
+                        }
+
+                        Button {
+                            // Wipes the saved console history of the whole
+                            // swarm, not just the unit shown here.
+                            text: "Clear All Units";
+                            height: 28px;
+                            clicked => { clear-all-console-requested(); }
                         }
 
                         Button {
@@ -1592,11 +1609,24 @@ export component UnitActionPopups inherits Rectangle {
                             horizontal-alignment: center;
                         }
 
-                        for line in console-lines: Text {
-                            text: line;
-                            font-size: 12px;
-                            font-family: "monospace";
-                            wrap: no-wrap;
+                        for line in console-lines: HorizontalLayout {
+                            alignment: start;
+                            spacing: 8px;
+
+                            if ViewSettings.console-show-timestamps: Text {
+                                text: line.time != "" ? line.time : "--:--:--.---";
+                                font-size: 12px;
+                                font-family: "monospace";
+                                color: Palette.foreground.transparentize(0.5);
+                                wrap: no-wrap;
+                            }
+
+                            Text {
+                                text: line.text;
+                                font-size: 12px;
+                                font-family: "monospace";
+                                wrap: no-wrap;
+                            }
                         }
                     }
                 }
@@ -1729,7 +1759,7 @@ export component UnitsContent inherits Rectangle {
     in property <int> sort-column: -1;
     in property <bool> sort-ascending: true;
     in property <[JournalEntryData]> journal-entries;
-    in property <[string]> console-lines;
+    in property <[ConsoleLineData]> console-lines;
     in property <string> assert-text;
     in property <bool> assert-busy;
 
@@ -1738,6 +1768,9 @@ export component UnitsContent inherits Rectangle {
     callback add-journal-entry-requested(/* row index */ int, /* text */ string);
     callback open-console-requested(/* row index */ int);
     callback clear-console-requested(/* row index */ int);
+    // Drop the saved console history of every unit in the swarm, not just the
+    // selected one.
+    callback clear-all-console-requested();
     callback read-assert-requested(/* row index */ int);
     callback upload-trajectory-requested(/* row index */ int);
     callback download-trajectory-requested(/* row index */ int);
@@ -2030,6 +2063,7 @@ export component UnitsContent inherits Rectangle {
         add-journal-entry-requested(row, text) => { root.add-journal-entry-requested(row, text); }
         delete-journal-entry-requested(row, entry) => { root.delete-journal-entry-requested(row, entry); }
         clear-console-requested(row) => { root.clear-console-requested(row); }
+        clear-all-console-requested() => { root.clear-all-console-requested(); }
         read-assert-requested(row) => { root.read-assert-requested(row); }
     }
 }

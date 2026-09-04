@@ -7,6 +7,14 @@ export struct JournalEntryData {
     text: string,
 }
 
+// One captured firmware console line. `time` is the local wall-clock time the
+// line was received ("HH:MM:SS.mmm"), empty for lines captured before console
+// timestamps existed.
+export struct ConsoleLineData {
+    time: string,
+    text: string,
+}
+
 export struct UnitData {
     name: string,
     uri: string,

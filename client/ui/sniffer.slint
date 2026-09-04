@@ -78,15 +78,9 @@ export component SnifferContent inherits Rectangle {
     callback solve-survey();
     callback save-survey();
 
-    // Reference geometry: the configured anchor positions read back from a
-    // Crazyflie, which the survey is both aligned to and compared against.
-    in property <[string]> ref-unit-names;
-    in-out property <int> ref-unit-index;
-    in property <int> ref-count;      // anchors in the reference set
-    in property <bool> ref-reading;   // a read is in flight
+    // Reference geometry: the positions the nodes broadcast about themselves,
+    // which the survey is both aligned to and compared against.
     in property <string> ref-status;
-    callback read-reference(int);
-    callback clear-reference();
 
     // Packet feed
     in property <[SnifferFeedRow]> feed-rows;
@@ -269,28 +263,15 @@ export component SnifferContent inherits Rectangle {
 
             // ---- Auto-survey ----
             Text { text: "Auto-survey"; font-weight: 700; font-size: 15px; }
+            // The nodes broadcast their own stored positions in every TDoA3
+            // packet, so the reference is always already in hand — say so,
+            // rather than leaving the operator wondering where it comes from.
             HorizontalBox {
                 alignment: start;
-                spacing: 12px;
+                spacing: 8px;
                 Text {
-                    text: "Reference geometry:";
+                    text: "Compared against:";
                     vertical-alignment: center;
-                }
-                ComboBox {
-                    width: 180px;
-                    model: root.ref-unit-names;
-                    current-index <=> root.ref-unit-index;
-                    enabled: !root.ref-reading;
-                }
-                Button {
-                    text: "Read from Crazyflie";
-                    enabled: !root.ref-reading;
-                    clicked => { root.read-reference(root.ref-unit-index); }
-                }
-                Button {
-                    text: "Clear";
-                    enabled: root.ref-count > 0 && !root.ref-reading;
-                    clicked => { root.clear-reference(); }
                 }
                 Text {
                     text: root.ref-status;

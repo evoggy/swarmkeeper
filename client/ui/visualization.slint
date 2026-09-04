@@ -1,6 +1,6 @@
 import { Button, CheckBox, ComboBox, Palette } from "std-widgets.slint";
 import { UnitSidebar, UnitActionPopups } from "units.slint";
-import { UnitData, JournalEntryData } from "unit-card.slint";
+import { UnitData, JournalEntryData, ConsoleLineData } from "unit-card.slint";
 import { PlotPanel, PlotBridge } from "plot.slint";
 import { ViewSettings } from "view-settings.slint";
 
@@ -70,7 +70,7 @@ export component VisualizationContent inherits Rectangle {
     in property <[UnitData]> sorted-units;
     in-out property <int> selected-unit <=> ViewSettings.selected-unit;
     in property <[JournalEntryData]> journal-entries;
-    in property <[string]> console-lines;
+    in property <[ConsoleLineData]> console-lines;
     in property <string> assert-text;
     in property <bool> assert-busy;
     in property <[string]> joystick-names;
@@ -89,6 +89,9 @@ export component VisualizationContent inherits Rectangle {
     callback add-journal-entry-requested(/* row index */ int, /* text */ string);
     callback open-console-requested(/* row index */ int);
     callback clear-console-requested(/* row index */ int);
+    // Drop the saved console history of every unit in the swarm, not just the
+    // selected one.
+    callback clear-all-console-requested();
     callback read-assert-requested(/* row index */ int);
     callback upload-trajectory-requested(/* row index */ int);
     callback download-trajectory-requested(/* row index */ int);
@@ -554,6 +557,7 @@ export component VisualizationContent inherits Rectangle {
         add-journal-entry-requested(row, text) => { root.add-journal-entry-requested(row, text); }
         delete-journal-entry-requested(row, entry) => { root.delete-journal-entry-requested(row, entry); }
         clear-console-requested(row) => { root.clear-console-requested(row); }
+        clear-all-console-requested() => { root.clear-all-console-requested(); }
         read-assert-requested(row) => { root.read-assert-requested(row); }
     }
 }
