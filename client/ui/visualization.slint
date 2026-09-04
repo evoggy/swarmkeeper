@@ -395,6 +395,7 @@ export component VisualizationContent inherits Rectangle {
             random-goto-clicked => { random-goto-requested(selected-unit); }
             go-home-clicked => { go-home-requested(selected-unit); }
             land-clicked => { land-requested(selected-unit); }
+            arm-clicked(arm) => { arm-requested(selected-unit, arm); }
             identify-clicked => { identify-requested(selected-unit); }
             manual-control-clicked => { open-manual-control-requested(selected-unit); manual-control-open = true; }
             connect-clicked => { connect-unit-requested(selected-unit); }

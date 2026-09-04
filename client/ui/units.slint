@@ -360,6 +360,7 @@ export component UnitSidebar inherits Rectangle {
     callback random-goto-clicked();
     callback go-home-clicked();
     callback land-clicked();
+    callback arm-clicked(/* arm */ bool);
     callback identify-clicked();
     callback manual-control-clicked();
     callback connect-clicked();
@@ -514,6 +515,27 @@ export component UnitSidebar inherits Rectangle {
                     padding-right: 16px;
                     padding-bottom: 8px;
                     spacing: 8px;
+
+                    // Arm/disarm this unit only (the toolbar buttons act on the
+                    // whole swarm). State mirrors the supervisor's armed bit.
+                    HorizontalLayout {
+                        spacing: 8px;
+
+                        Text {
+                            text: unit.armed ? "Armed" : "Disarmed";
+                            font-size: 12px;
+                            color: unit.armed ? limegreen : Palette.foreground.transparentize(0.4);
+                            vertical-alignment: center;
+                            horizontal-stretch: 1;
+                        }
+
+                        Button {
+                            text: unit.armed ? "Disarm" : "Arm";
+                            primary: !unit.armed;
+                            enabled: unit.state != UnitState.disconnected && unit.state != UnitState.error;
+                            clicked => { arm-clicked(!unit.armed); }
+                        }
+                    }
 
                     // Takeoff fields
                     HorizontalLayout {
@@ -1825,6 +1847,7 @@ export component UnitsContent inherits Rectangle {
             random-goto-clicked => { random-goto-requested(selected-row); }
             go-home-clicked => { go-home-requested(selected-row); }
             land-clicked => { land-requested(selected-row); }
+            arm-clicked(arm) => { arm-requested(selected-row, arm); }
             identify-clicked => { identify-requested(selected-row); }
             manual-control-clicked => {
                 open-manual-control-requested(selected-row);

@@ -329,6 +329,7 @@ fn apply_swarm_config(ui: &AppWindow, config: &SwarmConfig) {
             pm_state: "".into(),
             supervisor_info: 0,
             supervisor_state: "".into(),
+            armed: false,
             journal_entry_count: 0,
             console_line_count: 0,
             platform_type: "".into(),
@@ -12300,6 +12301,7 @@ async fn run_radio_channel_test(
                     u.pm_state = "".into();
                     u.supervisor_info = 0;
                     u.supervisor_state = "".into();
+                    u.armed = false;
                     u.journal_entry_count = 0;
                     u.platform_type = "".into();
                     u.firmware_version = "".into();
@@ -12713,6 +12715,7 @@ async fn start_telemetry(
             u.pm_state = pm_state_str.into();
             u.supervisor_info = supervisor_info as i32;
             u.supervisor_state = supervisor_state_str.into();
+            u.armed = supervisor_info & 0x0002 != 0;
             u.state = unit_state;
         });
     }
@@ -12740,6 +12743,7 @@ async fn start_telemetry(
         u.pm_state = "".into();
         u.supervisor_info = 0;
         u.supervisor_state = "".into();
+        u.armed = false;
         u.journal_entry_count = 0;
         u.platform_type = "".into();
         u.firmware_version = "".into();
