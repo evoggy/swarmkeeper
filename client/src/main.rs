@@ -2004,8 +2004,27 @@ fn save_console(store: &ConsoleStore) {
     }
 }
 
+/// Swarms, scenes, plans, log configs, journals and recordings are all kept
+/// relative to the working directory. Run from a source checkout (`cargo run`
+/// in client/) that is the checkout itself; started any other way (installed,
+/// from a desktop menu) they go in ~/Documents/Swarmkeeper instead.
+fn enter_data_dir() {
+    if std::path::Path::new("swarms").is_dir() {
+        return;
+    }
+    let Some(base) = dirs_next::document_dir().or_else(dirs_next::home_dir) else {
+        return;
+    };
+    let dir = base.join("Swarmkeeper");
+    if let Err(e) = std::fs::create_dir_all(&dir).and_then(|_| std::env::set_current_dir(&dir)) {
+        eprintln!("Could not use {} as data directory: {e}", dir.display());
+    }
+}
+
 #[tokio::main]
 async fn main() {
+    enter_data_dir();
+
     slint::BackendSelector::new()
         .require_opengl_es()
         .select()

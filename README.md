@@ -32,6 +32,21 @@ Rust desktop application for managing and operating Crazyflie swarms. Built with
 - **TDoA3 coverage** -- place Loco anchors and compute GDOP / positioning error metrics (GDOP, HDOP, VDOP, per-axis error, sensitivity) with color-mapped voxel visualization
 - **Planning** -- combined scene editor for designing a positioning system. Place Lighthouse base stations, TDoA3 anchors, and opaque geometric obstacles (boxes, cylinders with per-object color). Computes combined LH + TDoA3 coverage with obstacle occlusion. Import scenes from the individual LH/TDoA3 tabs. Save/load planning scenes as YAML
 
+**Install (Linux, x86_64 and arm64):**
+
+```bash
+curl -fsSL https://evoggy.github.io/packages/apt/evoggy.gpg.key \
+  | sudo gpg --dearmor -o /usr/share/keyrings/evoggy-archive-keyring.gpg
+echo "deb [arch=amd64,arm64 signed-by=/usr/share/keyrings/evoggy-archive-keyring.gpg] https://evoggy.github.io/packages/apt stable main" \
+  | sudo tee /etc/apt/sources.list.d/evoggy.list
+sudo apt update && sudo apt install swarmkeeper
+```
+
+The package adds Swarmkeeper to the application menu and installs the udev
+rules for the Crazyradio. Started that way, swarms, scenes, plans, log configs,
+journals and recordings are kept in `~/Documents/Swarmkeeper`; run from
+`client/` in a checkout, they stay in the checkout as before.
+
 **System Dependencies (Linux):**
 
 ```bash

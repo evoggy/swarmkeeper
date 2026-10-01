@@ -6,6 +6,30 @@ license = "MIT OR Apache-2.0"
 description = "Crazyflie swarm management application"
 repository = "https://github.com/evoggy/swarmkeeper"
 
+[package.metadata.deb]
+maintainer = "Marcus Eliasson <marcus@bitcraze.io>"
+copyright = "2026, Marcus Eliasson"
+extended-description = """\
+Desktop application for setting up, configuring and debugging Crazyflie
+swarms: unit management, radio tests, 3D visualization and Lighthouse/Loco
+coverage planning."""
+# Slint loads the windowing and GL libraries at runtime, so $auto misses them.
+depends = "$auto, libegl1, libgl1, libwayland-client0, libwayland-egl1, libx11-6, libx11-xcb1, libxcursor1, libxi6, libxkbcommon0, libxkbcommon-x11-0"
+recommends = "fonts-dejavu-core"
+section = "utils"
+priority = "optional"
+maintainer-scripts = "debian/"
+assets = [
+    ["target/release/swarmkeeper", "usr/bin/", "755"],
+    ["../README.md", "usr/share/doc/swarmkeeper/", "644"],
+    ["packaging/swarmkeeper.desktop", "usr/share/applications/", "644"],
+    ["packaging/swarmkeeper.svg", "usr/share/icons/hicolor/scalable/apps/", "644"],
+    # USB access to the Crazyradio and Crazyflie for logged-in users.
+    ["packaging/70-swarmkeeper.rules", "usr/lib/udev/rules.d/", "644"],
+    # Signing key for the evoggy APT repo; postinst installs it as the keyring.
+    ["debian/evoggy-archive-keyring.gpg", "usr/share/swarmkeeper/", "644"],
+]
+
 [dependencies]
 slint = "1.14.1"
 crazyflie-lib = "0.8.0"

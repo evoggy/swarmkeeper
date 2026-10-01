@@ -1,0 +1,24 @@
+#!/bin/sh
+set -e
+
+case "$1" in
+    configure)
+        # Add the evoggy APT repository so `apt upgrade` picks up new
+        # releases. Left alone if it is already set up.
+        if ! [ -f /usr/share/keyrings/evoggy-archive-keyring.gpg ]; then
+            cp /usr/share/swarmkeeper/evoggy-archive-keyring.gpg /usr/share/keyrings/
+        fi
+        if ! [ -f /etc/apt/sources.list.d/evoggy.list ]; then
+            echo "deb [arch=amd64,arm64 signed-by=/usr/share/keyrings/evoggy-archive-keyring.gpg] https://evoggy.github.io/packages/apt stable main" \
+                > /etc/apt/sources.list.d/evoggy.list
+        fi
+
+        # Apply the udev rules to an already-connected Crazyradio.
+        if command -v udevadm >/dev/null 2>&1; then
+            udevadm control --reload-rules || true
+            udevadm trigger --subsystem-match=usb || true
+        fi
+        ;;
+esac
+
+exit 0

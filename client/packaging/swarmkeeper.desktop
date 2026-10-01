@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Swarmkeeper
+GenericName=Crazyflie swarm manager
+Comment=Set up, configure and debug Crazyflie swarms
+Exec=swarmkeeper
+Icon=swarmkeeper
+Terminal=false
+Categories=Development;Engineering;
+Keywords=Crazyflie;drone;swarm;Lighthouse;Loco;
