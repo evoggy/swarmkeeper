@@ -1,6 +1,5 @@
 # Rust
 target/
-Cargo.lock
 
 # Crazyflie firmware build artifacts
 app/**/build/
