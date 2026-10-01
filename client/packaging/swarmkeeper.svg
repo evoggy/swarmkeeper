@@ -1,12 +1,42 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256">
-  <!-- Placeholder icon -->
-  <rect width="256" height="256" rx="56" fill="#1f4e79"/>
-  <g fill="#ffffff">
-    <circle cx="128" cy="76" r="18"/><circle cx="76" cy="140" r="18"/>
-    <circle cx="180" cy="140" r="18"/><circle cx="128" cy="196" r="18"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <!-- Rounded Tile Background -->
+  <rect x="8" y="8" width="240" height="240" rx="52" fill="#0d2137" />
+
+  <!-- Outer Network Constellation Lines -->
+  <path d="M 128 54 L 198 128 L 128 202 L 58 128 Z" stroke="#38bdf8" stroke-width="6" fill="none" stroke-linejoin="round" />
+  <path d="M 128 54 L 128 202 M 58 128 L 198 128" stroke="#38bdf8" stroke-width="4" fill="none" opacity="0.4" />
+
+  <!-- Leader Beacon Pulse Ring -->
+  <circle cx="128" cy="54" r="28" fill="none" stroke="#f59e0b" stroke-width="5" stroke-dasharray="8 6" />
+
+  <!-- Top Leader Drone (Amber - Scaled Larger) -->
+  <g transform="translate(128, 54)">
+    <path d="M -13 -13 L 13 13 M -13 13 L 13 -13" stroke="#f59e0b" stroke-width="7" stroke-linecap="round" />
+    <circle cx="-13" cy="-13" r="4" fill="#f59e0b" />
+    <circle cx="13" cy="-13" r="4" fill="#f59e0b" />
+    <circle cx="-13" cy="13" r="4" fill="#f59e0b" />
+    <circle cx="13" cy="13" r="4" fill="#f59e0b" />
   </g>
-  <g stroke="#ffffff" stroke-width="6" opacity="0.5">
-    <line x1="128" y1="76" x2="76" y2="140"/><line x1="128" y1="76" x2="180" y2="140"/>
-    <line x1="76" y1="140" x2="128" y2="196"/><line x1="180" y1="140" x2="128" y2="196"/>
+
+  <!-- Wingmen Drones (White) -->
+  <g transform="translate(58, 128)">
+    <path d="M -9 -9 L 9 9 M -9 9 L 9 -9" stroke="#ffffff" stroke-width="5" stroke-linecap="round" />
+    <circle cx="-9" cy="-9" r="2.5" fill="#ffffff" /><circle cx="9" cy="-9" r="2.5" fill="#ffffff" />
+    <circle cx="-9" cy="9" r="2.5" fill="#ffffff" /><circle cx="9" cy="9" r="2.5" fill="#ffffff" />
+  </g>
+  <g transform="translate(198, 128)">
+    <path d="M -9 -9 L 9 9 M -9 9 L 9 -9" stroke="#ffffff" stroke-width="5" stroke-linecap="round" />
+    <circle cx="-9" cy="-9" r="2.5" fill="#ffffff" /><circle cx="9" cy="-9" r="2.5" fill="#ffffff" />
+    <circle cx="-9" cy="9" r="2.5" fill="#ffffff" /><circle cx="9" cy="9" r="2.5" fill="#ffffff" />
+  </g>
+  <g transform="translate(128, 128)">
+    <path d="M -9 -9 L 9 9 M -9 9 L 9 -9" stroke="#ffffff" stroke-width="5" stroke-linecap="round" />
+    <circle cx="-9" cy="-9" r="2.5" fill="#ffffff" /><circle cx="9" cy="-9" r="2.5" fill="#ffffff" />
+    <circle cx="-9" cy="9" r="2.5" fill="#ffffff" /><circle cx="9" cy="9" r="2.5" fill="#ffffff" />
+  </g>
+  <g transform="translate(128, 202)">
+    <path d="M -9 -9 L 9 9 M -9 9 L 9 -9" stroke="#ffffff" stroke-width="5" stroke-linecap="round" />
+    <circle cx="-9" cy="-9" r="2.5" fill="#ffffff" /><circle cx="9" cy="-9" r="2.5" fill="#ffffff" />
+    <circle cx="-9" cy="9" r="2.5" fill="#ffffff" /><circle cx="9" cy="9" r="2.5" fill="#ffffff" />
   </g>
 </svg>
