@@ -796,6 +796,17 @@ impl SnifferState {
     }
 }
 
+/// Anchors that must have broadcast a position before the survey will align to
+/// them — three points fix a frame, fewer leave it under-determined.
+const MIN_GAUGE_REFS: usize = 3;
+
+/// How much worse, in median link error [m], the configuration-seeded fit may
+/// be and still be preferred over the MDS-seeded one. Two fits that found the
+/// same geometry differ by a millimetre or two across real captures, so this is
+/// wide enough to call those a tie and far too narrow to let a fit that
+/// genuinely explains the ranges worse win on sentiment.
+const FIT_TIE_M: f64 = 0.02;
+
 /// Weight below which a link counts as rejected.
 const REJECTED_WEIGHT: f64 = 0.05;
 
@@ -956,69 +967,53 @@ pub fn solve_geometry(
         }
     }
 
-    // Robust fit: alternate SMACOF with a Tukey biweight reweighting of the
-    // links, tightening the cutoff on each pass.
-    let mut w = w0.clone();
-    x = smacof(&d, &w, x);
-    for &cutoff in &IRLS_CUTOFFS {
-        let mut residuals: Vec<f64> = Vec::with_capacity(pairs_total);
-        let mut r = DMatrix::<f64>::zeros(n, n);
-        for i in 0..n {
-            for j in 0..n {
-                if i == j || w0[(i, j)] == 0.0 {
-                    continue;
-                }
-                // Positive residual: measured longer than modelled, i.e. the
-                // signature of a reflected (non-line-of-sight) path.
-                r[(i, j)] = d[(i, j)] - row_dist(&x, i, j);
-                if j > i {
-                    residuals.push(r[(i, j)]);
-                }
-            }
-        }
-        let scale = mad_scale(&residuals).max(SCALE_FLOOR_M);
+    // Two candidate solves, each a full robust fit from a different seed.
+    //
+    // The MDS embedding is the only seed available when nothing is known about
+    // the arena, but on a shallow installation — anchors on two levels a few
+    // metres apart, spread over tens of metres — it regularly settles into a
+    // folded local minimum: an anchor mirrored through the plane of its
+    // neighbours matches the links that survive reweighting to a centimetre
+    // while sitting metres from where it actually is. Stress majorisation is a
+    // local optimiser and cannot climb back out of that. So when the anchors
+    // broadcast a geometry, fit a second time starting from it: that seed is
+    // already inside the basin the operator is asking about, and a genuine
+    // placement error still pulls the anchor out of it, since one anchor's
+    // ranges to a correctly placed rest of the arena pin it down on their own.
+    //
+    // Either way the result is gauge-fixed against the anchors that reported
+    // their own position. Only anchors that survived the link gate are
+    // candidates, so one sparsely connected anchor can't drag the whole frame
+    // round.
+    let (x_mds, w_mds) = robust_fit(&d, &w0, x);
+    let mut aligned = gauge_fix(&x_mds, &kept, known);
+    let mut w = w_mds;
 
-        for i in 0..n {
-            for j in 0..n {
-                if i == j || w0[(i, j)] == 0.0 {
-                    continue;
-                }
-                // One-sided: over-long links are cut at `cutoff` scales, short
-                // ones only at 1.5× that, since only reflections inflate a range.
-                let u = if r[(i, j)] > 0.0 {
-                    r[(i, j)] / (cutoff * scale)
-                } else {
-                    -r[(i, j)] / (cutoff * scale * 1.5)
-                };
-                w[(i, j)] = if u < 1.0 {
-                    let t = 1.0 - u * u;
-                    t * t
-                } else {
-                    0.0
-                };
-            }
-        }
-        // Never orphan an anchor: if every one of its links was rejected the
-        // solve has no opinion on where it goes at all, so re-attach them all at
-        // a low weight and let the next pass decide.
-        for i in 0..n {
-            let deg: f64 = (0..n).filter(|&j| j != i).map(|j| w[(i, j)]).sum();
-            if deg <= REJECTED_WEIGHT {
-                for j in 0..n {
-                    if i != j && w0[(i, j)] > 0.0 {
-                        w[(i, j)] = 0.1;
-                        w[(j, i)] = 0.1;
-                    }
+    if kept.iter().filter(|id| known.contains_key(id)).count() >= MIN_GAUGE_REFS {
+        // Seed from the broadcast positions, falling back to the aligned MDS
+        // fit for any anchor that broadcast none.
+        let mut seed = aligned.clone();
+        for (i, id) in kept.iter().enumerate() {
+            if let Some(p) = known.get(id) {
+                for k in 0..3 {
+                    seed[(i, k)] = p[k] as f64;
                 }
             }
         }
-        x = smacof(&d, &w, x);
+        let (x_cfg, w_cfg) = robust_fit(&d, &w0, seed);
+        let aligned_cfg = gauge_fix(&x_cfg, &kept, known);
+        // Keep whichever explains the ranges better, with a near-tie going to
+        // the configuration-seeded fit: when two geometries account for the
+        // measurements equally well, the survey should report the one that
+        // agrees with how the arena is configured rather than an equally valid
+        // fold of it, so that the deltas it prints mean "this anchor moved".
+        let score_mds = median_abs_residual(&aligned, &d, &w0);
+        let score_cfg = median_abs_residual(&aligned_cfg, &d, &w0);
+        if score_cfg <= score_mds + FIT_TIE_M {
+            aligned = aligned_cfg;
+            w = w_cfg;
+        }
     }
-
-    // Gauge fixing against the anchors that reported their own position. Only
-    // the anchors that survived the link gate are candidates, so one sparsely
-    // connected anchor can't drag the whole frame round.
-    let aligned = gauge_fix(&x, &kept, known);
 
     // Per-anchor residual and link accounting, over the links the fit kept.
     let mut anchors = Vec::with_capacity(n);
@@ -1098,6 +1093,99 @@ pub fn solve_geometry(
         ref_mean,
         ref_max,
     })
+}
+
+/// One full robust fit: SMACOF from `x`, then the IRLS reweighting schedule,
+/// re-fitting between passes. Returns the embedding and the final link weights.
+///
+/// Split out because the survey runs it from more than one seed — the fit is a
+/// local optimiser, and which minimum it reaches is decided entirely by where it
+/// starts.
+fn robust_fit(
+    d: &DMatrix<f64>,
+    w0: &DMatrix<f64>,
+    mut x: DMatrix<f64>,
+) -> (DMatrix<f64>, DMatrix<f64>) {
+    let n = d.nrows();
+    let mut w = w0.clone();
+    x = smacof(d, &w, x);
+    for &cutoff in &IRLS_CUTOFFS {
+        let mut residuals: Vec<f64> = Vec::new();
+        let mut r = DMatrix::<f64>::zeros(n, n);
+        for i in 0..n {
+            for j in 0..n {
+                if i == j || w0[(i, j)] == 0.0 {
+                    continue;
+                }
+                // Positive residual: measured longer than modelled, i.e. the
+                // signature of a reflected (non-line-of-sight) path.
+                r[(i, j)] = d[(i, j)] - row_dist(&x, i, j);
+                if j > i {
+                    residuals.push(r[(i, j)]);
+                }
+            }
+        }
+        let scale = mad_scale(&residuals).max(SCALE_FLOOR_M);
+
+        for i in 0..n {
+            for j in 0..n {
+                if i == j || w0[(i, j)] == 0.0 {
+                    continue;
+                }
+                // One-sided: over-long links are cut at `cutoff` scales, short
+                // ones only at 1.5× that, since only reflections inflate a range.
+                let u = if r[(i, j)] > 0.0 {
+                    r[(i, j)] / (cutoff * scale)
+                } else {
+                    -r[(i, j)] / (cutoff * scale * 1.5)
+                };
+                w[(i, j)] = if u < 1.0 {
+                    let t = 1.0 - u * u;
+                    t * t
+                } else {
+                    0.0
+                };
+            }
+        }
+        // Never orphan an anchor: if every one of its links was rejected the
+        // solve has no opinion on where it goes at all, so re-attach them all at
+        // a low weight and let the next pass decide.
+        for i in 0..n {
+            let deg: f64 = (0..n).filter(|&j| j != i).map(|j| w[(i, j)]).sum();
+            if deg <= REJECTED_WEIGHT {
+                for j in 0..n {
+                    if i != j && w0[(i, j)] > 0.0 {
+                        w[(i, j)] = 0.1;
+                        w[(j, i)] = 0.1;
+                    }
+                }
+            }
+        }
+        x = smacof(d, &w, x);
+    }
+    (x, w)
+}
+
+/// Median |measured − modelled| [m] over every measured pair, whatever the fit
+/// made of it. Scores two candidate fits on the same footing: unlike the
+/// weighted stress each one minimised, it doesn't depend on which links that
+/// particular fit chose to reject, and the median keeps the quarter or so of
+/// links that are reflections from deciding the comparison.
+fn median_abs_residual(x: &DMatrix<f64>, d: &DMatrix<f64>, w0: &DMatrix<f64>) -> f64 {
+    let n = d.nrows();
+    let mut e: Vec<f64> = Vec::new();
+    for i in 0..n {
+        for j in (i + 1)..n {
+            if w0[(i, j)] > 0.0 {
+                e.push((d[(i, j)] - row_dist(x, i, j)).abs());
+            }
+        }
+    }
+    if e.is_empty() {
+        return 0.0;
+    }
+    e.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    e[e.len() / 2]
 }
 
 /// Median absolute deviation about the median, scaled to a normal-consistent
@@ -1193,7 +1281,7 @@ fn gauge_fix(x: &DMatrix<f64>, ids: &[u8], known: &HashMap<u8, [f32; 3]>) -> DMa
         })
         .collect();
 
-    if refs.len() >= 3 {
+    if refs.len() >= MIN_GAUGE_REFS {
         if let Some(t) = kabsch(x, &refs) {
             return apply_transform(x, &t);
         }
@@ -1512,7 +1600,7 @@ mod tests {
             (3u8, [0.0, 4.0, 0.0]),
             (4u8, [0.0, 0.0, 3.0]),
         ];
-        let matrix = matrix_from(&pts, &[]);
+        let matrix = matrix_from(&pts, &[], &[]);
         let known: HashMap<u8, [f32; 3]> = pts.iter().cloned().collect();
         let sol = solve_geometry(&[1, 2, 3, 4], &matrix, &known).unwrap();
         assert_eq!(sol.anchors.len(), 4);
@@ -1528,11 +1616,24 @@ mod tests {
 
     /// Build a matrix from exact geometry, applying `bias` metres to the named
     /// pairs — the way a reflected (non-line-of-sight) path lengthens a reading.
-    fn matrix_from(pts: &[(u8, [f32; 3])], bias: &[(u8, u8, f64)]) -> DistanceMatrix {
+    /// Synthesise a distance matrix from ground-truth positions. `bias` adds a
+    /// fixed over-range to a pair (a reflection); `missing` pairs are left
+    /// unmeasured, as out-of-earshot anchors are in a long room.
+    fn matrix_from(
+        pts: &[(u8, [f32; 3])],
+        bias: &[(u8, u8, f64)],
+        missing: &[(u8, u8)],
+    ) -> DistanceMatrix {
         let mut matrix = DistanceMatrix::default();
         for (a, pa) in pts {
             for (b, pb) in pts {
                 if a == b {
+                    continue;
+                }
+                if missing
+                    .iter()
+                    .any(|&(x, y)| (x, y) == (*a, *b) || (y, x) == (*a, *b))
+                {
                     continue;
                 }
                 let d = ((pa[0] - pb[0]).powi(2) + (pa[1] - pb[1]).powi(2) + (pa[2] - pb[2]).powi(2))
@@ -1581,7 +1682,7 @@ mod tests {
 
         // Anchors 1 and 7 are diagonally opposite; pretend the direct path is
         // blocked and the radio locks onto a reflection 3 m longer.
-        let matrix = matrix_from(&pts, &[(1, 7, 3.0)]);
+        let matrix = matrix_from(&pts, &[(1, 7, 3.0)], &[]);
         let sol = solve_geometry(&ids, &matrix, &known).unwrap();
 
         assert_eq!(sol.pairs_rejected, 1, "expected exactly the bad link dropped");
@@ -1608,7 +1709,7 @@ mod tests {
         let ids: Vec<u8> = pts.iter().map(|(id, _)| *id).collect();
         let known: HashMap<u8, [f32; 3]> = pts.iter().cloned().collect();
 
-        let mut matrix = matrix_from(&pts, &[]);
+        let mut matrix = matrix_from(&pts, &[], &[]);
         // Erase A9's links except to 1, 2 and 3 by rebuilding without them.
         matrix.directed.retain(|&(a, b), _| {
             (a != 9 && b != 9) || matches!(a.min(b), 1..=3) && a.max(b) == 9
@@ -1624,7 +1725,7 @@ mod tests {
     fn reports_offset_from_the_broadcast_position() {
         let pts = box_anchors();
         let ids: Vec<u8> = pts.iter().map(|(id, _)| *id).collect();
-        let matrix = matrix_from(&pts, &[]);
+        let matrix = matrix_from(&pts, &[], &[]);
 
         // A6 broadcasts a position a metre above where the radios place it — an
         // anchor that was physically moved without its stored geometry being
@@ -1654,7 +1755,7 @@ mod tests {
     fn compares_against_the_nodes_own_broadcast_by_default() {
         let pts = box_anchors();
         let mut state = SnifferState::default();
-        state.matrix = matrix_from(&pts, &[]);
+        state.matrix = matrix_from(&pts, &[], &[]);
         // Every TDoA3 packet carries the sending node's stored position, so the
         // sniffer alone already has the configured geometry to compare against —
         // no other device is involved.
@@ -1699,6 +1800,75 @@ mod tests {
         assert!((d - 5.0).abs() < 0.01, "median dragged to {d}");
         // The impossible reading was dropped outright, the long one retained.
         assert_eq!(matrix.sample_count(1, 2), 41);
+    }
+
+    /// The geometry of a real long, shallow arena: 13 anchors on two levels
+    /// 3 m apart, spread over 12 m × 8 m, with the far ends out of earshot of
+    /// each other. Classical MDS folds anchors through the plane of their
+    /// neighbours here — the fold fits the surviving links to a centimetre while
+    /// putting an anchor metres from where it is — so the survey has to reach the
+    /// configured geometry from the configured geometry, not from MDS alone.
+    fn shallow_arena() -> Vec<(u8, [f32; 3])> {
+        vec![
+            (0, [3.0, 4.08, 0.2]),
+            (1, [3.0, -4.08, 0.2]),
+            (2, [-3.0, -4.08, 0.2]),
+            (3, [-3.0, 4.08, 0.2]),
+            (4, [3.0, 3.71, 3.18]),
+            (5, [3.0, -3.73, 3.18]),
+            (6, [-3.0, -3.73, 3.18]),
+            (7, [-3.0, 3.71, 3.18]),
+            (8, [0.02, -0.02, 3.18]),
+            (9, [-9.0, 4.08, 0.2]),
+            (10, [-9.0, -4.08, 0.2]),
+            (11, [-9.0, -3.73, 3.18]),
+            (12, [-9.0, 3.71, 3.18]),
+        ]
+    }
+
+    #[test]
+    fn matches_the_configuration_of_a_shallow_arena() {
+        let pts = shallow_arena();
+        // The pairs the two ends of the room never exchange, and the three
+        // links a blocked direct path stretches, as measured in the arena.
+        let missing = [
+            (0, 9),
+            (0, 10),
+            (1, 9),
+            (1, 10),
+            (1, 11),
+            (2, 10),
+            (4, 9),
+            (4, 11),
+            (4, 12),
+            (5, 10),
+            (5, 11),
+            (8, 10),
+            (8, 11),
+        ];
+        let bias = [(6, 11, 2.8), (1, 2, 2.4), (3, 9, 2.2)];
+        let matrix = matrix_from(&pts, &bias, &missing);
+        let known: HashMap<u8, [f32; 3]> = pts.iter().copied().collect();
+        let ids: Vec<u8> = pts.iter().map(|(id, _)| *id).collect();
+        let sol = solve_geometry(&ids, &matrix, &known).expect("solve");
+
+        assert_eq!(sol.anchors.len(), pts.len(), "every anchor should place");
+        let worst = sol
+            .anchors
+            .iter()
+            .map(|a| (a.id, a.delta_norm().unwrap()))
+            .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap())
+            .unwrap();
+        assert!(
+            worst.1 < 0.5,
+            "A{} folded {:.2} m off the configuration it was solved against",
+            worst.0,
+            worst.1
+        );
+        assert_eq!(
+            sol.pairs_rejected, bias.len(),
+            "should reject the reflections and nothing else"
+        );
     }
 
     /// Replay every capture under `client/recordings/sniffer/` and check the
@@ -1767,4 +1937,5 @@ mod tests {
         }
         eprintln!("replayed {} capture(s), scored {checked}", files.len());
     }
+
 }
