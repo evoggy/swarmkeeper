@@ -5187,6 +5187,7 @@ dependencies = [
  "levenberg-marquardt",
  "nalgebra",
  "rfd",
+ "rusb",
  "serde",
  "serde_json",
  "serde_yaml",

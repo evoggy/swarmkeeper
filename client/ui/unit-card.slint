@@ -49,6 +49,7 @@ export struct UnitData {
     selftest-passed: bool,
     flash-progress: float,
     flash-status: string,
+    radio: int,            // Crazyradio the unit was connected through, -1 before that
 }
 
 export component UnitCard inherits Rectangle {

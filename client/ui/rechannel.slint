@@ -1,0 +1,234 @@
+import { Palette, Button, LineEdit, SpinBox, ScrollView } from "std-widgets.slint";
+
+export enum RcRowState { idle, busy, done, failed }
+
+export struct RechannelRow {
+    name: string,
+    uri: string,
+    from: string,          // channel now, empty when not reached over the radio
+    to: string,            // channel after the move
+    moves: bool,
+    state: RcRowState,
+    status: string,
+}
+
+global RcColors {
+    out property <color> done: #2e7d32;
+    out property <color> failed: #c62828;
+    out property <color> moving: dodgerblue;
+}
+
+// Spread the swarm over several radio channels, so that it can use one
+// Crazyradio per channel.
+export component RechannelDialog inherits Rectangle {
+    in property <[RechannelRow]> rows;
+    in property <int> radios;              // Crazyradios attached
+    in-out property <int> count: 1;
+    in-out property <string> channels;
+    in property <string> plan-error;       // why the plan can't be carried out
+    in property <string> summary;
+    in property <int> moving;              // Crazyflies that change channel
+    in property <bool> running;
+    in property <string> status;
+
+    callback count-edited(/* count */ int);
+    callback channels-edited(/* text */ string);
+    callback start();
+    callback close();
+
+    width: 100%;
+    height: 100%;
+    background: black.transparentize(0.5);
+
+    TouchArea {
+        clicked => { if (!root.running) { root.close(); } }
+    }
+
+    Rectangle {
+        width: min(700px, parent.width - 40px);
+        height: min(680px, parent.height - 40px);
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        background: Palette.background;
+        border-radius: 8px;
+        border-width: 1px;
+        border-color: Palette.border;
+
+        TouchArea {}
+
+        VerticalLayout {
+            padding: 24px;
+            spacing: 12px;
+
+            Text {
+                text: "Rechannel Swarm";
+                font-size: 16px;
+                font-weight: 600;
+            }
+
+            Text {
+                text: "Crazyflies on the same channel always share a Crazyradio, so a swarm on one channel can't use more than one. This moves the Crazyflies onto several channels, an equal share on each, keeping as many as possible where they are. Each one that moves is reprogrammed on its old channel, rebooted and looked for on its new one; its URI in the swarm file only changes once it answers there. The swarm is disconnected first.";
+                font-size: 12px;
+                color: Palette.foreground.transparentize(0.3);
+                wrap: word-wrap;
+            }
+
+            HorizontalLayout {
+                spacing: 8px;
+                Text {
+                    text: "Number of channels";
+                    vertical-alignment: center;
+                    width: 140px;
+                }
+                SpinBox {
+                    width: 110px;
+                    minimum: 1;
+                    maximum: 41;
+                    value <=> root.count;
+                    enabled: !root.running;
+                    edited(value) => { root.count-edited(value); }
+                }
+                Text {
+                    text: root.radios == 1 ? "1 Crazyradio attached" : "\{root.radios} Crazyradios attached";
+                    font-size: 12px;
+                    color: Palette.foreground.transparentize(0.4);
+                    vertical-alignment: center;
+                    horizontal-stretch: 1;
+                }
+            }
+
+            HorizontalLayout {
+                spacing: 8px;
+                Text {
+                    text: "Channels";
+                    vertical-alignment: center;
+                    width: 140px;
+                }
+                LineEdit {
+                    text <=> root.channels;
+                    enabled: !root.running;
+                    horizontal-stretch: 1;
+                    edited(text) => { root.channels-edited(text); }
+                }
+            }
+
+            HorizontalLayout {
+                spacing: 8px;
+                Text {
+                    text: "Crazyflies";
+                    font-size: 12px;
+                    font-weight: 600;
+                    vertical-alignment: center;
+                }
+                Text {
+                    text: root.plan-error != "" ? root.plan-error : root.summary;
+                    font-size: 11px;
+                    color: root.plan-error != "" ? RcColors.failed : Palette.foreground.transparentize(0.4);
+                    vertical-alignment: center;
+                    horizontal-alignment: right;
+                    horizontal-stretch: 1;
+                    overflow: elide;
+                }
+            }
+
+            Rectangle {
+                vertical-stretch: 1;
+                border-radius: 4px;
+                border-width: 1px;
+                border-color: Palette.border;
+                background: Palette.alternate-background;
+
+                if root.rows.length == 0: Text {
+                    text: "No swarm file loaded.";
+                    font-size: 12px;
+                    color: Palette.foreground.transparentize(0.4);
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+
+                ScrollView {
+                    VerticalLayout {
+                        padding: 4px;
+                        spacing: 3px;
+
+                        for row in root.rows: Rectangle {
+                            height: 30px;
+                            border-radius: 3px;
+                            background: Palette.background;
+
+                            HorizontalLayout {
+                                padding-left: 8px;
+                                padding-right: 8px;
+                                spacing: 8px;
+
+                                Text {
+                                    text: row.name;
+                                    font-size: 12px;
+                                    font-weight: 600;
+                                    vertical-alignment: center;
+                                    width: 110px;
+                                    overflow: elide;
+                                }
+                                Text {
+                                    text: row.uri;
+                                    font-size: 11px;
+                                    color: Palette.foreground.transparentize(0.4);
+                                    vertical-alignment: center;
+                                    width: 200px;
+                                    overflow: elide;
+                                }
+                                Text {
+                                    text: row.from == "" ? "not on the radio"
+                                        : row.moves ? "\{row.from} → \{row.to}"
+                                        : "\{row.from} (stays)";
+                                    font-size: 12px;
+                                    font-weight: row.moves ? 600 : 400;
+                                    color: row.moves ? RcColors.moving : Palette.foreground.transparentize(0.4);
+                                    vertical-alignment: center;
+                                    width: 110px;
+                                }
+                                Text {
+                                    text: row.status;
+                                    font-size: 11px;
+                                    color: row.state == RcRowState.failed ? RcColors.failed
+                                         : row.state == RcRowState.done ? RcColors.done
+                                         : Palette.foreground.transparentize(0.3);
+                                    vertical-alignment: center;
+                                    horizontal-alignment: right;
+                                    horizontal-stretch: 1;
+                                    overflow: elide;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            Text {
+                text: root.status;
+                font-size: 12px;
+                color: Palette.foreground.transparentize(0.3);
+                wrap: word-wrap;
+                vertical-stretch: 0;
+            }
+
+            HorizontalLayout {
+                spacing: 8px;
+                alignment: end;
+
+                Button {
+                    text: "Close";
+                    enabled: !root.running;
+                    clicked => { root.close(); }
+                }
+                Button {
+                    text: root.moving == 0 ? "Nothing to move"
+                        : root.moving == 1 ? "Move 1 Crazyflie" : "Move \{root.moving} Crazyflies";
+                    primary: true;
+                    enabled: !root.running && root.plan-error == "" && root.moving > 0;
+                    clicked => { root.start(); }
+                }
+            }
+        }
+    }
+}

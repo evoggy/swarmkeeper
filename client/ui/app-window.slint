@@ -11,10 +11,12 @@ import { PlanningContent, PlanObstacleData, PlanPadData, PlanBoxVolumeData } fro
 import { SnifferContent, SnifferAnchorRow, SnifferFeedRow, SnifferMatrixRow, SnifferSurveyRow } from "sniffer.slint";
 import { PlotBridge, PlotLine, AxisTick, LegendEntry, PlotNewConfigDialog } from "plot.slint";
 import { ViewSettings } from "view-settings.slint";
+import { RechannelDialog, RechannelRow, RcRowState } from "rechannel.slint";
 
 // Re-export the plot globals/structs from the root so the Rust side can reach
 // PlotBridge via `ui.global::<PlotBridge>()` and the generated data structs.
 export { PlotBridge, PlotLine, AxisTick, LegendEntry, ViewSettings }
+export { RechannelRow, RcRowState }
 
 export struct HealthTestResult {
     name: string,
@@ -100,6 +102,7 @@ component MenuBar inherits Rectangle {
     callback power-off-swarm-clicked();
     callback clear-all-console-clicked();
     callback download-toc-clicked();
+    callback rechannel-clicked();
     callback upload-geometry-clicked();
     callback upload-params-clicked();
     callback clear-tlv-clicked();
@@ -288,7 +291,7 @@ component MenuBar inherits Rectangle {
 
         Rectangle {
             width: 180px;
-            height: 201px;
+            height: 242px;
             background: Palette.background;
             border-width: 1px;
             border-color: Palette.border;
@@ -303,6 +306,10 @@ component MenuBar inherits Rectangle {
                     text: "Upload Geometry";
                     enabled: !root.connected;
                     clicked => { setup-popup.close(); upload-geometry-clicked(); }
+                }
+                MenuItem {
+                    text: "Rechannel Swarm...";
+                    clicked => { setup-popup.close(); rechannel-clicked(); }
                 }
                 MenuSeparator {}
                 MenuItem {
@@ -704,6 +711,22 @@ export component AppWindow inherits Window {
     callback flash-select-binary();
     callback flash-start();
 
+    // Rechannel swarm: spread the swarm over several radio channels
+    in-out property <bool> rc-dialog-visible: false;
+    in-out property <[RechannelRow]> rc-rows;
+    in-out property <int> rc-radios;                   // Crazyradios attached
+    in-out property <int> rc-count: 1;
+    in-out property <string> rc-channels;
+    in-out property <string> rc-plan-error;
+    in-out property <string> rc-summary;
+    in-out property <int> rc-moving;
+    in-out property <bool> rc-running: false;
+    in-out property <string> rc-status;
+    callback rc-open();                                // read the swarm file and plan
+    callback rc-count-edited(int);
+    callback rc-channels-edited(string);
+    callback rc-start();
+
     // Confirmation dialog
     private property <bool> confirm-power-off-visible: false;
     private property <bool> confirm-clear-tlv-visible: false;
@@ -1037,6 +1060,10 @@ export component AppWindow inherits Window {
             power-off-swarm-clicked => { confirm-power-off-visible = true; }
             clear-all-console-clicked => { clear-all-console(); }
             download-toc-clicked => { download-toc(); }
+            rechannel-clicked => {
+                rc-dialog-visible = true;
+                rc-open();
+            }
             upload-geometry-clicked => { upload-geometry(); }
             upload-params-clicked => { upload-params(); }
             clear-tlv-clicked => { confirm-clear-tlv-visible = true; }
@@ -1910,6 +1937,23 @@ export component AppWindow inherits Window {
                 }
             }
         }
+    }
+
+    // Rechannel swarm dialog
+    if rc-dialog-visible: RechannelDialog {
+        rows: root.rc-rows;
+        radios: root.rc-radios;
+        count <=> root.rc-count;
+        channels <=> root.rc-channels;
+        plan-error: root.rc-plan-error;
+        summary: root.rc-summary;
+        moving: root.rc-moving;
+        running: root.rc-running;
+        status: root.rc-status;
+        count-edited(count) => { root.rc-count-edited(count); }
+        channels-edited(text) => { root.rc-channels-edited(text); }
+        start => { root.rc-start(); }
+        close => { root.rc-dialog-visible = false; }
     }
 
     // Progress dialog overlay

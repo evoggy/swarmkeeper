@@ -11,8 +11,11 @@ mod lh_geo;
 mod lh_wizard;
 mod planning;
 mod plot;
+mod radios;
+mod rechannel;
 mod renderer;
 mod sniffer;
+mod swarm_connect;
 mod tdoa3;
 
 slint::include_modules!();
@@ -375,6 +378,7 @@ fn apply_swarm_config(ui: &AppWindow, config: &SwarmConfig) {
             selftest_passed: false,
             flash_progress: 0.0,
             flash_status: "".into(),
+            radio: -1,
         })
         .collect();
 
@@ -462,6 +466,16 @@ fn bool_check(v: bool) -> &'static str {
     if v { "✓" } else { "" }
 }
 
+/// The URI of a unit as the list shows it: a `radio:///` URI with the
+/// Crazyradio it was given when it connected.
+fn uri_text(u: &UnitData) -> String {
+    if u.uri.starts_with("radio:///") && u.radio >= 0 {
+        format!("{} (radio {})", u.uri, u.radio)
+    } else {
+        u.uri.to_string()
+    }
+}
+
 fn unit_to_row(u: &UnitData) -> slint::ModelRc<StandardListViewItem> {
     let status_text = if u.state == UnitState::Error {
         u.error_message.to_string()
@@ -472,7 +486,7 @@ fn unit_to_row(u: &UnitData) -> slint::ModelRc<StandardListViewItem> {
         state_symbol(u.state).into(),
         status_text.as_str().into(),
         u.name.as_str().into(),
-        u.uri.as_str().into(),
+        uri_text(u).as_str().into(),
         format!("{:.2}", u.pos_x).as_str().into(),
         format!("{:.2}", u.pos_y).as_str().into(),
         format!("{:.2}", u.pos_z).as_str().into(),
@@ -746,6 +760,173 @@ struct ConnectedUnit {
 }
 
 type SwarmState = Arc<Mutex<HashMap<usize, ConnectedUnit>>>;
+
+/// A channel list as the Rechannel dialog shows it: "80, 78, 76".
+fn join_channels(channels: &[u8]) -> String {
+    channels.iter().map(|c| c.to_string()).collect::<Vec<_>>().join(", ")
+}
+
+/// The URIs of the units in the swarm, in unit order.
+fn unit_uris(ui: &AppWindow) -> Vec<String> {
+    ui.get_units().iter().map(|unit| unit.uri.to_string()).collect()
+}
+
+/// The URI to open a link to a unit with: a `radio:///` URI gets the
+/// Crazyradio the radio plan gives it, and the link timeout is added.
+async fn link_uri(
+    link_context: &crazyflie_link::LinkContext,
+    radio_plan: &radios::SharedRadioPlan,
+    uri: &str,
+) -> String {
+    let uri = radio_plan.lock().await.link_uri(link_context, uri).await;
+    uri_with_link_timeout(&uri)
+}
+
+/// What setting up a freshly connected unit needs.
+#[derive(Clone)]
+struct UnitSetup {
+    swarm_state: SwarmState,
+    ui_weak: slint::Weak<AppWindow>,
+    positioning_source: Arc<Mutex<Option<usize>>>,
+    positioning_data: SharedPositioningData,
+    goto_targets: SharedGotoTargets,
+    journal_store: SharedJournalStore,
+    console_store: SharedConsoleStore,
+    unit_count: usize,
+}
+
+/// Connect to these units (index, URI) and set each one up as soon as it is
+/// connected. They are spread over the Crazyradios by the radio plan, a few
+/// at a time on each, and each TOC that isn't in the cache yet is downloaded
+/// from one Crazyflie only.
+async fn connect_units(
+    units: Vec<(usize, String)>,
+    link_context: Arc<crazyflie_link::LinkContext>,
+    radio_plan: radios::SharedRadioPlan,
+    toc_cache: FileTocCache,
+    setup: UnitSetup,
+) {
+    let mut targets = Vec::new();
+    for (index, uri) in &units {
+        let link_uri = link_uri(&link_context, &radio_plan, uri).await;
+        let radio = radios::RadioUri::parse(&link_uri).ok().flatten().and_then(|r| r.radio);
+        update_unit(&setup.ui_weak, *index, move |u| {
+            u.radio = radio.map_or(-1, |r| r as i32);
+        });
+        eprintln!("Connecting to {} ...", link_uri);
+        targets.push(swarm_connect::Target { index: *index, link_uri, radio });
+    }
+    let uris: Arc<HashMap<usize, String>> = Arc::new(units.into_iter().collect());
+
+    let connected: swarm_connect::Connected = {
+        let uris = uris.clone();
+        Arc::new(move |index, result| match result {
+            Ok(cf) => {
+                eprintln!("Connected to {}", uris[&index]);
+                tokio::spawn(setup_connected_unit(index, uris[&index].clone(), Arc::new(cf), setup.clone()));
+            }
+            Err(error_msg) => update_unit(&setup.ui_weak, index, move |u| {
+                u.state = UnitState::Error;
+                u.error_message = error_msg.into();
+            }),
+        })
+    };
+    let waiting: swarm_connect::Waiting = Arc::new(move |index| {
+        eprintln!("{}: waiting for another Crazyflie to download the TOC", uris[&index])
+    });
+    swarm_connect::connect_all(link_context, toc_cache, targets, connected, waiting).await;
+}
+
+/// Read what the unit list shows about a freshly connected unit, start
+/// capturing its console and start its telemetry.
+async fn setup_connected_unit(i: usize, uri: String, cf: Arc<crazyflie_lib::Crazyflie>, setup: UnitSetup) {
+    let UnitSetup {
+        swarm_state,
+        ui_weak,
+        positioning_source,
+        positioning_data,
+        goto_targets,
+        journal_store,
+        console_store,
+        unit_count,
+    } = setup;
+
+    // Store connected Crazyflie
+    {
+        let mut state = swarm_state.lock().await;
+        state.insert(i, ConnectedUnit { cf: cf.clone(), identify_stop: None, home_position: None, launch_z: None });
+    }
+
+    // Read installed decks
+    let deck_lighthouse: u8 = cf.param.get("deck.bcLighthouse4").await.unwrap_or(0);
+    let deck_loco: u8 = cf.param.get("deck.bcLoco").await.unwrap_or(0);
+    let deck_led_top: u8 = cf.param.get("deck.bcColorLedTop").await.unwrap_or(0);
+    let deck_led_bottom: u8 = cf.param.get("deck.bcColorLedBot").await.unwrap_or(0);
+
+    // Read selftest result
+    let selftest_passed: i8 = cf.param.get("system.selftestPassed").await.unwrap_or(1);
+
+    // Read CPU serial number
+    let id0: u32 = cf.param.get("cpu.id0").await.unwrap_or(0);
+    let id1: u32 = cf.param.get("cpu.id1").await.unwrap_or(0);
+    let id2: u32 = cf.param.get("cpu.id2").await.unwrap_or(0);
+    let serial = format!("{:08X}{:08X}{:08X}", id0, id1, id2);
+
+    let journal_count = {
+        let store = journal_store.lock().await;
+        store.get(&serial).map_or(0, |entries| entries.len()) as i32
+    };
+
+    let console_count = {
+        let store = console_store.lock().await;
+        store.get(&serial).map_or(0, |lines| lines.len()) as i32
+    };
+
+    start_console_capture(
+        serial.clone(),
+        i,
+        cf.clone(),
+        ui_weak.clone(),
+        console_store.clone(),
+    );
+
+    update_unit(&ui_weak, i, move |u| {
+        u.state = UnitState::Connected;
+        u.deck_lighthouse = deck_lighthouse != 0;
+        u.deck_loco = deck_loco != 0;
+        u.deck_led_top = deck_led_top != 0;
+        u.deck_led_bottom = deck_led_bottom != 0;
+        u.serial = serial.into();
+        u.selftest_passed = selftest_passed != 0;
+        u.journal_entry_count = journal_count;
+        u.console_line_count = console_count;
+    });
+
+    // Update swarm-connected flag
+    let ui_weak_inner = ui_weak.clone();
+    slint::invoke_from_event_loop(move || {
+        if let Some(ui) = ui_weak_inner.upgrade() {
+            ui.set_swarm_connected(true);
+        }
+    }).ok();
+
+    // Auto-select as positioning source if none selected (initial connect)
+    {
+        let mut ps: tokio::sync::MutexGuard<'_, Option<usize>> = positioning_source.lock().await;
+        if ps.is_none() {
+            *ps = Some(i);
+            let ui_weak_inner = ui_weak.clone();
+            slint::invoke_from_event_loop(move || {
+                if let Some(ui) = ui_weak_inner.upgrade() {
+                    ui.set_positioning_source_index(i as i32);
+                }
+            }).ok();
+            eprintln!("Auto-selected unit {} as positioning source", i);
+        }
+    }
+
+    start_telemetry(i, uri, cf, ui_weak, positioning_data, positioning_source, goto_targets, unit_count).await;
+}
 
 /// Short human-readable name for a parameter value type (matches the strings
 /// understood by [`value_type_from_name`]).
@@ -1030,11 +1211,12 @@ const BOOTLOADER_CMD_RESET: u8 = 0xF0;
 
 async fn send_bootloader_command(
     link_context: &crazyflie_link::LinkContext,
+    radio_plan: &radios::SharedRadioPlan,
     uri: &str,
     cmd: u8,
     data: Option<&[u8]>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let link = link_context.open_link(uri).await?;
+    let link = link_context.open_link(&link_uri(link_context, radio_plan, uri).await).await?;
     let mut command = vec![0xFF, BOOTLOADER_TARGET_NRF51, cmd];
     if let Some(d) = data {
         command.extend_from_slice(d);
@@ -1043,6 +1225,125 @@ async fn send_bootloader_command(
     link.send_packet(packet).await?;
     tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
     Ok(())
+}
+
+/// Disconnect the whole swarm before flashing: the radio bootloader needs the
+/// Crazyradio to itself (cfloader opens it directly) and every unit is about to
+/// be restarted anyway.
+async fn disconnect_for_flashing(
+    swarm_state: &SwarmState,
+    positioning_source: &Arc<Mutex<Option<usize>>>,
+    ui_weak: &slint::Weak<AppWindow>,
+) {
+    *positioning_source.lock().await = None;
+    let connected: Vec<(usize, ConnectedUnit)> = {
+        let mut state = swarm_state.lock().await;
+        state.drain().collect()
+    };
+    for (index, unit) in connected {
+        unit.cf.disconnect().await;
+        update_unit(ui_weak, index, |u| {
+            u.state = UnitState::Disconnected;
+        });
+    }
+    {
+        let ui_weak = ui_weak.clone();
+        slint::invoke_from_event_loop(move || {
+            if let Some(ui) = ui_weak.upgrade() {
+                ui.set_swarm_connected(false);
+            }
+        }).ok();
+    }
+    // Give the radio a moment to settle after disconnecting.
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+}
+
+/// The swarm file as the Rechannel dialog last read it, and the plan for it.
+#[derive(Default)]
+struct RechannelState {
+    path: Option<std::path::PathBuf>,
+    units: Vec<rechannel::Unit>,
+    placements: Vec<rechannel::Placement>,
+}
+
+type SharedRechannelState = Arc<std::sync::Mutex<RechannelState>>;
+
+/// Plan the move onto the channels in the dialog and show it.
+fn rc_replan(ui: &AppWindow, state: &SharedRechannelState) {
+    let mut state = state.lock().unwrap();
+    let planned = rechannel::parse_channels(&ui.get_rc_channels())
+        .and_then(|(channels, warnings)| Ok((rechannel::place(&state.units, &channels)?, channels, warnings)));
+    let (placements, error) = match planned {
+        Ok((placements, channels, warnings)) => {
+            let moving = placements.iter().filter(|p| p.moves()).count();
+            let on_radio = placements.iter().filter(|p| p.from.is_some()).count();
+            let mut summary = format!("{} of {} move", moving, rechannel::crazyflies(on_radio));
+            if channels.len() > on_radio {
+                summary += "; more channels than Crazyflies, some stay empty";
+            }
+            for warning in warnings {
+                summary += &format!("; {}", warning);
+            }
+            ui.set_rc_summary(summary.into());
+            (placements, String::new())
+        }
+        Err(e) => (Vec::new(), format!("{:#}", e)),
+    };
+
+    // Without a plan the rows still list the swarm.
+    let rows: Vec<RechannelRow> = if placements.is_empty() {
+        state
+            .units
+            .iter()
+            .map(|unit| {
+                let from = radios::RadioUri::parse(&unit.uri).ok().flatten().map(|uri| uri.channel.to_string());
+                RechannelRow {
+                    name: unit.name.clone().into(),
+                    uri: unit.uri.clone().into(),
+                    from: from.clone().unwrap_or_default().into(),
+                    to: from.unwrap_or_default().into(),
+                    moves: false,
+                    state: RcRowState::Idle,
+                    status: "".into(),
+                }
+            })
+            .collect()
+    } else {
+        placements
+            .iter()
+            .map(|p| RechannelRow {
+                name: p.name.clone().into(),
+                uri: p.uri.clone().into(),
+                from: p.from.map(|c| c.to_string()).unwrap_or_default().into(),
+                to: p.to.map(|c| c.to_string()).unwrap_or_default().into(),
+                moves: p.moves(),
+                state: RcRowState::Idle,
+                status: "".into(),
+            })
+            .collect()
+    };
+    ui.set_rc_moving(placements.iter().filter(|p| p.moves()).count() as i32);
+    ui.set_rc_rows(slint::ModelRc::new(slint::VecModel::from(rows)));
+    ui.set_rc_plan_error(error.into());
+    state.placements = placements;
+}
+
+/// Apply one rechannel event to the dialog (UI thread).
+fn apply_rc_event(ui: &AppWindow, event: rechannel::Event) {
+    match event {
+        rechannel::Event::Unit { unit, state, status } => {
+            let rows = ui.get_rc_rows();
+            let Some(mut row) = rows.row_data(unit) else { return };
+            row.state = match state {
+                rechannel::State::Busy => RcRowState::Busy,
+                rechannel::State::Done => RcRowState::Done,
+                rechannel::State::Failed => RcRowState::Failed,
+            };
+            row.status = status.into();
+            rows.set_row_data(unit, row);
+        }
+        rechannel::Event::Overall(status) => ui.set_rc_status(status.into()),
+    }
 }
 
 /// Clear the persistent TLV/KVE storage on a connected Crazyflie by writing a
@@ -2125,6 +2426,9 @@ async fn main() {
     let link_context = Arc::new(crazyflie_link::LinkContext::new());
     let toc_cache = FileTocCache::new();
     let swarm_state: SwarmState = Arc::new(Mutex::new(HashMap::new()));
+    // Which Crazyradio the `radio:///` URIs of the swarm use.
+    let radio_plan: radios::SharedRadioPlan = Arc::new(Mutex::new(radios::RadioPlan::default()));
+    radio_plan.lock().await.set_swarm(unit_uris(&ui));
 
     // Plot dock log streaming: the unit selected for logging (unsorted original
     // index) and the supervising task handle (aborted on switch/stop to free the
@@ -2183,141 +2487,38 @@ async fn main() {
     // Connect swarm
     {
         let link_context = link_context.clone();
+        let radio_plan = radio_plan.clone();
         let toc_cache = toc_cache.clone();
-        let swarm_state = swarm_state.clone();
         let ui_weak = ui.as_weak();
-
-        let positioning_source = positioning_source.clone();
-        let positioning_data = positioning_data.clone();
-        let goto_targets = goto_targets.clone();
-        let journal_store = journal_store.clone();
-        let console_store = console_store.clone();
+        let setup = UnitSetup {
+            swarm_state: swarm_state.clone(),
+            ui_weak: ui.as_weak(),
+            positioning_source: positioning_source.clone(),
+            positioning_data: positioning_data.clone(),
+            goto_targets: goto_targets.clone(),
+            journal_store: journal_store.clone(),
+            console_store: console_store.clone(),
+            unit_count: 0,
+        };
         ui.on_connect_swarm(move || {
             let Some(ui_ref) = ui_weak.upgrade() else { return };
-            let units = ui_ref.get_units();
-            let unit_count = units.row_count();
-            for i in 0..unit_count {
-                let Some(unit) = units.row_data(i) else {
-                    continue;
-                };
-                let uri = unit.uri.to_string();
-                let link_context = link_context.clone();
-                let toc_cache = toc_cache.clone();
-                let ui_weak = ui_weak.clone();
-                let swarm_state = swarm_state.clone();
-                let positioning_source = positioning_source.clone();
-                let positioning_data = positioning_data.clone();
-                let goto_targets = goto_targets.clone();
-                let journal_store = journal_store.clone();
-                let console_store = console_store.clone();
-
-                tokio::spawn(async move {
-                    eprintln!("Connecting to {} ...", uri);
-
-                    let cf = match tokio::time::timeout(
-                        std::time::Duration::from_secs(30),
-                        crazyflie_lib::Crazyflie::connect_from_uri(link_context.as_ref(), &uri_with_link_timeout(&uri), toc_cache),
-                    ).await {
-                        Ok(Ok(cf)) => Arc::new(cf),
-                        Ok(Err(e)) => {
-                            dbg!(&e);
-                            eprintln!("Failed to connect to 22-- >{}: {}", uri, e);
-                            let error_msg = format!("{}", e);
-                            update_unit(&ui_weak, i, move |u| {
-                                u.state = UnitState::Error;
-                                u.error_message = error_msg.into();
-                            });
-                            return;
-                        }
-                        Err(_) => {
-                            eprintln!("Connection to {} timed out", uri);
-                            update_unit(&ui_weak, i, move |u| {
-                                u.state = UnitState::Error;
-                                u.error_message = "Connection timed out".into();
-                            });
-                            return;
-                        }
-                    };
-
-                    eprintln!("Connected to {}", uri);
-
-                    // Store connected Crazyflie
-                    {
-                        let mut state = swarm_state.lock().await;
-                        state.insert(i, ConnectedUnit { cf: cf.clone(), identify_stop: None, home_position: None, launch_z: None });
-                    }
-
-                    // Read installed decks
-                    let deck_lighthouse: u8 = cf.param.get("deck.bcLighthouse4").await.unwrap_or(0);
-                    let deck_loco: u8 = cf.param.get("deck.bcLoco").await.unwrap_or(0);
-                    let deck_led_top: u8 = cf.param.get("deck.bcColorLedTop").await.unwrap_or(0);
-                    let deck_led_bottom: u8 = cf.param.get("deck.bcColorLedBot").await.unwrap_or(0);
-
-                    // Read selftest result
-                    let selftest_passed: i8 = cf.param.get("system.selftestPassed").await.unwrap_or(1);
-
-                    // Read CPU serial number
-                    let id0: u32 = cf.param.get("cpu.id0").await.unwrap_or(0);
-                    let id1: u32 = cf.param.get("cpu.id1").await.unwrap_or(0);
-                    let id2: u32 = cf.param.get("cpu.id2").await.unwrap_or(0);
-                    let serial = format!("{:08X}{:08X}{:08X}", id0, id1, id2);
-
-                    let journal_count = {
-                        let store = journal_store.lock().await;
-                        store.get(&serial).map_or(0, |entries| entries.len()) as i32
-                    };
-
-                    let console_count = {
-                        let store = console_store.lock().await;
-                        store.get(&serial).map_or(0, |lines| lines.len()) as i32
-                    };
-
-                    start_console_capture(
-                        serial.clone(),
-                        i,
-                        cf.clone(),
-                        ui_weak.clone(),
-                        console_store.clone(),
-                    );
-
-                    update_unit(&ui_weak, i, move |u| {
-                        u.state = UnitState::Connected;
-                        u.deck_lighthouse = deck_lighthouse != 0;
-                        u.deck_loco = deck_loco != 0;
-                        u.deck_led_top = deck_led_top != 0;
-                        u.deck_led_bottom = deck_led_bottom != 0;
-                        u.serial = serial.into();
-                        u.selftest_passed = selftest_passed != 0;
-                        u.journal_entry_count = journal_count;
-                        u.console_line_count = console_count;
-                    });
-
-                    // Update swarm-connected flag
-                    let ui_weak_inner = ui_weak.clone();
-                    slint::invoke_from_event_loop(move || {
-                        if let Some(ui) = ui_weak_inner.upgrade() {
-                            ui.set_swarm_connected(true);
-                        }
-                    }).ok();
-
-                    // Auto-select as positioning source if none selected (initial connect)
-                    {
-                        let mut ps: tokio::sync::MutexGuard<'_, Option<usize>> = positioning_source.lock().await;
-                        if ps.is_none() {
-                            *ps = Some(i);
-                            let ui_weak_inner = ui_weak.clone();
-                            slint::invoke_from_event_loop(move || {
-                                if let Some(ui) = ui_weak_inner.upgrade() {
-                                    ui.set_positioning_source_index(i as i32);
-                                }
-                            }).ok();
-                            eprintln!("Auto-selected unit {} as positioning source", i);
+            let units = unit_uris(&ui_ref).into_iter().enumerate().collect();
+            let setup = UnitSetup { unit_count: ui_ref.get_units().row_count(), ..setup.clone() };
+            let link_context = link_context.clone();
+            let radio_plan = radio_plan.clone();
+            let toc_cache = toc_cache.clone();
+            tokio::spawn(async move {
+                // Spread the swarm over the Crazyradios attached now.
+                match radio_plan.lock().await.replan(&link_context).await {
+                    Ok(warnings) => {
+                        for warning in warnings {
+                            eprintln!("Warning: {}", warning);
                         }
                     }
-
-                    start_telemetry(i, uri.clone(), cf.clone(), ui_weak, positioning_data, positioning_source, goto_targets, unit_count).await;
-                });
-            }
+                    Err(e) => eprintln!("Planning the Crazyradios: {:#}", e),
+                }
+                connect_units(units, link_context, radio_plan, toc_cache, setup).await;
+            });
         });
     }
 
@@ -2378,152 +2579,46 @@ async fn main() {
     // Reconnect disconnected units
     {
         let link_context = link_context.clone();
+        let radio_plan = radio_plan.clone();
         let toc_cache = toc_cache.clone();
-        let swarm_state = swarm_state.clone();
         let ui_weak = ui.as_weak();
-        let positioning_source = positioning_source.clone();
-        let positioning_data = positioning_data.clone();
-        let goto_targets = goto_targets.clone();
-        let journal_store = journal_store.clone();
-        let console_store = console_store.clone();
-
+        let setup = UnitSetup {
+            swarm_state: swarm_state.clone(),
+            ui_weak: ui.as_weak(),
+            positioning_source: positioning_source.clone(),
+            positioning_data: positioning_data.clone(),
+            goto_targets: goto_targets.clone(),
+            journal_store: journal_store.clone(),
+            console_store: console_store.clone(),
+            unit_count: 0,
+        };
         ui.on_reconnect_swarm(move || {
             let Some(ui_ref) = ui_weak.upgrade() else { return };
             let units = ui_ref.get_units();
-            let unit_count = units.row_count();
-            for i in 0..unit_count {
-                let Some(unit) = units.row_data(i) else {
-                    continue;
-                };
-                if !matches!(unit.state, UnitState::Disconnected | UnitState::Error) {
-                    continue;
-                }
-                let uri = unit.uri.to_string();
-                let link_context = link_context.clone();
-                let toc_cache = toc_cache.clone();
-                let ui_weak = ui_weak.clone();
-                let swarm_state = swarm_state.clone();
-                let positioning_source = positioning_source.clone();
-                let positioning_data = positioning_data.clone();
-                let goto_targets = goto_targets.clone();
-                let journal_store = journal_store.clone();
-                let console_store = console_store.clone();
-
-                tokio::spawn(async move {
-                    eprintln!("Reconnecting to {} ...", uri);
-
-                    let cf = match tokio::time::timeout(
-                        std::time::Duration::from_secs(30),
-                        crazyflie_lib::Crazyflie::connect_from_uri(link_context.as_ref(), &uri_with_link_timeout(&uri), toc_cache),
-                    ).await {
-                        Ok(Ok(cf)) => Arc::new(cf),
-                        Ok(Err(e)) => {
-                            eprintln!("Failed to reconnect to {}: {:?}", uri, e);
-                            let error_msg = format!("{}", e);
-                            update_unit(&ui_weak, i, move |u| {
-                                u.state = UnitState::Error;
-                                u.error_message = error_msg.into();
-                            });
-                            return;
-                        }
-                        Err(_) => {
-                            eprintln!("Reconnect to {} timed out", uri);
-                            update_unit(&ui_weak, i, move |u| {
-                                u.state = UnitState::Error;
-                                u.error_message = "Connection timed out".into();
-                            });
-                            return;
-                        }
-                    };
-
-                    eprintln!("Reconnected to {}", uri);
-
-                    {
-                        let mut state = swarm_state.lock().await;
-                        state.insert(i, ConnectedUnit { cf: cf.clone(), identify_stop: None, home_position: None, launch_z: None });
-                    }
-
-                    let deck_lighthouse: u8 = cf.param.get("deck.bcLighthouse4").await.unwrap_or(0);
-                    let deck_loco: u8 = cf.param.get("deck.bcLoco").await.unwrap_or(0);
-                    let deck_led_top: u8 = cf.param.get("deck.bcColorLedTop").await.unwrap_or(0);
-                    let deck_led_bottom: u8 = cf.param.get("deck.bcColorLedBot").await.unwrap_or(0);
-
-                    let selftest_passed: i8 = cf.param.get("system.selftestPassed").await.unwrap_or(1);
-
-                    let id0: u32 = cf.param.get("cpu.id0").await.unwrap_or(0);
-                    let id1: u32 = cf.param.get("cpu.id1").await.unwrap_or(0);
-                    let id2: u32 = cf.param.get("cpu.id2").await.unwrap_or(0);
-                    let serial = format!("{:08X}{:08X}{:08X}", id0, id1, id2);
-
-                    let journal_count = {
-                        let store = journal_store.lock().await;
-                        store.get(&serial).map_or(0, |entries| entries.len()) as i32
-                    };
-
-                    let console_count = {
-                        let store = console_store.lock().await;
-                        store.get(&serial).map_or(0, |lines| lines.len()) as i32
-                    };
-
-                    start_console_capture(
-                        serial.clone(),
-                        i,
-                        cf.clone(),
-                        ui_weak.clone(),
-                        console_store.clone(),
-                    );
-
-                    update_unit(&ui_weak, i, move |u| {
-                        u.state = UnitState::Connected;
-                        u.deck_lighthouse = deck_lighthouse != 0;
-                        u.deck_loco = deck_loco != 0;
-                        u.deck_led_top = deck_led_top != 0;
-                        u.deck_led_bottom = deck_led_bottom != 0;
-                        u.serial = serial.into();
-                        u.selftest_passed = selftest_passed != 0;
-                        u.journal_entry_count = journal_count;
-                        u.console_line_count = console_count;
-                    });
-
-                    // Auto-select as positioning source if none selected
-                    {
-                        let mut ps: tokio::sync::MutexGuard<'_, Option<usize>> = positioning_source.lock().await;
-                        if ps.is_none() {
-                            *ps = Some(i);
-                            let ui_weak_inner = ui_weak.clone();
-                            slint::invoke_from_event_loop(move || {
-                                if let Some(ui) = ui_weak_inner.upgrade() {
-                                    ui.set_positioning_source_index(i as i32);
-                                }
-                            }).ok();
-                            eprintln!("Auto-selected unit {} as positioning source", i);
-                        }
-                    }
-
-                    start_telemetry(i, uri.clone(), cf.clone(), ui_weak, positioning_data, positioning_source, goto_targets, unit_count).await;
-                });
-            }
+            let disconnected: Vec<(usize, String)> = (0..units.row_count())
+                .filter_map(|i| units.row_data(i).map(|unit| (i, unit)))
+                .filter(|(_, unit)| matches!(unit.state, UnitState::Disconnected | UnitState::Error))
+                .map(|(i, unit)| (i, unit.uri.to_string()))
+                .collect();
+            let setup = UnitSetup { unit_count: units.row_count(), ..setup.clone() };
+            // The units still connected keep their Crazyradio, so the plan
+            // stays as it is.
+            tokio::spawn(connect_units(disconnected, link_context.clone(), radio_plan.clone(), toc_cache.clone(), setup));
         });
     }
 
-    // Download TOC (sequential connect/disconnect to populate cache)
+    // Download TOC: connect to every unit and disconnect again, to fill the
+    // cache. Each TOC is downloaded from one Crazyflie only.
     {
         let link_context = link_context.clone();
+        let radio_plan = radio_plan.clone();
         let toc_cache = toc_cache.clone();
         let ui_weak = ui.as_weak();
 
         ui.on_download_toc(move || {
             let Some(ui_ref) = ui_weak.upgrade() else { return };
-            let units = ui_ref.get_units();
-            let unit_count = units.row_count();
-
-            // Collect URIs and names up front
-            let mut unit_info: Vec<(String, String)> = Vec::new();
-            for i in 0..unit_count {
-                if let Some(unit) = units.row_data(i) {
-                    unit_info.push((unit.uri.to_string(), unit.name.to_string()));
-                }
-            }
+            let uris = unit_uris(&ui_ref);
+            let names: Arc<Vec<String>> = Arc::new(ui_ref.get_units().iter().map(|u| u.name.to_string()).collect());
 
             ui_ref.set_progress_dialog_visible(true);
             ui_ref.set_progress_dialog_progress(0.0);
@@ -2531,53 +2626,54 @@ async fn main() {
             ui_ref.set_progress_dialog_title("Downloading TOC".into());
 
             let link_context = link_context.clone();
+            let radio_plan = radio_plan.clone();
             let toc_cache = toc_cache.clone();
             let ui_weak = ui_weak.clone();
 
             tokio::spawn(async move {
-                let total = unit_info.len();
-                for (idx, (uri, name)) in unit_info.iter().enumerate() {
-                    let status: slint::SharedString = format!("Connecting to {} ({}/{})...", name, idx + 1, total).into();
-                    let ui_weak_inner = ui_weak.clone();
-                    slint::invoke_from_event_loop(move || {
-                        if let Some(ui) = ui_weak_inner.upgrade() {
-                            ui.set_progress_dialog_status(status);
-                        }
-                    }).ok();
-
-                    match tokio::time::timeout(
-                        std::time::Duration::from_secs(30),
-                        crazyflie_lib::Crazyflie::connect_from_uri(link_context.as_ref(), &uri_with_link_timeout(uri), toc_cache.clone()),
-                    ).await {
-                        Ok(Ok(cf)) => {
-                            eprintln!("TOC downloaded for {}", uri);
-                            cf.disconnect().await;
-                        }
-                        Ok(Err(e)) => {
-                            eprintln!("TOC download failed for {}: {:?}", uri, e);
-                            let error_msg = format!("{}", e);
-                            update_unit(&ui_weak, idx, move |u| {
-                                u.state = UnitState::Error;
-                                u.error_message = error_msg.into();
-                            });
-                        }
-                        Err(_) => {
-                            eprintln!("TOC download for {} timed out", uri);
-                            update_unit(&ui_weak, idx, move |u| {
-                                u.state = UnitState::Error;
-                                u.error_message = "Connection timed out".into();
-                            });
-                        }
-                    }
-
-                    let progress = (idx + 1) as f32 / total as f32;
-                    let ui_weak_inner = ui_weak.clone();
-                    slint::invoke_from_event_loop(move || {
-                        if let Some(ui) = ui_weak_inner.upgrade() {
-                            ui.set_progress_dialog_progress(progress);
-                        }
-                    }).ok();
+                let total = uris.len();
+                let mut targets = Vec::new();
+                for (index, uri) in uris.iter().enumerate() {
+                    let link_uri = link_uri(&link_context, &radio_plan, uri).await;
+                    let radio = radios::RadioUri::parse(&link_uri).ok().flatten().and_then(|r| r.radio);
+                    targets.push(swarm_connect::Target { index, link_uri, radio });
                 }
+
+                let done = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+                let connected: swarm_connect::Connected = {
+                    let ui_weak = ui_weak.clone();
+                    let names = names.clone();
+                    Arc::new(move |index, result| {
+                        let outcome = match result {
+                            Ok(cf) => {
+                                tokio::spawn(async move { cf.disconnect().await });
+                                "done"
+                            }
+                            Err(error_msg) => {
+                                update_unit(&ui_weak, index, move |u| {
+                                    u.state = UnitState::Error;
+                                    u.error_message = error_msg.into();
+                                });
+                                "failed"
+                            }
+                        };
+                        let finished = done.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                        let progress = finished as f32 / total.max(1) as f32;
+                        let status: slint::SharedString =
+                            format!("{} {} ({}/{})", names[index], outcome, finished, total).into();
+                        let ui_weak = ui_weak.clone();
+                        slint::invoke_from_event_loop(move || {
+                            if let Some(ui) = ui_weak.upgrade() {
+                                ui.set_progress_dialog_progress(progress);
+                                ui.set_progress_dialog_status(status);
+                            }
+                        }).ok();
+                    })
+                };
+                let waiting: swarm_connect::Waiting = Arc::new(move |index| {
+                    eprintln!("{}: waiting for another Crazyflie to download the TOC", names[index])
+                });
+                swarm_connect::connect_all(link_context, toc_cache, targets, connected, waiting).await;
 
                 // Brief pause so the user sees 100% before closing
                 tokio::time::sleep(std::time::Duration::from_millis(500)).await;
@@ -2643,6 +2739,7 @@ async fn main() {
     // Flash the selected binary to the whole swarm, one unit at a time
     {
         let link_context = link_context.clone();
+        let radio_plan = radio_plan.clone();
         let toc_cache = toc_cache.clone();
         let swarm_state = swarm_state.clone();
         let flash_binary = flash_binary.clone();
@@ -2671,6 +2768,7 @@ async fn main() {
             ui_ref.set_flash_overall_status("Preparing…".into());
 
             let link_context = link_context.clone();
+            let radio_plan = radio_plan.clone();
             let toc_cache = toc_cache.clone();
             let swarm_state = swarm_state.clone();
             let flash_binary = flash_binary.clone();
@@ -2710,32 +2808,7 @@ async fn main() {
                     }
                 };
 
-                // Flashing needs exclusive radio access (and a clean state), so
-                // disconnect the whole swarm first.
-                {
-                    let mut ps = positioning_source.lock().await;
-                    *ps = None;
-                }
-                let connected: Vec<(usize, ConnectedUnit)> = {
-                    let mut state = swarm_state.lock().await;
-                    state.drain().collect()
-                };
-                for (index, unit) in connected {
-                    unit.cf.disconnect().await;
-                    update_unit(&ui_weak, index, |u| {
-                        u.state = UnitState::Disconnected;
-                    });
-                }
-                {
-                    let ui_weak_inner = ui_weak.clone();
-                    slint::invoke_from_event_loop(move || {
-                        if let Some(ui) = ui_weak_inner.upgrade() {
-                            ui.set_swarm_connected(false);
-                        }
-                    }).ok();
-                }
-                // Give the radio a moment to settle after disconnecting.
-                tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+                disconnect_for_flashing(&swarm_state, &positioning_source, &ui_weak).await;
 
                 // Mark every unit as queued.
                 for (idx, _, _) in &unit_info {
@@ -2787,7 +2860,7 @@ async fn main() {
 
                     let result = bootloader_flash::flash_target(
                         link_context.as_ref(),
-                        uri,
+                        &link_uri(&link_context, &radio_plan, uri).await,
                         toc_cache.clone(),
                         &target,
                         &data,
@@ -2830,14 +2903,200 @@ async fn main() {
         });
     }
 
+    // Rechannel swarm dialog: move the Crazyflies onto several channels so
+    // that the swarm can use one Crazyradio per channel.
+    {
+        let rc_state: SharedRechannelState = Arc::default();
+
+        // Read the swarm file and plan with one channel per Crazyradio.
+        {
+            let ui_weak = ui.as_weak();
+            let rc_state = rc_state.clone();
+            ui.on_rc_open(move || {
+                let Some(ui) = ui_weak.upgrade() else { return };
+                if ui.get_rc_running() {
+                    return;
+                }
+                let settings: AppSettings = confy::load("swarmkeeper", None).unwrap_or_default();
+                let path = settings.last_swarm_config.map(std::path::PathBuf::from);
+                let units: Vec<rechannel::Unit> = match path.as_deref().map(load_swarm_config) {
+                    Some(Ok(config)) => config
+                        .units
+                        .into_iter()
+                        .map(|u| rechannel::Unit { name: u.name, uri: u.uri })
+                        .collect(),
+                    Some(Err(e)) => {
+                        eprintln!("{}", e);
+                        Vec::new()
+                    }
+                    None => Vec::new(),
+                };
+                // The rows double as the unit list's order, so the file must
+                // still match what was opened.
+                let matches_list = units.len() == ui.get_units().row_count()
+                    && units.iter().zip(ui.get_units().iter()).all(|(file, listed)| file.name == listed.name.as_str());
+                {
+                    let mut state = rc_state.lock().unwrap();
+                    state.path = path;
+                    state.units = if matches_list { units } else { Vec::new() };
+                }
+
+                let radios = radios::attached_radios();
+                let count = radios.max(1) as i32;
+                ui.set_rc_radios(radios as i32);
+                ui.set_rc_count(count);
+                ui.set_rc_channels(join_channels(&rechannel::channels_for_count(count as u8)).into());
+                ui.set_rc_status("".into());
+                ui.set_rc_summary("".into());
+                rc_replan(&ui, &rc_state);
+                if !matches_list {
+                    ui.set_rc_plan_error("The swarm file changed since it was opened; open it again".into());
+                }
+            });
+        }
+
+        {
+            let ui_weak = ui.as_weak();
+            let rc_state = rc_state.clone();
+            ui.on_rc_count_edited(move |count| {
+                let Some(ui) = ui_weak.upgrade() else { return };
+                ui.set_rc_channels(join_channels(&rechannel::channels_for_count(count.clamp(1, 41) as u8)).into());
+                rc_replan(&ui, &rc_state);
+            });
+        }
+
+        {
+            let ui_weak = ui.as_weak();
+            let rc_state = rc_state.clone();
+            ui.on_rc_channels_edited(move |_| {
+                let Some(ui) = ui_weak.upgrade() else { return };
+                rc_replan(&ui, &rc_state);
+            });
+        }
+
+        {
+            let link_context = link_context.clone();
+            let radio_plan = radio_plan.clone();
+            let toc_cache = toc_cache.clone();
+            let swarm_state = swarm_state.clone();
+            let positioning_source = positioning_source.clone();
+            let rc_state = rc_state.clone();
+            let ui_weak = ui.as_weak();
+            ui.on_rc_start(move || {
+                let Some(ui) = ui_weak.upgrade() else { return };
+                if ui.get_rc_running() {
+                    return;
+                }
+                ui.set_rc_running(true);
+                ui.set_rc_status("Disconnecting the swarm…".into());
+
+                let link_context = link_context.clone();
+                let radio_plan = radio_plan.clone();
+                let toc_cache = toc_cache.clone();
+                let swarm_state = swarm_state.clone();
+                let positioning_source = positioning_source.clone();
+                let rc_state = rc_state.clone();
+                let ui_weak = ui_weak.clone();
+                tokio::spawn(async move {
+                    disconnect_for_flashing(&swarm_state, &positioning_source, &ui_weak).await;
+
+                    let (path, placements) = {
+                        let mut state = rc_state.lock().unwrap();
+                        (state.path.clone(), std::mem::take(&mut state.placements))
+                    };
+                    let report: rechannel::Report = {
+                        let ui_weak = ui_weak.clone();
+                        Arc::new(move |event| {
+                            let ui_weak = ui_weak.clone();
+                            slint::invoke_from_event_loop(move || {
+                                if let Some(ui) = ui_weak.upgrade() {
+                                    apply_rc_event(&ui, event);
+                                }
+                            }).ok();
+                        })
+                    };
+                    let to_link: rechannel::LinkUri = {
+                        let (link_context, radio_plan) = (link_context.clone(), radio_plan.clone());
+                        Arc::new(move |uri: String| {
+                            let (link_context, radio_plan) = (link_context.clone(), radio_plan.clone());
+                            Box::pin(async move { link_uri(&link_context, &radio_plan, &uri).await })
+                        })
+                    };
+                    let moved = rechannel::run(link_context.clone(), toc_cache, to_link, &placements, report).await;
+
+                    // The swarm file and the unit list follow the Crazyflies
+                    // that answer on their new channel.
+                    let new_uris: Vec<(usize, String)> = placements
+                        .iter()
+                        .filter(|p| moved.contains(&p.unit))
+                        .map(|p| (p.unit, p.new_uri.clone()))
+                        .collect();
+                    let saved = match (&path, new_uris.is_empty()) {
+                        (_, true) => Ok(false),
+                        (None, false) => Err(anyhow::anyhow!("no swarm file is open")),
+                        (Some(path), false) => std::fs::read_to_string(path)
+                            .map_err(anyhow::Error::from)
+                            .and_then(|text| rechannel::rewrite_swarm_file(&text, &new_uris))
+                            .and_then(|text| std::fs::write(path, text).map_err(anyhow::Error::from))
+                            .map(|()| true),
+                    };
+                    let mut uris: Vec<String> = placements.iter().map(|p| uri_with_default_timeout(&p.uri)).collect();
+                    for (unit, uri) in &new_uris {
+                        uris[*unit] = uri_with_default_timeout(uri);
+                    }
+                    radio_plan.lock().await.set_swarm(uris.clone());
+                    if let Some(path) = &path {
+                        let mut state = rc_state.lock().unwrap();
+                        state.units = placements
+                            .iter()
+                            .map(|p| rechannel::Unit {
+                                name: p.name.clone(),
+                                uri: if moved.contains(&p.unit) { p.new_uri.clone() } else { p.uri.clone() },
+                            })
+                            .collect();
+                        state.path = Some(path.clone());
+                    }
+
+                    let ui_weak = ui_weak.clone();
+                    slint::invoke_from_event_loop(move || {
+                        let Some(ui) = ui_weak.upgrade() else { return };
+                        let units = ui.get_units();
+                        for (unit, uri) in new_uris {
+                            if let Some(mut row) = units.row_data(unit) {
+                                row.uri = uri_with_default_timeout(&uri).into();
+                                row.radio = -1;
+                                units.set_row_data(unit, row);
+                            }
+                        }
+                        rebuild_table_rows(&ui);
+                        let status = ui.get_rc_status();
+                        match saved {
+                            Ok(true) => ui.set_rc_status(format!("{}; swarm file updated", status).into()),
+                            Ok(false) => {}
+                            Err(e) => ui.set_rc_status(
+                                format!("{}; the swarm file could not be updated: {:#}", status, e).into(),
+                            ),
+                        }
+                        ui.set_rc_running(false);
+                        // Keep the results on screen; the plan follows on the
+                        // next edit or when the dialog is opened again.
+                        ui.set_rc_moving(0);
+                    }).ok();
+                });
+            });
+        }
+    }
+
     // Upload lighthouse geometry + calibration
     {
         let link_context = link_context.clone();
+        let radio_plan = radio_plan.clone();
         let toc_cache = toc_cache.clone();
         let ui_weak = ui.as_weak();
 
         ui.on_upload_geometry(move || {
             let link_context = link_context.clone();
+            let radio_plan = radio_plan.clone();
             let toc_cache = toc_cache.clone();
             let ui_weak = ui_weak.clone();
 
@@ -2953,6 +3212,7 @@ async fn main() {
                 let mut join_set = tokio::task::JoinSet::new();
                 for (uri, name) in unit_info {
                     let link_context = link_context.clone();
+                    let radio_plan = radio_plan.clone();
                     let toc_cache = toc_cache.clone();
                     let ui_weak = ui_weak.clone();
                     let completed = completed.clone();
@@ -2964,7 +3224,7 @@ async fn main() {
 
                         let connect_result = tokio::time::timeout(
                             std::time::Duration::from_secs(30),
-                            crazyflie_lib::Crazyflie::connect_from_uri(link_context.as_ref(), &uri_with_link_timeout(&uri), toc_cache),
+                            crazyflie_lib::Crazyflie::connect_from_uri(link_context.as_ref(), &link_uri(&link_context, &radio_plan, &uri).await, toc_cache),
                         ).await;
                         let cf = match connect_result {
                             Ok(Ok(cf)) => cf,
@@ -3497,6 +3757,7 @@ async fn main() {
     // Sync blink: broadcast synchronized blink command to all units via P2P radio broadcast
     {
         let link_context = link_context.clone();
+        let radio_plan = radio_plan.clone();
         let ui_weak = ui.as_weak();
         ui.on_sync_blink(move || {
             let Some(ui_ref) = ui_weak.upgrade() else { return };
@@ -3506,13 +3767,17 @@ async fn main() {
                 .collect();
 
             let link_context = link_context.clone();
+            let radio_plan = radio_plan.clone();
 
             tokio::spawn(async move {
                 // Collect unique (radio_nth, channel) pairs from all unit URIs
-                let mut radio_channels: Vec<(usize, u8)> = uris
-                    .iter()
-                    .filter_map(|uri| parse_radio_uri(uri).map(|(r, ch, _)| (r, ch)))
-                    .collect();
+                let mut radio_channels: Vec<(usize, u8)> = Vec::new();
+                for uri in &uris {
+                    let link_uri = link_uri(&link_context, &radio_plan, uri).await;
+                    if let Ok(Some(parsed)) = radios::RadioUri::parse(&link_uri) {
+                        radio_channels.push((parsed.radio.unwrap_or(0), parsed.channel));
+                    }
+                }
                 radio_channels.sort();
                 radio_channels.dedup();
 
@@ -3565,6 +3830,7 @@ async fn main() {
     // Delayed sync blink: broadcast with 5 second delay, repeated broadcasts with decreasing time
     {
         let link_context = link_context.clone();
+        let radio_plan = radio_plan.clone();
         let ui_weak = ui.as_weak();
         ui.on_delayed_sync_blink(move || {
             let Some(ui_ref) = ui_weak.upgrade() else { return };
@@ -3574,12 +3840,16 @@ async fn main() {
                 .collect();
 
             let link_context = link_context.clone();
+            let radio_plan = radio_plan.clone();
 
             tokio::spawn(async move {
-                let mut radio_channels: Vec<(usize, u8)> = uris
-                    .iter()
-                    .filter_map(|uri| parse_radio_uri(uri).map(|(r, ch, _)| (r, ch)))
-                    .collect();
+                let mut radio_channels: Vec<(usize, u8)> = Vec::new();
+                for uri in &uris {
+                    let link_uri = link_uri(&link_context, &radio_plan, uri).await;
+                    if let Ok(Some(parsed)) = radios::RadioUri::parse(&link_uri) {
+                        radio_channels.push((parsed.radio.unwrap_or(0), parsed.channel));
+                    }
+                }
                 radio_channels.sort();
                 radio_channels.dedup();
 
@@ -3711,6 +3981,7 @@ async fn main() {
     // Reboot swarm (send reboot to all units, then disconnect)
     {
         let link_context = link_context.clone();
+        let radio_plan = radio_plan.clone();
         let swarm_state = swarm_state.clone();
         let positioning_source = positioning_source.clone();
         let ui_weak = ui.as_weak();
@@ -3722,6 +3993,7 @@ async fn main() {
                 .collect();
 
             let link_context = link_context.clone();
+            let radio_plan = radio_plan.clone();
             let swarm_state = swarm_state.clone();
             let positioning_source = positioning_source.clone();
             let ui_weak = ui_weak.clone();
@@ -3729,13 +4001,14 @@ async fn main() {
             tokio::spawn(async move {
                 let futs: Vec<_> = uris.iter().map(|uri| {
                     let link_context = link_context.clone();
+                    let radio_plan = radio_plan.clone();
                     let uri = uri.clone();
                     async move {
                         eprintln!("Rebooting {} ...", uri);
-                        if let Err(e) = send_bootloader_command(&link_context, &uri, BOOTLOADER_CMD_RESET_INIT, None).await {
+                        if let Err(e) = send_bootloader_command(&link_context, &radio_plan, &uri, BOOTLOADER_CMD_RESET_INIT, None).await {
                             eprintln!("Reboot reset-init failed for {}: {:?}", uri, e);
                         }
-                        if let Err(e) = send_bootloader_command(&link_context, &uri, BOOTLOADER_CMD_RESET, Some(&[0x01])).await {
+                        if let Err(e) = send_bootloader_command(&link_context, &radio_plan, &uri, BOOTLOADER_CMD_RESET, Some(&[0x01])).await {
                             eprintln!("Reboot reset failed for {}: {:?}", uri, e);
                         }
                     }
@@ -3775,6 +4048,7 @@ async fn main() {
     // Power off swarm (send power-off to all units, then disconnect)
     {
         let link_context = link_context.clone();
+        let radio_plan = radio_plan.clone();
         let swarm_state = swarm_state.clone();
         let positioning_source = positioning_source.clone();
         let ui_weak = ui.as_weak();
@@ -3786,6 +4060,7 @@ async fn main() {
                 .collect();
 
             let link_context = link_context.clone();
+            let radio_plan = radio_plan.clone();
             let swarm_state = swarm_state.clone();
             let positioning_source = positioning_source.clone();
             let ui_weak = ui_weak.clone();
@@ -3793,10 +4068,11 @@ async fn main() {
             tokio::spawn(async move {
                 let futs: Vec<_> = uris.iter().map(|uri| {
                     let link_context = link_context.clone();
+                    let radio_plan = radio_plan.clone();
                     let uri = uri.clone();
                     async move {
                         eprintln!("Powering off {} ...", uri);
-                        if let Err(e) = send_bootloader_command(&link_context, &uri, BOOTLOADER_CMD_ALL_OFF, None).await {
+                        if let Err(e) = send_bootloader_command(&link_context, &radio_plan, &uri, BOOTLOADER_CMD_ALL_OFF, None).await {
                             eprintln!("Power off failed for {}: {:?}", uri, e);
                         }
                     }
@@ -3836,6 +4112,7 @@ async fn main() {
     // SysOff swarm (sleep all units, do NOT disconnect)
     {
         let link_context = link_context.clone();
+        let radio_plan = radio_plan.clone();
         let ui_weak = ui.as_weak();
         ui.on_sysoff_swarm(move || {
             let Some(ui_ref) = ui_weak.upgrade() else { return };
@@ -3845,14 +4122,16 @@ async fn main() {
                 .collect();
 
             let link_context = link_context.clone();
+            let radio_plan = radio_plan.clone();
 
             tokio::spawn(async move {
                 let futs: Vec<_> = uris.iter().map(|uri| {
                     let link_context = link_context.clone();
+                    let radio_plan = radio_plan.clone();
                     let uri = uri.clone();
                     async move {
                         eprintln!("Sending sysoff (sleep) to {} ...", uri);
-                        if let Err(e) = send_bootloader_command(&link_context, &uri, BOOTLOADER_CMD_SYS_OFF, None).await {
+                        if let Err(e) = send_bootloader_command(&link_context, &radio_plan, &uri, BOOTLOADER_CMD_SYS_OFF, None).await {
                             eprintln!("SysOff failed for {}: {:?}", uri, e);
                         }
                     }
@@ -3865,6 +4144,7 @@ async fn main() {
     // SysOn swarm (wake all units, do NOT disconnect)
     {
         let link_context = link_context.clone();
+        let radio_plan = radio_plan.clone();
         let ui_weak = ui.as_weak();
         ui.on_syson_swarm(move || {
             let Some(ui_ref) = ui_weak.upgrade() else { return };
@@ -3874,14 +4154,16 @@ async fn main() {
                 .collect();
 
             let link_context = link_context.clone();
+            let radio_plan = radio_plan.clone();
 
             tokio::spawn(async move {
                 let futs: Vec<_> = uris.iter().map(|uri| {
                     let link_context = link_context.clone();
+                    let radio_plan = radio_plan.clone();
                     let uri = uri.clone();
                     async move {
                         eprintln!("Sending syson (wake) to {} ...", uri);
-                        if let Err(e) = send_bootloader_command(&link_context, &uri, BOOTLOADER_CMD_SYS_ON, None).await {
+                        if let Err(e) = send_bootloader_command(&link_context, &radio_plan, &uri, BOOTLOADER_CMD_SYS_ON, None).await {
                             eprintln!("SysOn failed for {}: {:?}", uri, e);
                         }
                     }
@@ -4399,6 +4681,7 @@ async fn main() {
     // sidebar's Assert Info popup (same mechanism as `cfcli debug assert`).
     {
         let link_context = link_context.clone();
+        let radio_plan = radio_plan.clone();
         let swarm_state = swarm_state.clone();
         let toc_cache = toc_cache.clone();
         let ui_weak = ui.as_weak();
@@ -4424,6 +4707,7 @@ async fn main() {
             };
 
             let link_context = link_context.clone();
+            let radio_plan = radio_plan.clone();
             let swarm_state = swarm_state.clone();
             let toc_cache = toc_cache.clone();
             let ui_weak = ui_weak.clone();
@@ -4458,7 +4742,7 @@ async fn main() {
                     eprintln!("Read assert {}: connecting to {}...", name, uri);
                     match tokio::time::timeout(
                         std::time::Duration::from_secs(30),
-                        crazyflie_lib::Crazyflie::connect_from_uri(link_context.as_ref(), &uri_with_link_timeout(&uri), toc_cache),
+                        crazyflie_lib::Crazyflie::connect_from_uri(link_context.as_ref(), &link_uri(&link_context, &radio_plan, &uri).await, toc_cache),
                     ).await {
                         Ok(Ok(cf)) => (Arc::new(cf), true),
                         Ok(Err(e)) => {
@@ -5706,6 +5990,7 @@ async fn main() {
     // Connect single unit
     {
         let link_context = link_context.clone();
+        let radio_plan = radio_plan.clone();
         let toc_cache = toc_cache.clone();
         let swarm_state = swarm_state.clone();
         let ui_weak = ui.as_weak();
@@ -5742,6 +6027,7 @@ async fn main() {
             };
 
             let link_context = link_context.clone();
+            let radio_plan = radio_plan.clone();
             let toc_cache = toc_cache.clone();
             let swarm_state = swarm_state.clone();
             let ui_weak = ui_weak.clone();
@@ -5756,7 +6042,7 @@ async fn main() {
 
                 let cf = match tokio::time::timeout(
                     std::time::Duration::from_secs(30),
-                    crazyflie_lib::Crazyflie::connect_from_uri(link_context.as_ref(), &uri_with_link_timeout(&uri), toc_cache),
+                    crazyflie_lib::Crazyflie::connect_from_uri(link_context.as_ref(), &link_uri(&link_context, &radio_plan, &uri).await, toc_cache),
                 ).await {
                     Ok(Ok(cf)) => Arc::new(cf),
                     Ok(Err(e)) => {
@@ -6279,6 +6565,7 @@ async fn main() {
     // Reboot single unit
     {
         let link_context = link_context.clone();
+        let radio_plan = radio_plan.clone();
         let swarm_state = swarm_state.clone();
         let ui_weak = ui.as_weak();
         ui.on_reboot_unit(move |row_index| {
@@ -6298,15 +6585,16 @@ async fn main() {
             };
 
             let link_context = link_context.clone();
+            let radio_plan = radio_plan.clone();
             let swarm_state = swarm_state.clone();
             let ui_weak = ui_weak.clone();
 
             tokio::spawn(async move {
                 eprintln!("Rebooting unit {} ({}) ...", original_index, uri);
-                if let Err(e) = send_bootloader_command(&link_context, &uri, BOOTLOADER_CMD_RESET_INIT, None).await {
+                if let Err(e) = send_bootloader_command(&link_context, &radio_plan, &uri, BOOTLOADER_CMD_RESET_INIT, None).await {
                     eprintln!("Reboot reset-init failed for {}: {:?}", uri, e);
                 }
-                if let Err(e) = send_bootloader_command(&link_context, &uri, BOOTLOADER_CMD_RESET, Some(&[0x01])).await {
+                if let Err(e) = send_bootloader_command(&link_context, &radio_plan, &uri, BOOTLOADER_CMD_RESET, Some(&[0x01])).await {
                     eprintln!("Reboot reset failed for {}: {:?}", uri, e);
                 }
 
@@ -6333,6 +6621,7 @@ async fn main() {
     // Clear TLV (persistent storage) on a single unit
     {
         let link_context = link_context.clone();
+        let radio_plan = radio_plan.clone();
         let swarm_state = swarm_state.clone();
         let toc_cache = toc_cache.clone();
         let ui_weak = ui.as_weak();
@@ -6353,6 +6642,7 @@ async fn main() {
             };
 
             let link_context = link_context.clone();
+            let radio_plan = radio_plan.clone();
             let swarm_state = swarm_state.clone();
             let toc_cache = toc_cache.clone();
             let ui_weak = ui_weak.clone();
@@ -6372,7 +6662,7 @@ async fn main() {
                     eprintln!("Clear TLV {}: connecting to {}...", name, uri);
                     match tokio::time::timeout(
                         std::time::Duration::from_secs(30),
-                        crazyflie_lib::Crazyflie::connect_from_uri(link_context.as_ref(), &uri_with_link_timeout(&uri), toc_cache),
+                        crazyflie_lib::Crazyflie::connect_from_uri(link_context.as_ref(), &link_uri(&link_context, &radio_plan, &uri).await, toc_cache),
                     ).await {
                         Ok(Ok(cf)) => (Arc::new(cf), true),
                         Ok(Err(e)) => {
@@ -6417,6 +6707,7 @@ async fn main() {
     // Power off single unit
     {
         let link_context = link_context.clone();
+        let radio_plan = radio_plan.clone();
         let swarm_state = swarm_state.clone();
         let ui_weak = ui.as_weak();
         ui.on_power_off_unit(move |row_index| {
@@ -6436,12 +6727,13 @@ async fn main() {
             };
 
             let link_context = link_context.clone();
+            let radio_plan = radio_plan.clone();
             let swarm_state = swarm_state.clone();
             let ui_weak = ui_weak.clone();
 
             tokio::spawn(async move {
                 eprintln!("Powering off unit {} ({}) ...", original_index, uri);
-                if let Err(e) = send_bootloader_command(&link_context, &uri, BOOTLOADER_CMD_ALL_OFF, None).await {
+                if let Err(e) = send_bootloader_command(&link_context, &radio_plan, &uri, BOOTLOADER_CMD_ALL_OFF, None).await {
                     eprintln!("Power off failed for {}: {:?}", uri, e);
                 }
 
@@ -6468,6 +6760,7 @@ async fn main() {
     // SysOff single unit (sleep, do NOT disconnect)
     {
         let link_context = link_context.clone();
+        let radio_plan = radio_plan.clone();
         let ui_weak = ui.as_weak();
         ui.on_sysoff_unit(move |row_index| {
             if row_index < 0 { return; }
@@ -6486,10 +6779,11 @@ async fn main() {
             };
 
             let link_context = link_context.clone();
+            let radio_plan = radio_plan.clone();
 
             tokio::spawn(async move {
                 eprintln!("Sending sysoff (sleep) to unit {} ({}) ...", original_index, uri);
-                if let Err(e) = send_bootloader_command(&link_context, &uri, BOOTLOADER_CMD_SYS_OFF, None).await {
+                if let Err(e) = send_bootloader_command(&link_context, &radio_plan, &uri, BOOTLOADER_CMD_SYS_OFF, None).await {
                     eprintln!("SysOff failed for {}: {:?}", uri, e);
                 }
             });
@@ -6499,6 +6793,7 @@ async fn main() {
     // SysOn single unit (wake, do NOT disconnect)
     {
         let link_context = link_context.clone();
+        let radio_plan = radio_plan.clone();
         let ui_weak = ui.as_weak();
         ui.on_syson_unit(move |row_index| {
             if row_index < 0 { return; }
@@ -6517,10 +6812,11 @@ async fn main() {
             };
 
             let link_context = link_context.clone();
+            let radio_plan = radio_plan.clone();
 
             tokio::spawn(async move {
                 eprintln!("Sending syson (wake) to {} ...", uri);
-                if let Err(e) = send_bootloader_command(&link_context, &uri, BOOTLOADER_CMD_SYS_ON, None).await {
+                if let Err(e) = send_bootloader_command(&link_context, &radio_plan, &uri, BOOTLOADER_CMD_SYS_ON, None).await {
                     eprintln!("SysOn failed for {}: {:?}", uri, e);
                 }
             });
@@ -6531,11 +6827,13 @@ async fn main() {
     {
         let swarm_state = swarm_state.clone();
         let positioning_data = positioning_data.clone();
+        let radio_plan = radio_plan.clone();
         let ui_weak = ui.as_weak();
 
         ui.on_open_swarm_requested(move || {
             let swarm_state = swarm_state.clone();
             let positioning_data = positioning_data.clone();
+            let radio_plan = radio_plan.clone();
             let ui_weak = ui_weak.clone();
 
             tokio::spawn(async move {
@@ -6578,6 +6876,12 @@ async fn main() {
                     let mut pd = positioning_data.lock().await;
                     *pd = PositioningData::default();
                 }
+
+                // The new swarm gets its own Crazyradios.
+                radio_plan
+                    .lock()
+                    .await
+                    .set_swarm(config.units.iter().map(|u| uri_with_default_timeout(&u.uri)).collect());
 
                 // Apply new config on UI thread
                 slint::invoke_from_event_loop(move || {
@@ -7493,11 +7797,13 @@ async fn main() {
     // Radio channel test
     {
         let link_context = link_context.clone();
+        let radio_plan = radio_plan.clone();
         let swarm_state = swarm_state.clone();
         let ui_weak = ui.as_weak();
 
         ui.on_run_radio_test(move |unit_index| {
-            let _link_context = link_context.clone();
+            let link_context = link_context.clone();
+            let radio_plan = radio_plan.clone();
             let swarm_state = swarm_state.clone();
             let ui_weak = ui_weak.clone();
 
@@ -7512,6 +7818,7 @@ async fn main() {
             ui_ref.set_radio_test_results(slint::ModelRc::new(slint::VecModel::from(Vec::<ChannelResult>::new())));
 
             tokio::spawn(async move {
+                let uri = link_uri(&link_context, &radio_plan, &uri).await;
                 run_radio_channel_test(uri, swarm_state, unit_index as usize, ui_weak).await;
             });
         });
@@ -7521,6 +7828,7 @@ async fn main() {
     {
         let swarm_state = swarm_state.clone();
         let link_context = link_context.clone();
+        let radio_plan = radio_plan.clone();
         let toc_cache = toc_cache.clone();
         let ui_weak = ui.as_weak();
         ui.on_set_tuning_params(move |thrust_base, vx_ki, vy_ki, prop_threshold, prop_pwm_ratio| {
@@ -7589,6 +7897,7 @@ async fn main() {
 
             let swarm_state = swarm_state.clone();
             let link_context = link_context.clone();
+            let radio_plan = radio_plan.clone();
             let toc_cache = toc_cache.clone();
             let ui_weak = ui_weak.clone();
 
@@ -7609,6 +7918,7 @@ async fn main() {
                     let completed = completed.clone();
                     let existing_cf = connected_units.get(&idx).cloned();
                     let link_context = link_context.clone();
+                    let radio_plan = radio_plan.clone();
                     let toc_cache = toc_cache.clone();
 
                     join_set.spawn(async move {
@@ -7628,7 +7938,7 @@ async fn main() {
                             eprintln!("Tuning {}: connecting to {}...", name, uri);
                             match tokio::time::timeout(
                                 std::time::Duration::from_secs(30),
-                                crazyflie_lib::Crazyflie::connect_from_uri(link_context.as_ref(), &uri_with_link_timeout(&uri), toc_cache),
+                                crazyflie_lib::Crazyflie::connect_from_uri(link_context.as_ref(), &link_uri(&link_context, &radio_plan, &uri).await, toc_cache),
                             ).await {
                                 Ok(Ok(cf)) => (Arc::new(cf), true),
                                 Ok(Err(e)) => {
@@ -7920,6 +8230,7 @@ async fn main() {
     {
         let swarm_state = swarm_state.clone();
         let link_context = link_context.clone();
+        let radio_plan = radio_plan.clone();
         let toc_cache = toc_cache.clone();
         let ui_weak = ui.as_weak();
         ui.on_upload_params(move || {
@@ -7936,6 +8247,7 @@ async fn main() {
 
             let swarm_state = swarm_state.clone();
             let link_context = link_context.clone();
+            let radio_plan = radio_plan.clone();
             let toc_cache = toc_cache.clone();
             let ui_weak = ui_weak.clone();
 
@@ -7996,6 +8308,7 @@ async fn main() {
                     let completed = completed.clone();
                     let existing_cf = connected_units.get(&idx).cloned();
                     let link_context = link_context.clone();
+                    let radio_plan = radio_plan.clone();
                     let toc_cache = toc_cache.clone();
                     let params = params.clone();
 
@@ -8008,7 +8321,7 @@ async fn main() {
                             eprintln!("Param upload {}: connecting to {}...", name, uri);
                             match tokio::time::timeout(
                                 std::time::Duration::from_secs(30),
-                                crazyflie_lib::Crazyflie::connect_from_uri(link_context.as_ref(), &uri_with_link_timeout(&uri), toc_cache),
+                                crazyflie_lib::Crazyflie::connect_from_uri(link_context.as_ref(), &link_uri(&link_context, &radio_plan, &uri).await, toc_cache),
                             ).await {
                                 Ok(Ok(cf)) => (Arc::new(cf), true),
                                 Ok(Err(e)) => {
@@ -8099,6 +8412,7 @@ async fn main() {
     {
         let swarm_state = swarm_state.clone();
         let link_context = link_context.clone();
+        let radio_plan = radio_plan.clone();
         let toc_cache = toc_cache.clone();
         let ui_weak = ui.as_weak();
         ui.on_clear_tlv(move || {
@@ -8115,6 +8429,7 @@ async fn main() {
 
             let swarm_state = swarm_state.clone();
             let link_context = link_context.clone();
+            let radio_plan = radio_plan.clone();
             let toc_cache = toc_cache.clone();
             let ui_weak = ui_weak.clone();
 
@@ -8152,6 +8467,7 @@ async fn main() {
                     let completed = completed.clone();
                     let existing_cf = connected_units.get(&idx).cloned();
                     let link_context = link_context.clone();
+                    let radio_plan = radio_plan.clone();
                     let toc_cache = toc_cache.clone();
 
                     join_set.spawn(async move {
@@ -8162,7 +8478,7 @@ async fn main() {
                         } else {
                             match tokio::time::timeout(
                                 std::time::Duration::from_secs(30),
-                                crazyflie_lib::Crazyflie::connect_from_uri(link_context.as_ref(), &uri_with_link_timeout(&uri), toc_cache),
+                                crazyflie_lib::Crazyflie::connect_from_uri(link_context.as_ref(), &link_uri(&link_context, &radio_plan, &uri).await, toc_cache),
                             ).await {
                                 Ok(Ok(cf)) => (Arc::new(cf), true),
                                 Ok(Err(e)) => {
@@ -8246,6 +8562,7 @@ async fn main() {
     // Health test handler
     {
         let link_context = link_context.clone();
+        let radio_plan = radio_plan.clone();
         let toc_cache = toc_cache.clone();
         let ui_weak = ui.as_weak();
         ui.on_run_health_test(move || {
@@ -8283,6 +8600,7 @@ async fn main() {
             ui_ref.set_health_test_running(true);
 
             let link_context = link_context.clone();
+            let radio_plan = radio_plan.clone();
             let toc_cache = toc_cache.clone();
             let ui_weak = ui_weak.clone();
 
@@ -8294,6 +8612,7 @@ async fn main() {
                     let ui_weak = ui_weak.clone();
                     let completed = completed.clone();
                     let link_context = link_context.clone();
+                    let radio_plan = radio_plan.clone();
                     let toc_cache = toc_cache.clone();
 
                     join_set.spawn(async move {
@@ -8314,7 +8633,7 @@ async fn main() {
                         eprintln!("Health test {}: connecting to {}...", name, uri);
                         let cf = match tokio::time::timeout(
                             std::time::Duration::from_secs(30),
-                            crazyflie_lib::Crazyflie::connect_from_uri(link_context.as_ref(), &uri_with_link_timeout(&uri), toc_cache),
+                            crazyflie_lib::Crazyflie::connect_from_uri(link_context.as_ref(), &link_uri(&link_context, &radio_plan, &uri).await, toc_cache),
                         ).await {
                             Ok(Ok(cf)) => Arc::new(cf),
                             Ok(Err(e)) => {
@@ -12443,39 +12762,15 @@ fn start_sniffer(
     })
 }
 
-fn parse_radio_uri(uri: &str) -> Option<(usize, u8, [u8; 5])> {
-    // Parse radio://N/CH/RATE/ADDR
-    let uri = uri.strip_prefix("radio://")?;
-    let parts: Vec<&str> = uri.splitn(2, '?').collect(); // strip query params
-    let path = parts[0];
-    let segments: Vec<&str> = path.split('/').collect();
-    if segments.len() != 4 {
-        return None;
-    }
-    let radio_nth: usize = segments[0].parse().ok()?;
-    let channel: u8 = segments[1].parse().ok()?;
-    // segments[2] = rate (not needed)
-    let addr_str = segments[3];
-
-    // Pad to 10 hex chars and parse
-    let padded = format!("{:0>10}", addr_str);
-    let mut address = [0u8; 5];
-    for i in 0..5 {
-        address[i] = u8::from_str_radix(&padded[i * 2..i * 2 + 2], 16).ok()?;
-    }
-
-    Some((radio_nth, channel, address))
-}
-
 async fn run_radio_channel_test(
     uri: String,
     swarm_state: SwarmState,
     _unit_index: usize,
     ui_weak: slint::Weak<AppWindow>,
 ) {
-    let (radio_nth, original_channel, address) = match parse_radio_uri(&uri) {
-        Some(v) => v,
-        None => {
+    let (radio_nth, original_channel, address) = match radios::RadioUri::parse(&uri) {
+        Ok(Some(parsed)) => (parsed.radio.unwrap_or(0), parsed.channel, parsed.address_bytes()),
+        _ => {
             eprintln!("Radio test: failed to parse URI: {}", uri);
             let ui_weak = ui_weak.clone();
             slint::invoke_from_event_loop(move || {
