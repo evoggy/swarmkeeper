@@ -5,15 +5,18 @@ use serde::{Deserialize, Serialize};
 use slint::{Model, StandardListViewItem};
 use tokio::sync::Mutex;
 
+mod account;
 mod bootloader_flash;
 mod coverage;
 mod lh_geo;
 mod lh_wizard;
+mod open_swarm;
 mod planning;
 mod plot;
 mod radios;
 mod rechannel;
 mod renderer;
+mod shared_swarms;
 mod sniffer;
 mod swarm_connect;
 mod tdoa3;
@@ -70,6 +73,8 @@ fn uri_with_link_timeout(uri: &str) -> String {
 #[derive(Serialize, Deserialize, Default)]
 struct AppSettings {
     last_swarm_config: Option<String>,
+    /// The shared swarm open last (`<org>/<swarm>`), when it wasn't a file.
+    last_shared_swarm: Option<String>,
     last_scene_config: Option<String>,
     tuning_thrust_base: Option<u16>,
     tuning_vx_ki: Option<f32>,
@@ -2360,7 +2365,10 @@ async fn main() {
 
     if let Some(ref path) = settings.last_swarm_config {
         match load_swarm_config(std::path::Path::new(path)) {
-            Ok(config) => apply_swarm_config(&ui, &config),
+            Ok(config) => {
+                apply_swarm_config(&ui, &config);
+                ui.set_swarm_source(open_swarm::file_source(std::path::Path::new(path)).into());
+            }
             Err(e) => eprintln!("{}", e),
         }
     }
@@ -2918,6 +2926,7 @@ async fn main() {
                     return;
                 }
                 let settings: AppSettings = confy::load("swarmkeeper", None).unwrap_or_default();
+                let shared = settings.last_shared_swarm.filter(|_| settings.last_swarm_config.is_none());
                 let path = settings.last_swarm_config.map(std::path::PathBuf::from);
                 let units: Vec<rechannel::Unit> = match path.as_deref().map(load_swarm_config) {
                     Some(Ok(config)) => config
@@ -2949,7 +2958,16 @@ async fn main() {
                 ui.set_rc_status("".into());
                 ui.set_rc_summary("".into());
                 rc_replan(&ui, &rc_state);
-                if !matches_list {
+                if let Some(id) = shared {
+                    ui.set_rc_plan_error(
+                        format!(
+                            "'{}' is shared on the server, and Swarmkeeper can't change shared swarms yet: \
+                             rechannel it with cfcli (cfcli swarm rechannel), then reload it here",
+                            id
+                        )
+                        .into(),
+                    );
+                } else if !matches_list {
                     ui.set_rc_plan_error("The swarm file changed since it was opened; open it again".into());
                 }
             });
@@ -6823,76 +6841,9 @@ async fn main() {
         });
     }
 
-    // Open swarm config file
-    {
-        let swarm_state = swarm_state.clone();
-        let positioning_data = positioning_data.clone();
-        let radio_plan = radio_plan.clone();
-        let ui_weak = ui.as_weak();
-
-        ui.on_open_swarm_requested(move || {
-            let swarm_state = swarm_state.clone();
-            let positioning_data = positioning_data.clone();
-            let radio_plan = radio_plan.clone();
-            let ui_weak = ui_weak.clone();
-
-            tokio::spawn(async move {
-                // Open file dialog
-                let Some(handle) = rfd::AsyncFileDialog::new()
-                    .add_filter("YAML", &["yaml", "yml"])
-                    .pick_file()
-                    .await
-                else { return };
-                let path = handle.path().to_path_buf();
-
-                // Parse the config
-                let config = match load_swarm_config(&path) {
-                    Ok(c) => c,
-                    Err(e) => {
-                        eprintln!("{}", e);
-                        return;
-                    }
-                };
-
-                // Remember the selected config path (preserve tuning settings)
-                let mut settings: AppSettings = confy::load("swarmkeeper", None).unwrap_or_default();
-                settings.last_swarm_config = Some(path.to_string_lossy().into_owned());
-                if let Err(e) = confy::store("swarmkeeper", None, &settings) {
-                    eprintln!("Failed to save settings: {}", e);
-                }
-
-                // Disconnect all connected units
-                let units: Vec<(usize, ConnectedUnit)> = {
-                    let mut state = swarm_state.lock().await;
-                    state.drain().collect()
-                };
-                for (index, connected) in units {
-                    eprintln!("Disconnecting unit {} ...", index);
-                    connected.cf.disconnect().await;
-                }
-
-                // Clear positioning data
-                {
-                    let mut pd = positioning_data.lock().await;
-                    *pd = PositioningData::default();
-                }
-
-                // The new swarm gets its own Crazyradios.
-                radio_plan
-                    .lock()
-                    .await
-                    .set_swarm(config.units.iter().map(|u| uri_with_default_timeout(&u.uri)).collect());
-
-                // Apply new config on UI thread
-                slint::invoke_from_event_loop(move || {
-                    if let Some(ui) = ui_weak.upgrade() {
-                        apply_swarm_config(&ui, &config);
-                    }
-                })
-                .ok();
-            });
-        });
-    }
+    // Open a swarm: a file, or one shared on the server; and the account
+    // that shared swarms need
+    open_swarm::setup(&ui, swarm_state.clone(), positioning_data.clone(), radio_plan.clone(), &settings);
 
     // LH Coverage shared state (Mutex for thread-safe access from rendering notifier)
     struct CoverageState {

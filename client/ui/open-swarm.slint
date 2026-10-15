@@ -1,0 +1,366 @@
+import { Palette, Button, LineEdit, ScrollView } from "std-widgets.slint";
+
+// A swarm to open: a file in the swarms folder, or a swarm shared on the
+// server (`<org>/<swarm>`).
+export struct SwarmChoice {
+    id: string,
+    name: string,
+    units: int,
+    detail: string,        // where it is stored
+    shared: bool,
+    current: bool,         // the open swarm
+}
+
+global OsColors {
+    out property <color> failed: #c62828;
+}
+
+component SwarmList inherits Rectangle {
+    in property <[SwarmChoice]> swarms;
+    in property <string> empty-text;
+    in property <bool> enabled;
+    in property <string> selected-id;
+    in property <bool> selected-shared;
+    callback select(/* id */ string, /* shared */ bool);
+    callback open(/* id */ string, /* shared */ bool);
+
+    border-radius: 4px;
+    border-width: 1px;
+    border-color: Palette.border;
+    background: Palette.alternate-background;
+
+    if root.swarms.length == 0: Text {
+        text: root.empty-text;
+        font-size: 12px;
+        color: Palette.foreground.transparentize(0.4);
+        horizontal-alignment: center;
+        vertical-alignment: center;
+        wrap: word-wrap;
+        width: parent.width - 32px;
+    }
+
+    ScrollView {
+        VerticalLayout {
+            padding: 4px;
+            spacing: 3px;
+            alignment: start;
+
+            for swarm in root.swarms: Rectangle {
+                property <bool> chosen: swarm.id == root.selected-id && swarm.shared == root.selected-shared;
+                height: 30px;
+                border-radius: 3px;
+                background: chosen ? Palette.selection-background
+                    : touch.has-hover ? Palette.background.darker(0.05) : Palette.background;
+
+                HorizontalLayout {
+                    padding-left: 8px;
+                    padding-right: 8px;
+                    spacing: 8px;
+
+                    Text {
+                        text: swarm.id;
+                        font-size: 12px;
+                        font-weight: 600;
+                        color: chosen ? Palette.selection-foreground : Palette.foreground;
+                        vertical-alignment: center;
+                        width: 170px;
+                        overflow: elide;
+                    }
+                    Text {
+                        text: swarm.current ? "\{swarm.name} (open)" : swarm.name;
+                        font-size: 12px;
+                        color: chosen ? Palette.selection-foreground : Palette.foreground;
+                        vertical-alignment: center;
+                        horizontal-stretch: 1;
+                        overflow: elide;
+                    }
+                    Text {
+                        text: swarm.units == 1 ? "1 Crazyflie" : "\{swarm.units} Crazyflies";
+                        font-size: 11px;
+                        color: chosen ? Palette.selection-foreground : Palette.foreground.transparentize(0.4);
+                        vertical-alignment: center;
+                        horizontal-alignment: right;
+                        width: 90px;
+                    }
+                    Text {
+                        text: swarm.detail;
+                        font-size: 11px;
+                        color: chosen ? Palette.selection-foreground : Palette.foreground.transparentize(0.4);
+                        vertical-alignment: center;
+                        horizontal-alignment: right;
+                        width: 150px;
+                        overflow: elide;
+                    }
+                }
+
+                touch := TouchArea {
+                    enabled: root.enabled;
+                    clicked => { root.select(swarm.id, swarm.shared); }
+                    double-clicked => { root.open(swarm.id, swarm.shared); }
+                }
+            }
+        }
+    }
+}
+
+// File > Open swarm: the swarm files on this computer and the swarms shared
+// in the user's organizations.
+export component OpenSwarmDialog inherits Rectangle {
+    in property <[SwarmChoice]> local;
+    in property <[SwarmChoice]> shared;
+    in property <string> shared-title;     // "Shared on arc.bitcraze.io"
+    in property <string> shared-note;      // loading, offline, not signed in, ...
+    in property <bool> signed-in;
+    in property <bool> busy;               // opening a swarm
+    in property <string> error;
+    in-out property <string> selected-id;
+    in-out property <bool> selected-shared;
+
+    callback open(/* id */ string, /* shared */ bool);
+    callback browse();
+    callback sign-in();
+    callback close();
+
+    width: 100%;
+    height: 100%;
+    background: black.transparentize(0.5);
+
+    TouchArea {
+        clicked => { if (!root.busy) { root.close(); } }
+    }
+
+    Rectangle {
+        width: min(760px, parent.width - 40px);
+        height: min(640px, parent.height - 40px);
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        background: Palette.background;
+        border-radius: 8px;
+        border-width: 1px;
+        border-color: Palette.border;
+
+        TouchArea {}
+
+        VerticalLayout {
+            padding: 24px;
+            spacing: 10px;
+
+            Text {
+                text: "Open Swarm";
+                font-size: 16px;
+                font-weight: 600;
+            }
+
+            Text {
+                text: "On this computer";
+                font-size: 12px;
+                font-weight: 600;
+            }
+
+            SwarmList {
+                vertical-stretch: 1;
+                swarms: root.local;
+                empty-text: "No swarm files in the swarms folder. Browse for a swarm file instead.";
+                enabled: !root.busy;
+                selected-id: root.selected-id;
+                selected-shared: root.selected-shared;
+                select(id, shared) => { root.selected-id = id; root.selected-shared = shared; }
+                open(id, shared) => { root.open(id, shared); }
+            }
+
+            HorizontalLayout {
+                spacing: 8px;
+                Text {
+                    text: root.shared-title;
+                    font-size: 12px;
+                    font-weight: 600;
+                    vertical-alignment: center;
+                }
+                Text {
+                    text: root.shared-note;
+                    font-size: 11px;
+                    color: Palette.foreground.transparentize(0.4);
+                    vertical-alignment: center;
+                    horizontal-alignment: right;
+                    horizontal-stretch: 1;
+                    overflow: elide;
+                }
+            }
+
+            if root.signed-in: SwarmList {
+                vertical-stretch: 1;
+                swarms: root.shared;
+                empty-text: "No swarms are shared in your organizations yet.";
+                enabled: !root.busy;
+                selected-id: root.selected-id;
+                selected-shared: root.selected-shared;
+                select(id, shared) => { root.selected-id = id; root.selected-shared = shared; }
+                open(id, shared) => { root.open(id, shared); }
+            }
+
+            if !root.signed-in: Rectangle {
+                vertical-stretch: 1;
+                border-radius: 4px;
+                border-width: 1px;
+                border-color: Palette.border;
+                background: Palette.alternate-background;
+
+                VerticalLayout {
+                    alignment: center;
+                    spacing: 12px;
+                    padding: 16px;
+
+                    Text {
+                        text: "Sign in to open the swarms shared in your organizations, by you, in cfcli or by the people you fly with.";
+                        font-size: 12px;
+                        color: Palette.foreground.transparentize(0.3);
+                        horizontal-alignment: center;
+                        wrap: word-wrap;
+                    }
+                    HorizontalLayout {
+                        alignment: center;
+                        Button {
+                            text: "Sign in...";
+                            enabled: !root.busy;
+                            clicked => { root.sign-in(); }
+                        }
+                    }
+                }
+            }
+
+            if root.error != "": Text {
+                text: root.error;
+                font-size: 12px;
+                color: OsColors.failed;
+                wrap: word-wrap;
+            }
+
+            HorizontalLayout {
+                spacing: 8px;
+
+                Button {
+                    text: "Browse...";
+                    enabled: !root.busy;
+                    clicked => { root.browse(); }
+                }
+                Rectangle { horizontal-stretch: 1; }
+                Button {
+                    text: "Cancel";
+                    enabled: !root.busy;
+                    clicked => { root.close(); }
+                }
+                Button {
+                    text: root.busy ? "Opening..." : "Open";
+                    primary: true;
+                    enabled: !root.busy && root.selected-id != "";
+                    clicked => { root.open(root.selected-id, root.selected-shared); }
+                }
+            }
+        }
+    }
+}
+
+// Sign in to the server that shares swarms. The browser does the signing in;
+// this waits for it.
+export component SignInDialog inherits Rectangle {
+    in-out property <string> server;
+    in property <bool> waiting;            // for the user to allow Swarmkeeper in the browser
+    in property <string> link;             // the sign-in page, while waiting
+    in property <string> error;
+
+    callback sign-in(/* server */ string);
+    callback open-link();
+    callback cancel();
+    callback close();
+
+    width: 100%;
+    height: 100%;
+    background: black.transparentize(0.5);
+
+    TouchArea {
+        clicked => { if (!root.waiting) { root.close(); } }
+    }
+
+    Rectangle {
+        width: min(560px, parent.width - 40px);
+        height: layout.preferred-height;
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        background: Palette.background;
+        border-radius: 8px;
+        border-width: 1px;
+        border-color: Palette.border;
+
+        TouchArea {}
+
+        layout := VerticalLayout {
+            padding: 24px;
+            spacing: 12px;
+
+            Text {
+                text: "Sign In";
+                font-size: 16px;
+                font-weight: 600;
+            }
+
+            Text {
+                text: root.waiting
+                    ? "Allow Swarmkeeper in the browser. The browser hands the key back to Swarmkeeper by itself; there is nothing to copy. If the browser didn't open, open this link in a browser on this computer:"
+                    : "Swarmkeeper opens the sign-in page in your browser. Sign in with GitHub or Google and allow Swarmkeeper, and it can open the swarms shared in your organizations. Swarmkeeper gets a key of its own, listed on the server's API keys page, where you can revoke it.";
+                font-size: 12px;
+                color: Palette.foreground.transparentize(0.3);
+                wrap: word-wrap;
+            }
+
+            if root.waiting: LineEdit {
+                text: root.link;
+                read-only: true;
+            }
+
+            if !root.waiting: HorizontalLayout {
+                spacing: 8px;
+                Text {
+                    text: "Server";
+                    vertical-alignment: center;
+                    width: 60px;
+                }
+                LineEdit {
+                    text <=> root.server;
+                    horizontal-stretch: 1;
+                    accepted => { root.sign-in(root.server); }
+                }
+            }
+
+            if root.error != "": Text {
+                text: root.error;
+                font-size: 12px;
+                color: OsColors.failed;
+                wrap: word-wrap;
+            }
+
+            HorizontalLayout {
+                spacing: 8px;
+                alignment: end;
+
+                if root.waiting: Button {
+                    text: "Open Browser Again";
+                    clicked => { root.open-link(); }
+                }
+                if root.waiting: Button {
+                    text: "Cancel";
+                    clicked => { root.cancel(); }
+                }
+                if !root.waiting: Button {
+                    text: "Close";
+                    clicked => { root.close(); }
+                }
+                if !root.waiting: Button {
+                    text: "Sign In";
+                    primary: true;
+                    enabled: root.server != "";
+                    clicked => { root.sign-in(root.server); }
+                }
+            }
+        }
+    }
+}

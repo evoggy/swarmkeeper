@@ -21,3 +21,6 @@ app/**/cf2.map
 Thumbs.db
 
 recordings/
+
+# Copies of swarms shared on the server
+client/synced/
