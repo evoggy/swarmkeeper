@@ -12,11 +12,13 @@ import { SnifferContent, SnifferAnchorRow, SnifferFeedRow, SnifferMatrixRow, Sni
 import { PlotBridge, PlotLine, AxisTick, LegendEntry, PlotNewConfigDialog } from "plot.slint";
 import { ViewSettings } from "view-settings.slint";
 import { RechannelDialog, RechannelRow, RcRowState } from "rechannel.slint";
+import { OpenSwarmDialog, SignInDialog, SwarmChoice } from "open-swarm.slint";
 
 // Re-export the plot globals/structs from the root so the Rust side can reach
 // PlotBridge via `ui.global::<PlotBridge>()` and the generated data structs.
 export { PlotBridge, PlotLine, AxisTick, LegendEntry, ViewSettings }
 export { RechannelRow, RcRowState }
+export { SwarmChoice }
 
 export struct HealthTestResult {
     name: string,
@@ -110,8 +112,15 @@ component MenuBar inherits Rectangle {
     callback set-param-clicked();
     callback health-test-clicked();
     callback flash-firmware-clicked();
+    callback sign-in-clicked();
+    callback sign-out-clicked();
 
     in property <bool> connected;
+    // The account on the server that shares swarms (right end of the bar).
+    in property <string> account-label;
+    in property <string> account-text;
+    in property <bool> signed-in;
+    in property <bool> needs-sign-in;     // signed out, or the key no longer works
 
     height: 30px;
 
@@ -126,6 +135,65 @@ component MenuBar inherits Rectangle {
         MenuTitle { width: 68px; text: "System"; clicked => { system-popup.show(); } }
         MenuTitle { width: 60px; text: "Setup"; clicked => { setup-popup.show(); } }
         MenuTitle { width: 92px; text: "Diagnostics"; clicked => { diagnostics-popup.show(); } }
+    }
+
+    Rectangle {
+        x: root.width - self.width - 8px;
+        width: account-label-text.preferred-width + 24px;
+        height: root.height;
+
+        account-label-text := Text {
+            text: root.account-label;
+            font-size: 13px;
+            color: root.needs-sign-in && root.signed-in ? #c62828 : Palette.foreground;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+
+        TouchArea {
+            clicked => { account-popup.show(); }
+            mouse-cursor: pointer;
+        }
+    }
+
+    account-popup := PopupWindow {
+        x: root.width - 320px - 8px;
+        y: root.height;
+        width: 320px;
+
+        Rectangle {
+            width: 320px;
+            height: account-menu.preferred-height;
+            background: Palette.background;
+            border-width: 1px;
+            border-color: Palette.border;
+
+            account-menu := VerticalLayout {
+                padding-bottom: 4px;
+
+                VerticalLayout {
+                    padding: 12px;
+                    padding-left: 16px;
+                    Text {
+                        text: root.account-text;
+                        font-size: 12px;
+                        color: Palette.foreground.transparentize(0.2);
+                        wrap: word-wrap;
+                    }
+                }
+                MenuSeparator {}
+                if root.needs-sign-in: MenuItem {
+                    text: root.signed-in ? "Sign in again..." : "Sign in...";
+                    // Call before closing: closing drops the popup, and with it
+                    // this conditional item's way back to the menu bar.
+                    clicked => { sign-in-clicked(); account-popup.close(); }
+                }
+                if root.signed-in: MenuItem {
+                    text: "Sign out";
+                    clicked => { sign-out-clicked(); account-popup.close(); }
+                }
+            }
+        }
     }
 
     file-popup := PopupWindow {
@@ -358,6 +426,8 @@ component MenuBar inherits Rectangle {
 
 component SwarmInfoBar inherits Rectangle {
     in property <string> swarm-name;
+    in property <string> swarm-source;     // where the swarm is from
+    in property <string> swarm-update;     // a newer revision on the server, if any
     in property <[UnitData]> units;
     in property <bool> connected;
     in property <int> connected-count;
@@ -370,6 +440,7 @@ component SwarmInfoBar inherits Rectangle {
     callback reconnect-clicked();
     callback land-swarm-clicked();
     callback emergency-stop-clicked();
+    callback reload-clicked();
 
     property <float> progress: units.length > 0 ? connected-count / units.length : 0;
     property <bool> connecting: connected && progress < 1.0;
@@ -385,11 +456,36 @@ component SwarmInfoBar inherits Rectangle {
         padding-right: 16px;
         spacing: 16px;
 
-        Text {
-            text: swarm-name;
-            font-size: 14px;
-            font-weight: 600;
-            vertical-alignment: center;
+        VerticalLayout {
+            alignment: center;
+            spacing: 2px;
+
+            Text {
+                text: swarm-name;
+                font-size: 14px;
+                font-weight: 600;
+            }
+            if swarm-source != "": Text {
+                text: swarm-source;
+                font-size: 11px;
+                color: Palette.foreground.transparentize(0.4);
+            }
+        }
+
+        if swarm-update != "": HorizontalLayout {
+            alignment: center;
+            spacing: 6px;
+
+            Text {
+                text: swarm-update;
+                font-size: 12px;
+                color: dodgerblue;
+                vertical-alignment: center;
+            }
+            Button {
+                text: "Reload";
+                clicked => { reload-clicked(); }
+            }
         }
 
         VerticalLayout {
@@ -727,6 +823,39 @@ export component AppWindow inherits Window {
     callback rc-channels-edited(string);
     callback rc-start();
 
+    // File > Open swarm: the swarm files on this computer and the shared swarms
+    in-out property <bool> os-dialog-visible: false;
+    in-out property <[SwarmChoice]> os-local;
+    in-out property <[SwarmChoice]> os-shared;
+    in-out property <string> os-shared-title: "Shared";
+    in-out property <string> os-shared-note;
+    in-out property <bool> os-busy: false;
+    in-out property <string> os-error;
+    in-out property <string> os-selected-id;
+    in-out property <bool> os-selected-shared;
+    callback os-show();                                // list the swarms
+    callback os-open(/* id */ string, /* shared */ bool);
+
+    // Where the open swarm is from, and a newer revision of a shared one
+    in-out property <string> swarm-source;
+    in-out property <string> swarm-update;
+    callback reload-swarm();
+
+    // The account on the server that shares swarms
+    in-out property <string> account-label: "Sign in";
+    in-out property <string> account-text;
+    in-out property <bool> signed-in: false;
+    in-out property <bool> needs-sign-in: true;
+    in-out property <bool> sign-in-dialog-visible: false;
+    in-out property <string> sign-in-server;
+    in-out property <bool> sign-in-waiting: false;
+    in-out property <string> sign-in-link;
+    in-out property <string> sign-in-error;
+    callback sign-in(/* server */ string);
+    callback sign-in-open-link();
+    callback sign-in-cancel();
+    callback sign-out();
+
     // Confirmation dialog
     private property <bool> confirm-power-off-visible: false;
     private property <bool> confirm-clear-tlv-visible: false;
@@ -1043,7 +1172,21 @@ export component AppWindow inherits Window {
         MenuBar {
             connected: root.swarm-connected;
             exit-clicked => { exit-requested(); }
-            open-swarm-clicked => { open-swarm-requested(); }
+            open-swarm-clicked => {
+                os-error = "";
+                os-busy = false;
+                os-dialog-visible = true;
+                os-show();
+            }
+            account-label: root.account-label;
+            account-text: root.account-text;
+            signed-in: root.signed-in;
+            needs-sign-in: root.needs-sign-in;
+            sign-in-clicked => {
+                sign-in-error = "";
+                sign-in-dialog-visible = true;
+            }
+            sign-out-clicked => { sign-out(); }
             connect-clicked => { connect-swarm(); }
             disconnect-clicked => { disconnect-swarm(); }
             reconnect-clicked => { reconnect-swarm(); }
@@ -1091,6 +1234,9 @@ export component AppWindow inherits Window {
 
         SwarmInfoBar {
             swarm-name: root.swarm-name;
+            swarm-source: root.swarm-source;
+            swarm-update: root.swarm-update;
+            reload-clicked => { reload-swarm(); }
             units: root.units;
             connected: root.swarm-connected;
             connected-count: root.connected-count;
@@ -1954,6 +2100,41 @@ export component AppWindow inherits Window {
         channels-edited(text) => { root.rc-channels-edited(text); }
         start => { root.rc-start(); }
         close => { root.rc-dialog-visible = false; }
+    }
+
+    // Open swarm dialog
+    if os-dialog-visible: OpenSwarmDialog {
+        local: root.os-local;
+        shared: root.os-shared;
+        shared-title: root.os-shared-title;
+        shared-note: root.os-shared-note;
+        signed-in: root.signed-in;
+        busy: root.os-busy;
+        error: root.os-error;
+        selected-id <=> root.os-selected-id;
+        selected-shared <=> root.os-selected-shared;
+        open(id, shared) => { root.os-open(id, shared); }
+        browse => {
+            root.os-dialog-visible = false;
+            root.open-swarm-requested();
+        }
+        sign-in => {
+            root.sign-in-error = "";
+            root.sign-in-dialog-visible = true;
+        }
+        close => { root.os-dialog-visible = false; }
+    }
+
+    // Sign-in dialog, over the open swarm dialog
+    if sign-in-dialog-visible: SignInDialog {
+        server <=> root.sign-in-server;
+        waiting: root.sign-in-waiting;
+        link: root.sign-in-link;
+        error: root.sign-in-error;
+        sign-in(server) => { root.sign-in(server); }
+        open-link => { root.sign-in-open-link(); }
+        cancel => { root.sign-in-cancel(); }
+        close => { root.sign-in-dialog-visible = false; }
     }
 
     // Progress dialog overlay
