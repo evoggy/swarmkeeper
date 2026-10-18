@@ -1237,7 +1237,7 @@ fn map_joystick_axes(lx: f32, ly: f32, rx: f32, ry: f32) -> (f32, f32, f32, u16)
 }
 
 async fn run_manual_control(
-    cf: Arc<crazyflie_lib::Crazyflie>,
+    cf: Arc<crazyflie_connection_server::Crazyflie>,
     gilrs: Arc<std::sync::Mutex<gilrs::Gilrs>>,
     gamepad_id: gilrs::GamepadId,
     running: Arc<AtomicBool>,
@@ -3725,9 +3725,9 @@ async fn main() {
             let ui_weak = ui_weak.clone();
 
             tokio::spawn(async move {
-                let connected_units: Vec<(usize, Arc<crazyflie_lib::Crazyflie>)> = {
+                let connected_units: Vec<(usize, Arc<crazyflie_connection_server::Crazyflie>)> = {
                     let state = swarm_state.lock().await;
-                    lib_units(&state, "Flying trajectories").into_iter().collect()
+                    client_units(&state)
                 };
 
                 if connected_units.is_empty() {
@@ -5381,7 +5381,7 @@ async fn main() {
                 let cf = {
                     let state = swarm_state.lock().await;
                     match state.get(&original_index) {
-                        Some(cu) => match cu.lib("Flying a trajectory") { Some(cf) => cf, None => return },
+                        Some(cu) => cu.cf.clone(),
                         None => {
                             eprintln!("Unit {} is not connected", original_index);
                             return;
@@ -6440,7 +6440,7 @@ async fn main() {
                     let cf = {
                         let state = swarm_state.lock().await;
                         match state.get(&original_index) {
-                            Some(cu) => match cu.lib("Manual control") { Some(cf) => cf, None => return },
+                            Some(cu) => cu.cf.clone(),
                             None => {
                                 eprintln!("Unit {} is not connected", original_index);
                                 return;
@@ -6513,7 +6513,7 @@ async fn main() {
                 let cf = {
                     let state = swarm_state.lock().await;
                     match state.get(&original_index) {
-                        Some(cu) => match cu.lib("Manual control") { Some(cf) => cf, None => return },
+                        Some(cu) => cu.cf.clone(),
                         None => {
                             eprintln!("Unit {} is not connected", original_index);
                             return;
@@ -6682,7 +6682,7 @@ async fn main() {
                 let cf = {
                     let state = swarm_state.lock().await;
                     match state.get(&original_index) {
-                        Some(cu) => match cu.lib("Crash recovery") { Some(cf) => cf, None => return },
+                        Some(cu) => cu.cf.clone(),
                         None => {
                             eprintln!("Unit {} is not connected", original_index);
                             return;
@@ -11936,7 +11936,7 @@ async fn main() {
                 // Get CF from swarm state
                 let cf = {
                     let state = ss.lock().await;
-                    state.get(&unit_index).and_then(|u| u.lib("The lighthouse wizard"))
+                    state.get(&unit_index).map(|u| u.cf.clone())
                 };
 
                 let Some(cf) = cf else {
@@ -11951,7 +11951,7 @@ async fn main() {
                 };
 
                 // Enable angle stream
-                if let Err(e) = cf.param.set("locSrv.enLhAngleStream", 1u8).await {
+                if let Err(e) = cf.param.set_lossy("locSrv.enLhAngleStream", 1.0).await {
                     eprintln!("Failed to enable angle stream: {}", e);
                     slint::invoke_from_event_loop(move || {
                         if let Some(ui) = uw.upgrade() {
@@ -11965,7 +11965,21 @@ async fn main() {
 
                 // Collect angle samples (average 50 readings per BS)
                 use futures::StreamExt;
-                let mut angle_stream = cf.localization.lighthouse.angle_stream().await;
+                let mut angle_stream = match cf.localization.lighthouse.angle_stream().await {
+                    Ok(stream) => stream,
+                    Err(e) => {
+                        eprintln!("Failed to open the angle stream: {}", e);
+                        let _ = cf.param.set_lossy("locSrv.enLhAngleStream", 0.0).await;
+                        slint::invoke_from_event_loop(move || {
+                            if let Some(ui) = uw.upgrade() {
+                                ui.set_lh_wizard_measuring(false);
+                                ui.set_lh_wizard_notification_text("Failed to open the angle stream".into());
+                                ui.set_lh_wizard_notification_color(slint::Color::from_argb_u8(255, 244, 67, 54));
+                            }
+                        }).ok();
+                        return;
+                    }
+                };
                 let mut bs_samples: std::collections::HashMap<u8, Vec<([f32; 4], [f32; 4])>> = std::collections::HashMap::new();
                 let samples_needed = 50;
                 let timeout = tokio::time::Duration::from_secs(3);
@@ -11987,7 +12001,7 @@ async fn main() {
                 }).await;
 
                 // Disable angle stream
-                let _ = cf.param.set("locSrv.enLhAngleStream", 0u8).await;
+                let _ = cf.param.set_lossy("locSrv.enLhAngleStream", 0.0).await;
 
                 // Debug: print collection results
                 eprintln!("[LH Wizard] Angle collection done. Timeout: {}, BS count: {}", result.is_err(), bs_samples.len());
