@@ -804,6 +804,11 @@ type SwarmState = Arc<Mutex<HashMap<usize, ConnectedUnit>>>;
 /// The crazyflie-lib connections of the connected units, for the features
 /// not ported to the client API yet. Through a connection server there are
 /// none, with a note on stderr.
+/// The connected units, through the client API.
+fn client_units(state: &HashMap<usize, ConnectedUnit>) -> Vec<(usize, Arc<crazyflie_connection_server::Crazyflie>)> {
+    state.iter().map(|(idx, cu)| (*idx, cu.cf.clone())).collect()
+}
+
 fn lib_units(state: &HashMap<usize, ConnectedUnit>, what: &str) -> Vec<(usize, Arc<crazyflie_lib::Crazyflie>)> {
     let units: Vec<_> = state.iter().filter_map(|(idx, cu)| Some((*idx, cu.cf.lib()?))).collect();
     if units.len() < state.len() {
@@ -868,6 +873,18 @@ async fn connect_units(
     };
     if !drives_radios {
         return attach_units(units, client, setup).await;
+    }
+
+    // A Crazyflie the server already has (another program attached to it, or
+    // it lingers after a one-off job) is attached to, not connected again: a
+    // second crazyflie-lib connection would reset its log blocks.
+    let served: std::collections::HashSet<String> =
+        client.list().await.map(|cfs| cfs.into_iter().map(|cf| cf.uri).collect()).unwrap_or_default();
+    let (served_units, units): (Vec<_>, Vec<_>) = units.into_iter().partition(|(_, uri)| {
+        crazyflie_connection_server::normalize_uri(uri).is_ok_and(|uri| served.contains(&uri.key))
+    });
+    if !served_units.is_empty() {
+        tokio::spawn(attach_units(served_units, client.clone(), setup.clone()));
     }
 
     let mut targets = Vec::new();
@@ -1038,26 +1055,8 @@ async fn setup_connected_unit(i: usize, uri: String, cf: Arc<crazyflie_connectio
     start_telemetry(i, uri, cf, ui_weak, positioning_data, positioning_source, goto_targets, unit_count).await;
 }
 
-/// Short human-readable name for a parameter value type (matches the strings
-/// understood by [`value_type_from_name`]).
-fn value_type_name(vt: crazyflie_lib::ValueType) -> &'static str {
-    use crazyflie_lib::ValueType::*;
-    match vt {
-        U8 => "u8",
-        U16 => "u16",
-        U32 => "u32",
-        U64 => "u64",
-        I8 => "i8",
-        I16 => "i16",
-        I32 => "i32",
-        I64 => "i64",
-        F16 => "f16",
-        F32 => "f32",
-        F64 => "f64",
-    }
-}
-
-/// Inverse of [`value_type_name`]: map a type name back to a `ValueType`.
+/// The `ValueType` of a parameter type name, as the client API gives it
+/// (`u8`, `f32`, …).
 fn value_type_from_name(name: &str) -> Option<crazyflie_lib::ValueType> {
     use crazyflie_lib::ValueType::*;
     Some(match name {
@@ -1514,17 +1513,17 @@ fn strip_console_prefix(line: &str) -> &str {
 /// return the first line that looks like an assert snapshot. Falls back to the
 /// first line seen if none matches, and to a local message on timeout.
 async fn read_assert_info(
-    cf: &crazyflie_lib::Crazyflie,
+    cf: &crazyflie_connection_server::Crazyflie,
     wait_timeout: std::time::Duration,
 ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
     use futures::StreamExt;
 
     // Subscribe before triggering so the dump cannot be missed. No history, so
     // there is nothing to drain first.
-    let mut stream = cf.console.line_stream_no_history().await;
+    let mut stream = cf.console.line_stream_no_history().await?;
 
     cf.param
-        .set(ASSERT_INFO_PARAM, 1u8)
+        .set_lossy(ASSERT_INFO_PARAM, 1.0)
         .await
         .map_err(|e| format!("could not set {}: {}", ASSERT_INFO_PARAM, e))?;
 
@@ -4914,10 +4913,8 @@ async fn main() {
     // Read the firmware assert snapshot of the selected unit and show it in the
     // sidebar's Assert Info popup (same mechanism as `cfcli debug assert`).
     {
-        let link_context = link_context.clone();
-        let radio_plan = radio_plan.clone();
+        let connection = connection.clone();
         let swarm_state = swarm_state.clone();
-        let toc_cache = toc_cache.clone();
         let ui_weak = ui.as_weak();
 
         ui.on_read_assert(move |row_index| {
@@ -4940,10 +4937,8 @@ async fn main() {
                 (idx, unit.uri.to_string(), unit.name.to_string())
             };
 
-            let link_context = link_context.clone();
-            let radio_plan = radio_plan.clone();
+            let connection = connection.clone();
             let swarm_state = swarm_state.clone();
-            let toc_cache = toc_cache.clone();
             let ui_weak = ui_weak.clone();
 
             // Report the outcome (text + busy cleared) back to the popup.
@@ -4967,16 +4962,17 @@ async fn main() {
                 // connect temporarily for the duration of the read.
                 let existing_cf = {
                     let state = swarm_state.lock().await;
-                    state.get(&original_index).and_then(|cu| cu.lib("Reading the assert info"))
+                    state.get(&original_index).map(|cu| cu.cf.clone())
                 };
 
                 let (cf, temp_connection) = if let Some(cf) = existing_cf {
                     (cf, false)
                 } else {
                     eprintln!("Read assert {}: connecting to {}...", name, uri);
+                    let client = connection.read().await.client().clone();
                     match tokio::time::timeout(
                         std::time::Duration::from_secs(30),
-                        crazyflie_lib::Crazyflie::connect_from_uri(link_context.as_ref(), &link_uri(&link_context, &radio_plan, &uri).await, toc_cache),
+                        client.attach(&uri_with_link_timeout(&uri)),
                     ).await {
                         Ok(Ok(cf)) => (Arc::new(cf), true),
                         Ok(Err(e)) => {
@@ -4995,7 +4991,7 @@ async fn main() {
                 let result = read_assert_info(&cf, std::time::Duration::from_secs(3)).await;
 
                 if temp_connection {
-                    cf.disconnect().await;
+                    cf.detach();
                 }
 
                 match result {
@@ -7904,9 +7900,7 @@ async fn main() {
     // Set tuning parameters on all units (works with or without swarm connected)
     {
         let swarm_state = swarm_state.clone();
-        let link_context = link_context.clone();
-        let radio_plan = radio_plan.clone();
-        let toc_cache = toc_cache.clone();
+        let connection = connection.clone();
         let ui_weak = ui.as_weak();
         ui.on_set_tuning_params(move |thrust_base, vx_ki, vy_ki, prop_threshold, prop_pwm_ratio| {
             let thrust_base: u16 = match thrust_base.trim().parse() {
@@ -7973,17 +7967,16 @@ async fn main() {
             ui_ref.set_progress_dialog_visible(true);
 
             let swarm_state = swarm_state.clone();
-            let link_context = link_context.clone();
-            let radio_plan = radio_plan.clone();
-            let toc_cache = toc_cache.clone();
+            let connection = connection.clone();
             let ui_weak = ui_weak.clone();
 
             tokio::spawn(async move {
                 // Check if units are already connected
-                let connected_units: HashMap<usize, Arc<crazyflie_lib::Crazyflie>> = {
+                let connected_units: HashMap<usize, Arc<crazyflie_connection_server::Crazyflie>> = {
                     let state = swarm_state.lock().await;
-                    lib_units(&state, "Tuning").into_iter().collect()
+                    client_units(&state).into_iter().collect()
                 };
+                let client = connection.read().await.client().clone();
                 let swarm_connected = !connected_units.is_empty();
                 eprintln!("Tuning: {} units, swarm connected: {}", total, swarm_connected);
 
@@ -7994,9 +7987,7 @@ async fn main() {
                     let ui_weak = ui_weak.clone();
                     let completed = completed.clone();
                     let existing_cf = connected_units.get(&idx).cloned();
-                    let link_context = link_context.clone();
-                    let radio_plan = radio_plan.clone();
-                    let toc_cache = toc_cache.clone();
+                    let client = client.clone();
 
                     join_set.spawn(async move {
                         let params: [(&str, f64); 5] = [
@@ -8015,7 +8006,7 @@ async fn main() {
                             eprintln!("Tuning {}: connecting to {}...", name, uri);
                             match tokio::time::timeout(
                                 std::time::Duration::from_secs(30),
-                                crazyflie_lib::Crazyflie::connect_from_uri(link_context.as_ref(), &link_uri(&link_context, &radio_plan, &uri).await, toc_cache),
+                                client.attach(&uri_with_link_timeout(&uri)),
                             ).await {
                                 Ok(Ok(cf)) => (Arc::new(cf), true),
                                 Ok(Err(e)) => {
@@ -8061,8 +8052,8 @@ async fn main() {
                         }
 
                         if temp_connection {
-                            cf.disconnect().await;
-                            eprintln!("Tuning {}: disconnected", name);
+                            cf.detach();
+                            eprintln!("Tuning {}: detached", name);
                         }
 
                         let done = completed.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
@@ -8115,9 +8106,9 @@ async fn main() {
             let swarm_state = swarm_state.clone();
             let ui_weak = ui_weak.clone();
             tokio::spawn(async move {
-                let cfs: Vec<Arc<crazyflie_lib::Crazyflie>> = {
+                let cfs: Vec<Arc<crazyflie_connection_server::Crazyflie>> = {
                     let state = swarm_state.lock().await;
-                    lib_units(&state, "Reading the parameter list").into_iter().map(|(_, cf)| cf).collect()
+                    client_units(&state).into_iter().map(|(_, cf)| cf).collect()
                 };
                 let unit_count = cfs.len() as i32;
 
@@ -8134,10 +8125,10 @@ async fn main() {
                     for name in common {
                         // Only writable params can be set; skip read-only ones.
                         if first.param.is_writable(&name).unwrap_or(false) {
-                            if let Ok(vt) = first.param.get_type(&name) {
+                            if let Ok(type_name) = first.param.get_type(&name) {
                                 list.push(SwarmParamData {
                                     name: name.clone().into(),
-                                    type_name: value_type_name(vt).into(),
+                                    type_name: type_name.into(),
                                     writable: true,
                                 });
                             }
@@ -8199,9 +8190,9 @@ async fn main() {
             }
 
             tokio::spawn(async move {
-                let units: Vec<(usize, Arc<crazyflie_lib::Crazyflie>)> = {
+                let units: Vec<(usize, Arc<crazyflie_connection_server::Crazyflie>)> = {
                     let state = swarm_state.lock().await;
-                    lib_units(&state, "Setting parameters").into_iter().collect()
+                    client_units(&state)
                 };
                 let total = units.len();
                 if total == 0 {
@@ -8227,20 +8218,24 @@ async fn main() {
                     let failed = failed.clone();
                     join_set.spawn(async move {
                         let result: Result<(), String> = async {
-                            let vt = cf
+                            let type_name = cf
                                 .param
                                 .get_type(&name)
                                 .map_err(|e| format!("type lookup failed: {:?}", e))?;
+                            let vt = value_type_from_name(type_name)
+                                .ok_or_else(|| format!("unknown type {}", type_name))?;
+                            // Parsed as the param's type to check the value, sent
+                            // as f64 like every value through the client API.
                             let parsed = parse_param_value(vt, &value)?;
                             cf.param
-                                .set(name.as_str(), parsed)
+                                .set_lossy(name.as_str(), parsed.to_f64_lossy())
                                 .await
                                 .map_err(|e| format!("set failed: {:?}", e))?;
                             // Optionally store to flash so the value survives reboot.
                             // Only persistent params can be stored; skip the rest
                             // (the live value above is still applied).
                             if persist {
-                                match cf.param.is_persistent(&name).await {
+                                match cf.param.is_persistent(&name) {
                                     Ok(true) => cf
                                         .param
                                         .persistent_store(name.as_str())
@@ -8306,9 +8301,7 @@ async fn main() {
     // Upload persistent parameters from a file to all units
     {
         let swarm_state = swarm_state.clone();
-        let link_context = link_context.clone();
-        let radio_plan = radio_plan.clone();
-        let toc_cache = toc_cache.clone();
+        let connection = connection.clone();
         let ui_weak = ui.as_weak();
         ui.on_upload_params(move || {
             // Collect unit URIs and names from the UI
@@ -8323,9 +8316,7 @@ async fn main() {
             }
 
             let swarm_state = swarm_state.clone();
-            let link_context = link_context.clone();
-            let radio_plan = radio_plan.clone();
-            let toc_cache = toc_cache.clone();
+            let connection = connection.clone();
             let ui_weak = ui_weak.clone();
 
             tokio::spawn(async move {
@@ -8370,10 +8361,11 @@ async fn main() {
                 }).ok();
 
                 // Check if units are already connected
-                let connected_units: HashMap<usize, Arc<crazyflie_lib::Crazyflie>> = {
+                let connected_units: HashMap<usize, Arc<crazyflie_connection_server::Crazyflie>> = {
                     let state = swarm_state.lock().await;
-                    lib_units(&state, "Uploading parameters").into_iter().collect()
+                    client_units(&state).into_iter().collect()
                 };
+                let client = connection.read().await.client().clone();
                 let swarm_connected = !connected_units.is_empty();
                 eprintln!("Param upload: {} units, swarm connected: {}", total, swarm_connected);
 
@@ -8384,9 +8376,7 @@ async fn main() {
                     let ui_weak = ui_weak.clone();
                     let completed = completed.clone();
                     let existing_cf = connected_units.get(&idx).cloned();
-                    let link_context = link_context.clone();
-                    let radio_plan = radio_plan.clone();
-                    let toc_cache = toc_cache.clone();
+                    let client = client.clone();
                     let params = params.clone();
 
                     join_set.spawn(async move {
@@ -8398,7 +8388,7 @@ async fn main() {
                             eprintln!("Param upload {}: connecting to {}...", name, uri);
                             match tokio::time::timeout(
                                 std::time::Duration::from_secs(30),
-                                crazyflie_lib::Crazyflie::connect_from_uri(link_context.as_ref(), &link_uri(&link_context, &radio_plan, &uri).await, toc_cache),
+                                client.attach(&uri_with_link_timeout(&uri)),
                             ).await {
                                 Ok(Ok(cf)) => (Arc::new(cf), true),
                                 Ok(Err(e)) => {
@@ -8442,7 +8432,7 @@ async fn main() {
                                     continue;
                                 }
                             }
-                            match cf.param.is_persistent(param_name).await {
+                            match cf.param.is_persistent(param_name) {
                                 Ok(true) => match cf.param.persistent_store(param_name).await {
                                     Ok(()) => eprintln!("  {} {} stored OK", name, param_name),
                                     Err(e) => eprintln!("  {} {} persistent_store FAILED: {:?}", name, param_name, e),
@@ -8453,8 +8443,8 @@ async fn main() {
                         }
 
                         if temp_connection {
-                            cf.disconnect().await;
-                            eprintln!("Param upload {}: disconnected", name);
+                            cf.detach();
+                            eprintln!("Param upload {}: detached", name);
                         }
 
                         let done = completed.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
