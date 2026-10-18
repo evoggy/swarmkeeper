@@ -134,7 +134,7 @@ async fn switch_swarm(ctx: &Ctx, config: SwarmConfig, source: Source) {
     };
     for (index, connected) in units {
         eprintln!("Disconnecting unit {} ...", index);
-        connected.cf.disconnect().await;
+        connected.disconnect().await;
     }
 
     // Clear positioning data

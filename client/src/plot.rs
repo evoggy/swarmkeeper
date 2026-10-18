@@ -1175,10 +1175,16 @@ fn resolve_and_start(
         }
         let cf = {
             let st = swarm_state.lock().await;
-            st.get(&orig).map(|cu| cu.cf.clone())
+            st.get(&orig).map(|cu| cu.cf.lib())
         };
         let Some(cf) = cf else {
             set_status(&weak, "Selected unit is not connected.");
+            set_logging_active(&weak, false);
+            return;
+        };
+        // The plot still creates its own log blocks with crazyflie-lib.
+        let Some(cf) = cf else {
+            set_status(&weak, "Plotting doesn't work through a connection server yet.");
             set_logging_active(&weak, false);
             return;
         };
