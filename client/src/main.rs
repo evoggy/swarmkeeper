@@ -799,9 +799,6 @@ struct UnitSetup {
     connection: connection::SharedConnection,
 }
 
-/// Units attached at the same time through a connection server.
-const SERVER_ATTACH_AT_ONCE: usize = 8;
-
 /// Connect to these units (index, URI) and set each one up as soon as it is
 /// connected. When Swarmkeeper drives the Crazyradios, they are spread over
 /// them by the radio plan, a few at a time on each, and each TOC that isn't in
@@ -842,7 +839,7 @@ async fn connect_units(
             u.radio = radio.map_or(-1, |r| r as i32);
         });
         eprintln!("Connecting to {} ...", link_uri);
-        targets.push(swarm_connect::Target { index: *index, link_uri, radio });
+        targets.push(swarm_connect::Target { index: *index, link_uri });
     }
     let uris: Arc<HashMap<usize, String>> = Arc::new(units.into_iter().collect());
 
@@ -880,20 +877,15 @@ async fn connect_units(
     swarm_connect::connect_all(link_context, toc_cache, targets, connected, waiting).await;
 }
 
-/// Attach to these units through a connection server, a few at a time, and
-/// set each one up as soon as it is attached.
+/// Attach to these units through a connection server, all at once, and set
+/// each one up as soon as it is attached.
 async fn attach_units(units: Vec<(usize, String)>, client: crazyflie_connection_server::Client, setup: UnitSetup) {
-    let at_once = Arc::new(tokio::sync::Semaphore::new(SERVER_ATTACH_AT_ONCE));
     let mut join_set = tokio::task::JoinSet::new();
     for (index, uri) in units {
         eprintln!("Attaching to {} through {} ...", uri, client.mode());
-        let (client, setup, at_once) = (client.clone(), setup.clone(), at_once.clone());
+        let (client, setup) = (client.clone(), setup.clone());
         join_set.spawn(async move {
-            let attached = {
-                let _turn = at_once.acquire().await;
-                client.attach(&uri_with_link_timeout(&uri)).await
-            };
-            match attached {
+            match client.attach(&uri_with_link_timeout(&uri)).await {
                 Ok(cf) => setup_connected_unit(index, uri, Arc::new(cf), setup).await,
                 Err(e) => {
                     let error_msg = e.to_string();
@@ -2979,8 +2971,7 @@ async fn main() {
                 let mut targets = Vec::new();
                 for (index, uri) in uris.iter().enumerate() {
                     let link_uri = link_uri(&link_context, &radio_plan, uri).await;
-                    let radio = radios::RadioUri::parse(&link_uri).ok().flatten().and_then(|r| r.radio);
-                    targets.push(swarm_connect::Target { index, link_uri, radio });
+                    targets.push(swarm_connect::Target { index, link_uri });
                 }
 
                 let done = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -8313,7 +8304,7 @@ async fn main() {
                             // Only persistent params can be stored; skip the rest
                             // (the live value above is still applied).
                             if persist {
-                                match cf.param.is_persistent(&name) {
+                                match cf.param.is_persistent(&name).await {
                                     Ok(true) => cf
                                         .param
                                         .persistent_store(name.as_str())
@@ -8510,7 +8501,7 @@ async fn main() {
                                     continue;
                                 }
                             }
-                            match cf.param.is_persistent(param_name) {
+                            match cf.param.is_persistent(param_name).await {
                                 Ok(true) => match cf.param.persistent_store(param_name).await {
                                     Ok(()) => eprintln!("  {} {} stored OK", name, param_name),
                                     Err(e) => eprintln!("  {} {} persistent_store FAILED: {:?}", name, param_name, e),
