@@ -120,6 +120,7 @@ component MenuBar inherits Rectangle {
     callback connection-opened();
 
     in property <bool> connected;
+    in property <bool> drives-radios: true;
     in property <string> connection-label;
     in property <string> connection-text;
     in property <string> connection-mode;
@@ -391,13 +392,13 @@ component MenuBar inherits Rectangle {
                 }
                 MenuSeparator {}
                 MenuItem {
-                    text: "Sync Blink";
-                    enabled: root.connected;
+                    text: root.drives-radios ? "Sync Blink" : "Sync Blink (this computer's Crazyradios only)";
+                    enabled: root.connected && root.drives-radios;
                     clicked => { flight-popup.close(); sync-blink-clicked(); }
                 }
                 MenuItem {
-                    text: "Delayed Sync Blink";
-                    enabled: root.connected;
+                    text: root.drives-radios ? "Delayed Sync Blink" : "Delayed Sync Blink (this computer's Crazyradios only)";
+                    enabled: root.connected && root.drives-radios;
                     clicked => { flight-popup.close(); delayed-sync-blink-clicked(); }
                 }
                 MenuSeparator {}
@@ -947,6 +948,9 @@ export component AppWindow inherits Window {
     in-out property <string> connection-label;
     in-out property <string> connection-text;
     in-out property <string> connection-mode: "auto";
+    // Swarmkeeper drives this computer's Crazyradios (shared or direct mode):
+    // the features that send raw radio packets need it
+    in-out property <bool> drives-radios: true;
     callback connection-chosen(string);
     callback connection-opened();
 
@@ -1287,6 +1291,7 @@ export component AppWindow inherits Window {
                 os-dialog-visible = true;
                 os-show();
             }
+            drives-radios: root.drives-radios;
             connection-label: root.connection-label;
             connection-text: root.connection-text;
             connection-mode: root.connection-mode;
@@ -1426,6 +1431,7 @@ export component AppWindow inherits Window {
                     selected-unit <=> root.radio-test-selected-unit;
                     running: root.radio-test-running;
                     swarm-connected: root.swarm-connected;
+                    drives-radios: root.drives-radios;
                     progress: root.radio-test-progress;
                     status-text: root.radio-test-status;
                     results: root.radio-test-results;

@@ -10,6 +10,8 @@ export component RadioTestContent inherits Rectangle {
     in-out property <int> selected-unit: 0;
     in property <bool> running;
     in property <bool> swarm-connected;
+    // The test sends raw packets on this computer's Crazyradios
+    in property <bool> drives-radios: true;
     in property <float> progress;
     in property <string> status-text: "Ready";
     in property <[ChannelResult]> results;
@@ -39,11 +41,18 @@ export component RadioTestContent inherits Rectangle {
 
             Button {
                 text: running ? "Running..." : "Run Test";
-                enabled: !running && !swarm-connected && unit-names.length > 0;
+                enabled: !running && !swarm-connected && drives-radios && unit-names.length > 0;
                 clicked => { run-test(selected-unit); }
             }
 
-            if swarm-connected: Text {
+            if !drives-radios: Text {
+                text: "Needs this computer's Crazyradios (connection mode shared or direct)";
+                font-size: 12px;
+                color: Palette.foreground.transparentize(0.4);
+                vertical-alignment: center;
+            }
+
+            if drives-radios && swarm-connected: Text {
                 text: "Disconnect the swarm first";
                 font-size: 12px;
                 color: Palette.foreground.transparentize(0.4);

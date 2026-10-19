@@ -143,6 +143,7 @@ pub fn show(ui: &AppWindow, connection: &Connection, others: &str) {
     let text = if others.is_empty() { connection.description() } else { format!("{}\n\n{}", connection.description(), others) };
     ui.set_connection_text(text.into());
     ui.set_connection_mode(connection.mode.clone().into());
+    ui.set_drives_radios(connection.drives_radios());
 }
 
 /// The other programs attached to the Crazyflies the server has, one line
