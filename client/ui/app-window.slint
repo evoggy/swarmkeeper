@@ -2076,7 +2076,7 @@ export component AppWindow inherits Window {
                 }
 
                 Text {
-                    text: "Select a target and a binary, then flash every unit in the swarm one at a time. With stm32-fw / nrf51-fw the other units stay connected, and each unit is connected again after it is flashed. Deck targets disconnect the swarm, and only work when Swarmkeeper drives the Crazyradios.";
+                    text: "Select a target and a binary, then flash every unit in the swarm. stm32-fw / nrf51-fw go to all units at once where their bootloaders take broadcast, else one at a time, and each unit is connected again after. Deck targets are flashed one unit at a time, disconnect the swarm, and only work when Swarmkeeper drives the Crazyradios.";
                     font-size: 12px;
                     color: Palette.foreground.transparentize(0.3);
                     wrap: word-wrap;

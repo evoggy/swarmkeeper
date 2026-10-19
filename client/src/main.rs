@@ -1401,6 +1401,90 @@ async fn send_bootloader_command(
     Ok(())
 }
 
+/// Flash the STM32 or nRF51 (`target`, as the connection server names it) of
+/// these units (index, URI) as one job on the connection server: by broadcast
+/// to the units whose bootloaders take it, the others one after another.
+/// Shows each unit's progress and result. Returns how many succeeded.
+async fn flash_through_server(
+    client: &crazyflie_connection_server::Client,
+    units: Vec<(usize, String)>,
+    target: &str,
+    data: Vec<u8>,
+    ui_weak: &slint::Weak<AppWindow>,
+) -> usize {
+    let keys: Vec<(usize, String)> = units
+        .iter()
+        .filter_map(|(idx, uri)| Some((*idx, crazyflie_connection_server::normalize_uri(uri).ok()?.key)))
+        .collect();
+    let index_of = |uri: &str| keys.iter().find(|(_, key)| key == uri).map(|(idx, _)| *idx);
+    // The units armed for a broadcast, which then gets their progress.
+    let mut armed: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    // The last percentage shown per unit and step, to show whole-percent steps only.
+    let mut shown: HashMap<(Option<usize>, String), u64> = HashMap::new();
+    let progress = |p: crazyflie_connection_server::FlashProgress| {
+        let index = p.uri.as_deref().and_then(index_of);
+        let pct = if p.total > 0 { p.done * 100 / p.total } else { 0 };
+        if shown.insert((index, p.step.clone()), pct) == Some(pct) {
+            return;
+        }
+        let frac = if p.total > 0 { p.done as f32 / p.total as f32 } else { 0.0 };
+        match index {
+            Some(index) => {
+                if p.step == "Arming for broadcast" {
+                    armed.insert(index);
+                } else {
+                    armed.remove(&index);
+                }
+                let flashing = p.step.starts_with("Flashing");
+                let status: slint::SharedString =
+                    if flashing { format!("Flashing… {}%", pct) } else { format!("{}…", p.step) }.into();
+                update_unit(ui_weak, index, move |u| {
+                    if flashing {
+                        u.flash_progress = frac;
+                    }
+                    u.flash_status = status;
+                });
+            }
+            // A broadcast: every armed unit gets the image at the same time.
+            None => {
+                for index in &armed {
+                    let status: slint::SharedString = format!("{}… {}%", p.step, pct).into();
+                    update_unit(ui_weak, *index, move |u| {
+                        u.flash_progress = frac;
+                        u.flash_status = status;
+                    });
+                }
+            }
+        }
+    };
+
+    let uris: Vec<&str> = units.iter().map(|(_, uri)| uri.as_str()).collect();
+    let image = crazyflie_connection_server::FlashImage { target: target.to_string(), start: None, data };
+    let results = match client.flash_swarm(&uris, vec![image], progress).await {
+        Ok(results) => results,
+        Err(e) => units.iter().map(|_| Err(e.to_string())).collect(),
+    };
+    let mut ok_count = 0;
+    for ((idx, uri), result) in units.iter().zip(results) {
+        match result {
+            Ok(how) => {
+                ok_count += 1;
+                let status: slint::SharedString = format!("Done ({})", how).into();
+                update_unit(ui_weak, *idx, move |u| {
+                    u.flash_progress = 1.0;
+                    u.flash_status = status;
+                });
+            }
+            Err(reason) => {
+                eprintln!("Flashing {} failed: {}", uri, reason);
+                let status: slint::SharedString = format!("Error: {}", reason).into();
+                update_unit(ui_weak, *idx, move |u| u.flash_status = status);
+            }
+        }
+    }
+    ok_count
+}
+
 /// Disconnect the whole swarm before flashing deck firmware: each unit is
 /// flashed over a connection of its own, and every unit is about to be
 /// restarted anyway.
@@ -3114,10 +3198,10 @@ async fn main() {
                     let connection = connection.read().await;
                     (connection.client().clone(), connection.drives_radios())
                 };
-                // The STM32 and nRF51 are flashed by the connection server, which
-                // takes over one unit at a time and connects it again after:
-                // the other units stay connected. Deck firmware is flashed over
-                // a connection of its own, and every unit restarts anyway.
+                // The STM32 and nRF51 are flashed by the connection server as
+                // one job, by broadcast where the bootloaders take it, and each
+                // unit is connected again after. Deck firmware is flashed over a
+                // connection of its own, and every unit restarts anyway.
                 let server_target = bootloader_flash::bootloader_target(&target);
                 if server_target.is_none() {
                     if !drives_radios {
@@ -3136,98 +3220,97 @@ async fn main() {
                 }
 
                 let total = unit_info.len();
-                let mut ok_count = 0usize;
-                for (n, (idx, uri, name)) in unit_info.iter().enumerate() {
-                    let idx = *idx;
-                    let overall: slint::SharedString =
-                        format!("Flashing {} ({}/{}) — {}", name, n + 1, total, target).into();
-                    {
+                let ok_count = match server_target {
+                    Some(server_target) => {
+                        let mut units = Vec::new();
+                        for (idx, uri, _) in &unit_info {
+                            // With Swarmkeeper's own Crazyradios, each restarts
+                            // into its bootloader from the one the radio plan gives it.
+                            let uri = if drives_radios { link_uri(&link_context, &radio_plan, uri).await } else { uri.clone() };
+                            units.push((*idx, uri));
+                        }
+                        let overall: slint::SharedString = format!("Flashing {} to {} units", target, total).into();
                         let ui_weak_inner = ui_weak.clone();
                         slint::invoke_from_event_loop(move || {
                             if let Some(ui) = ui_weak_inner.upgrade() {
                                 ui.set_flash_overall_status(overall);
                             }
-                        }).ok();
+                        })
+                        .ok();
+                        flash_through_server(&client, units, server_target, data, &ui_weak).await
                     }
-                    update_unit(&ui_weak, idx, |u| {
-                        u.flash_progress = 0.0;
-                        u.flash_status = "Flashing…".into();
-                    });
-
-                    // Byte progress, throttled to whole-percent steps.
-                    let ui_for_progress = ui_weak.clone();
-                    let mut last_pct: i32 = -1;
-                    let mut show_progress = move |written: usize, total_bytes: usize| {
-                        let frac = if total_bytes > 0 {
-                            written as f32 / total_bytes as f32
-                        } else {
-                            0.0
-                        };
-                        let pct = (frac * 100.0) as i32;
-                        if pct != last_pct {
-                            last_pct = pct;
-                            let status: slint::SharedString = format!("Flashing… {}%", pct).into();
-                            update_unit(&ui_for_progress, idx, move |u| {
-                                u.flash_progress = frac;
-                                u.flash_status = status;
+                    None => {
+                        let mut ok_count = 0usize;
+                        for (n, (idx, uri, name)) in unit_info.iter().enumerate() {
+                            let idx = *idx;
+                            let overall: slint::SharedString =
+                                format!("Flashing {} ({}/{}) — {}", name, n + 1, total, target).into();
+                            {
+                                let ui_weak_inner = ui_weak.clone();
+                                slint::invoke_from_event_loop(move || {
+                                    if let Some(ui) = ui_weak_inner.upgrade() {
+                                        ui.set_flash_overall_status(overall);
+                                    }
+                                }).ok();
+                            }
+                            update_unit(&ui_weak, idx, |u| {
+                                u.flash_progress = 0.0;
+                                u.flash_status = "Flashing…".into();
                             });
-                        }
-                    };
 
-                    let result = match server_target {
-                        Some(server_target) => {
-                            // With Swarmkeeper's own Crazyradios, on the one the
-                            // radio plan gives the unit.
-                            let uri = if drives_radios { link_uri(&link_context, &radio_plan, uri).await } else { uri.clone() };
-                            let image = crazyflie_connection_server::FlashImage {
-                                target: server_target.to_string(),
-                                start: None,
-                                data: data.clone(),
-                            };
-                            let ui_for_steps = ui_weak.clone();
-                            let progress = move |p: crazyflie_connection_server::FlashProgress| {
-                                if p.step.starts_with("Flashing") {
-                                    show_progress(p.done as usize, p.total as usize);
+                            // Per-chunk progress callback, throttled to whole-percent steps.
+                            let ui_for_progress = ui_weak.clone();
+                            let mut last_pct: i32 = -1;
+                            let progress = move |written: usize, total_bytes: usize| {
+                                let frac = if total_bytes > 0 {
+                                    written as f32 / total_bytes as f32
                                 } else {
-                                    let status: slint::SharedString = format!("{}…", p.step).into();
-                                    update_unit(&ui_for_steps, idx, move |u| u.flash_status = status);
+                                    0.0
+                                };
+                                let pct = (frac * 100.0) as i32;
+                                if pct != last_pct {
+                                    last_pct = pct;
+                                    let status: slint::SharedString = format!("Flashing… {}%", pct).into();
+                                    update_unit(&ui_for_progress, idx, move |u| {
+                                        u.flash_progress = frac;
+                                        u.flash_status = status;
+                                    });
                                 }
                             };
-                            client.flash(&uri, vec![image], progress).await.map_err(anyhow::Error::from)
-                        }
-                        None => {
+
                             let result = bootloader_flash::flash_deck_target(
                                 link_context.as_ref(),
                                 &link_uri(&link_context, &radio_plan, uri).await,
                                 toc_cache.clone(),
                                 &target,
                                 &data,
-                                show_progress,
+                                progress,
                             )
                             .await;
+
+                            match result {
+                                Ok(()) => {
+                                    ok_count += 1;
+                                    update_unit(&ui_weak, idx, |u| {
+                                        u.flash_progress = 1.0;
+                                        u.flash_status = "Done".into();
+                                    });
+                                }
+                                Err(e) => {
+                                    let msg: slint::SharedString = format!("Error: {}", e).into();
+                                    eprintln!("Flashing {} failed: {:?}", uri, e);
+                                    update_unit(&ui_weak, idx, move |u| {
+                                        u.flash_status = msg;
+                                    });
+                                }
+                            }
+
                             // Give the deck time to restart before the next unit.
                             tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-                            result
                         }
-                    };
-
-                    match result {
-                        Ok(()) => {
-                            ok_count += 1;
-                            update_unit(&ui_weak, idx, |u| {
-                                u.flash_progress = 1.0;
-                                u.flash_status = "Done".into();
-                            });
-                        }
-                        Err(e) => {
-                            let msg: slint::SharedString = format!("Error: {}", e).into();
-                            eprintln!("Flashing {} failed: {:?}", uri, e);
-                            update_unit(&ui_weak, idx, move |u| {
-                                u.flash_status = msg;
-                            });
-                        }
+                        ok_count
                     }
-                }
+                };
 
                 finish(&ui_weak, format!("Finished: {}/{} succeeded", ok_count, total));
             });
