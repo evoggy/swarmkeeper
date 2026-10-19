@@ -126,7 +126,7 @@ impl Connection {
             "direct" => "Swarmkeeper drives this computer's Crazyradios, and no other program can use them.".to_string(),
             url => format!(
                 "Through the connection server at {}. Features that need the Crazyradios directly \
-                 (flashing, sniffer, radio test, trajectories, ...) don't work through a server yet.",
+                 (deck flashing, sniffer, radio test, trajectories, ...) don't work through a server yet.",
                 server_host(url)
             ),
         };

@@ -961,6 +961,70 @@ async fn attach_units(units: Vec<(usize, String)>, client: crazyflie_connection_
     while join_set.join_next().await.is_some() {}
 }
 
+/// Follow the jobs on the connection server: a unit that a job (flashing,
+/// started by Swarmkeeper or by another program) takes over is attached again
+/// when the job gives it back. Ends when the connection closes.
+async fn follow_jobs(
+    client: crazyflie_connection_server::Client,
+    link_context: Arc<crazyflie_link::LinkContext>,
+    radio_plan: radios::SharedRadioPlan,
+    toc_cache: FileTocCache,
+    setup: UnitSetup,
+) {
+    use crazyflie_connection_server::ServerEvent;
+    use futures::StreamExt;
+    let mut events = match client.watch().await {
+        Ok(events) => events,
+        Err(e) => {
+            eprintln!("Not following the connection server's jobs: {}", e);
+            return;
+        }
+    };
+    // The units each running job took over, by URI.
+    let mut taken: HashMap<String, Vec<usize>> = HashMap::new();
+    while let Some(event) = events.next().await {
+        match event {
+            ServerEvent::Busy { uri, reason } => {
+                let mut state = setup.swarm_state.lock().await;
+                let indices: Vec<usize> =
+                    state.iter().filter(|(_, unit)| unit.cf.uri() == uri).map(|(index, _)| *index).collect();
+                if indices.is_empty() {
+                    continue;
+                }
+                eprintln!("{}", reason);
+                // The server disconnects it, which ends its telemetry.
+                for index in &indices {
+                    state.remove(index);
+                }
+                taken.insert(uri, indices);
+            }
+            ServerEvent::Available { uri, connected } => {
+                let Some(indices) = taken.remove(&uri) else { continue };
+                // Not when the swarm was disconnected meanwhile, nor for a unit
+                // list that changed.
+                let (tx, rx) = tokio::sync::oneshot::channel();
+                let ui_weak = setup.ui_weak.clone();
+                slint::invoke_from_event_loop(move || {
+                    let units = ui_weak.upgrade().map(|ui| (ui.get_swarm_connected(), unit_uris(&ui)));
+                    tx.send(units).ok();
+                })
+                .ok();
+                let Ok(Some((true, uris))) = rx.await else { continue };
+                let units: Vec<(usize, String)> = indices
+                    .into_iter()
+                    .filter_map(|index| Some((index, uris.get(index)?.clone())))
+                    .filter(|(_, unit_uri)| {
+                        crazyflie_connection_server::normalize_uri(unit_uri).is_ok_and(|unit_uri| unit_uri.key == uri)
+                    })
+                    .collect();
+                eprintln!("{} is available again (connected: {}), attaching", uri, connected);
+                let setup = UnitSetup { unit_count: uris.len(), ..setup.clone() };
+                tokio::spawn(connect_units(units, link_context.clone(), radio_plan.clone(), toc_cache.clone(), setup));
+            }
+        }
+    }
+}
+
 /// Read what the unit list shows about a freshly connected unit, start
 /// capturing its console and start its telemetry.
 async fn setup_connected_unit(i: usize, uri: String, cf: Arc<crazyflie_connection_server::Crazyflie>, setup: UnitSetup) {
@@ -1337,9 +1401,9 @@ async fn send_bootloader_command(
     Ok(())
 }
 
-/// Disconnect the whole swarm before flashing: the radio bootloader needs the
-/// Crazyradio to itself (cfloader opens it directly) and every unit is about to
-/// be restarted anyway.
+/// Disconnect the whole swarm before flashing deck firmware: each unit is
+/// flashed over a connection of its own, and every unit is about to be
+/// restarted anyway.
 async fn disconnect_for_flashing(
     swarm_state: &SwarmState,
     positioning_source: &Arc<Mutex<Option<usize>>>,
@@ -2574,6 +2638,23 @@ async fn main() {
     let goto_targets: SharedGotoTargets = Arc::new(Mutex::new(HashMap::new()));
     let journal_store: SharedJournalStore = Arc::new(Mutex::new(load_journal()));
     let console_store: SharedConsoleStore = Arc::new(Mutex::new(load_console()));
+    tokio::spawn(follow_jobs(
+        connection.read().await.client().clone(),
+        link_context.clone(),
+        radio_plan.clone(),
+        toc_cache.clone(),
+        UnitSetup {
+            swarm_state: swarm_state.clone(),
+            ui_weak: ui.as_weak(),
+            positioning_source: positioning_source.clone(),
+            positioning_data: positioning_data.clone(),
+            goto_targets: goto_targets.clone(),
+            journal_store: journal_store.clone(),
+            console_store: console_store.clone(),
+            unit_count: 0,
+            connection: connection.clone(),
+        },
+    ));
 
     // Visualizer scene overlay (loaded scene's flight area + pads + obstacles)
     #[derive(Default)]
@@ -2720,6 +2801,13 @@ async fn main() {
                     let mut connection = setup.connection.write().await;
                     connection.close().await;
                     *connection = connection::Connection::open(&mode, link_context.clone(), toc_cache.clone()).await;
+                    tokio::spawn(follow_jobs(
+                        connection.client().clone(),
+                        link_context.clone(),
+                        radio_plan.clone(),
+                        toc_cache.clone(),
+                        setup.clone(),
+                    ));
                     let mut settings: AppSettings = confy::load("swarmkeeper", None).unwrap_or_default();
                     settings.connection = (mode != connection::DEFAULT_MODE).then(|| mode.clone());
                     if let Err(e) = confy::store("swarmkeeper", None, &settings) {
@@ -2967,6 +3055,7 @@ async fn main() {
         let swarm_state = swarm_state.clone();
         let flash_binary = flash_binary.clone();
         let positioning_source = positioning_source.clone();
+        let connection = connection.clone();
         let ui_weak = ui.as_weak();
 
         ui.on_flash_start(move || {
@@ -2996,42 +3085,46 @@ async fn main() {
             let swarm_state = swarm_state.clone();
             let flash_binary = flash_binary.clone();
             let positioning_source = positioning_source.clone();
+            let connection = connection.clone();
             let ui_weak = ui_weak.clone();
 
             tokio::spawn(async move {
-                // Load the firmware binary from disk.
-                let data = {
-                    let path = flash_binary.lock().await.clone();
-                    match path {
-                        Some(p) => match tokio::fs::read(&p).await {
-                            Ok(d) => d,
-                            Err(e) => {
-                                let msg: slint::SharedString =
-                                    format!("Failed to read binary: {}", e).into();
-                                let ui_weak_inner = ui_weak.clone();
-                                slint::invoke_from_event_loop(move || {
-                                    if let Some(ui) = ui_weak_inner.upgrade() {
-                                        ui.set_flash_overall_status(msg);
-                                        ui.set_flashing(false);
-                                    }
-                                }).ok();
-                                return;
-                            }
-                        },
-                        None => {
-                            let ui_weak_inner = ui_weak.clone();
-                            slint::invoke_from_event_loop(move || {
-                                if let Some(ui) = ui_weak_inner.upgrade() {
-                                    ui.set_flash_overall_status("No binary selected".into());
-                                    ui.set_flashing(false);
-                                }
-                            }).ok();
-                            return;
+                let finish = |ui_weak: &slint::Weak<AppWindow>, status: String| {
+                    let ui_weak = ui_weak.clone();
+                    slint::invoke_from_event_loop(move || {
+                        if let Some(ui) = ui_weak.upgrade() {
+                            ui.set_flash_overall_status(status.into());
+                            ui.set_flashing(false);
                         }
-                    }
+                    })
+                    .ok();
                 };
 
-                disconnect_for_flashing(&swarm_state, &positioning_source, &ui_weak).await;
+                // Load the firmware binary from disk.
+                let path = flash_binary.lock().await.clone();
+                let data = match path {
+                    Some(p) => match tokio::fs::read(&p).await {
+                        Ok(d) => d,
+                        Err(e) => return finish(&ui_weak, format!("Failed to read binary: {}", e)),
+                    },
+                    None => return finish(&ui_weak, "No binary selected".to_string()),
+                };
+
+                let (client, drives_radios) = {
+                    let connection = connection.read().await;
+                    (connection.client().clone(), connection.drives_radios())
+                };
+                // The STM32 and nRF51 are flashed by the connection server, which
+                // takes over one unit at a time and connects it again after:
+                // the other units stay connected. Deck firmware is flashed over
+                // a connection of its own, and every unit restarts anyway.
+                let server_target = bootloader_flash::bootloader_target(&target);
+                if server_target.is_none() {
+                    if !drives_radios {
+                        return finish(&ui_weak, "Deck firmware can't be flashed through a connection server yet".to_string());
+                    }
+                    disconnect_for_flashing(&swarm_state, &positioning_source, &ui_weak).await;
+                }
 
                 // Mark every unit as queued.
                 for (idx, _, _) in &unit_info {
@@ -3061,10 +3154,10 @@ async fn main() {
                         u.flash_status = "Flashing…".into();
                     });
 
-                    // Per-chunk progress callback, throttled to whole-percent steps.
+                    // Byte progress, throttled to whole-percent steps.
                     let ui_for_progress = ui_weak.clone();
                     let mut last_pct: i32 = -1;
-                    let progress = move |written: usize, total_bytes: usize| {
+                    let mut show_progress = move |written: usize, total_bytes: usize| {
                         let frac = if total_bytes > 0 {
                             written as f32 / total_bytes as f32
                         } else {
@@ -3081,15 +3174,42 @@ async fn main() {
                         }
                     };
 
-                    let result = bootloader_flash::flash_target(
-                        link_context.as_ref(),
-                        &link_uri(&link_context, &radio_plan, uri).await,
-                        toc_cache.clone(),
-                        &target,
-                        &data,
-                        progress,
-                    )
-                    .await;
+                    let result = match server_target {
+                        Some(server_target) => {
+                            // With Swarmkeeper's own Crazyradios, on the one the
+                            // radio plan gives the unit.
+                            let uri = if drives_radios { link_uri(&link_context, &radio_plan, uri).await } else { uri.clone() };
+                            let image = crazyflie_connection_server::FlashImage {
+                                target: server_target.to_string(),
+                                start: None,
+                                data: data.clone(),
+                            };
+                            let ui_for_steps = ui_weak.clone();
+                            let progress = move |p: crazyflie_connection_server::FlashProgress| {
+                                if p.step.starts_with("Flashing") {
+                                    show_progress(p.done as usize, p.total as usize);
+                                } else {
+                                    let status: slint::SharedString = format!("{}…", p.step).into();
+                                    update_unit(&ui_for_steps, idx, move |u| u.flash_status = status);
+                                }
+                            };
+                            client.flash(&uri, vec![image], progress).await.map_err(anyhow::Error::from)
+                        }
+                        None => {
+                            let result = bootloader_flash::flash_deck_target(
+                                link_context.as_ref(),
+                                &link_uri(&link_context, &radio_plan, uri).await,
+                                toc_cache.clone(),
+                                &target,
+                                &data,
+                                show_progress,
+                            )
+                            .await;
+                            // Give the deck time to restart before the next unit.
+                            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                            result
+                        }
+                    };
 
                     match result {
                         Ok(()) => {
@@ -3107,21 +3227,9 @@ async fn main() {
                             });
                         }
                     }
-
-                    // Let the radio fully release (cfloader closes the USB device
-                    // on a background thread) before the next unit reopens it.
-                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
                 }
 
-                let summary: slint::SharedString =
-                    format!("Finished: {}/{} succeeded", ok_count, total).into();
-                let ui_weak_inner = ui_weak.clone();
-                slint::invoke_from_event_loop(move || {
-                    if let Some(ui) = ui_weak_inner.upgrade() {
-                        ui.set_flash_overall_status(summary);
-                        ui.set_flashing(false);
-                    }
-                }).ok();
+                finish(&ui_weak, format!("Finished: {}/{} succeeded", ok_count, total));
             });
         });
     }

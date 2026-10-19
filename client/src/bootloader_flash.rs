@@ -1,22 +1,22 @@
-//! Over-the-air firmware flashing for a single Crazyflie.
+//! Firmware flashing for a single Crazyflie.
 //!
-//! This is a focused port of the flashing pipeline in `cfcli`
-//! (`src/modules/bootloader.rs`), reduced to flashing one `(target, binary)`
-//! pair at a time and reporting byte-level progress through a callback so the
-//! UI can show a per-Crazyflie progress bar.
-//!
-//! Three categories of target are supported, mirroring the hardcoded cfcli
-//! target list:
-//! - `stm32-fw` / `nrf51-fw`: flashed over the radio bootloader via `cfloader`.
+//! The targets are the same hardcoded list as cfcli's:
+//! - `stm32-fw` / `nrf51-fw`: flashed over the radio bootloader by the
+//!   connection server ([`crazyflie_connection_server::Client::flash`]), which
+//!   shares the Crazyradio with the other units' links. See
+//!   [`bootloader_target`].
 //! - `deckctrl-fw` / `deckctrl-cfg`: flashed over the DeckCtrl DFU memory.
 //! - everything else (`bcAI:esp-fw`, `bcLighthouse4-fw`, ...): flashed into the
 //!   matching deck-memory section.
+//!
+//! The deck targets are a port of cfcli's pipeline (`src/modules/bootloader.rs`)
+//! and use crazyflie-lib directly, so they only work when Swarmkeeper drives
+//! the Crazyradios.
 
 use anyhow::{anyhow, bail, Result};
-use cfloader::{Bllink, CFLoader};
 use crazyflie_lib::subsystems::memory::{DeckMemory, MemoryType, RawMemory};
 use crazyflie_lib::Crazyflie;
-use crazyflie_link::{Connection, LinkContext, Packet};
+use crazyflie_link::{LinkContext, Packet};
 use tokio::time::{sleep, Duration};
 
 const TARGET_NRF51: u8 = 0xFE;
@@ -46,34 +46,22 @@ pub fn target_list() -> &'static [&'static str] {
     ]
 }
 
-enum TargetKind {
-    Stm32,
-    Nrf51,
-    DeckCtrl { is_cfg: bool },
-    Deck { section: String },
-}
-
-fn classify(target: &str) -> TargetKind {
+/// The connection server's name for a target flashed over the radio
+/// bootloader (`stm32-fw` → `stm32`), `None` for the deck targets.
+pub fn bootloader_target(target: &str) -> Option<&'static str> {
     match target {
-        "stm32-fw" => TargetKind::Stm32,
-        "nrf51-fw" => TargetKind::Nrf51,
-        "deckctrl-fw" => TargetKind::DeckCtrl { is_cfg: false },
-        "deckctrl-cfg" => TargetKind::DeckCtrl { is_cfg: true },
-        other => TargetKind::Deck {
-            section: other.to_string(),
-        },
+        "stm32-fw" => Some("stm32"),
+        "nrf51-fw" => Some("nrf51"),
+        _ => None,
     }
 }
 
-/// Flash `data` to `target` on the Crazyflie at `uri`.
+/// Flash `data` to the deck target `target` on the Crazyflie at `uri`, over
+/// a connection of its own: the unit must not be connected.
 ///
 /// `progress` is called with `(bytes_written, total_bytes)` as flashing
 /// proceeds; `total_bytes` equals `data.len()`.
-///
-/// Note for `stm32-fw` / `nrf51-fw`: `cfloader` opens the Crazyradio itself (it
-/// links its own crazyradio version), so the radio must be free — disconnect
-/// every unit on that radio before calling, and flash one Crazyflie at a time.
-pub async fn flash_target<T, F>(
+pub async fn flash_deck_target<T, F>(
     link_context: &LinkContext,
     uri: &str,
     toc_cache: T,
@@ -85,105 +73,14 @@ where
     T: crazyflie_lib::TocCache + Clone,
     F: FnMut(usize, usize) + Send,
 {
-    match classify(target) {
-        TargetKind::Stm32 => {
-            flash_bootloader_target(link_context, uri, true, data, progress).await
+    match target {
+        "deckctrl-fw" => flash_deck_ctrl(link_context, uri, toc_cache, false, data, progress).await,
+        "deckctrl-cfg" => flash_deck_ctrl(link_context, uri, toc_cache, true, data, progress).await,
+        section if bootloader_target(section).is_none() => {
+            flash_deck_section(link_context, uri, toc_cache, section, data, progress).await
         }
-        TargetKind::Nrf51 => {
-            flash_bootloader_target(link_context, uri, false, data, progress).await
-        }
-        TargetKind::Deck { section } => {
-            flash_deck_section(link_context, uri, toc_cache, &section, data, progress).await
-        }
-        TargetKind::DeckCtrl { is_cfg } => {
-            flash_deck_ctrl(link_context, uri, toc_cache, is_cfg, data, progress).await
-        }
+        other => bail!("{} is flashed through the connection server", other),
     }
-}
-
-/// Send the nRF51 reset-to-bootloader sequence and return the new 5-byte radio
-/// address the bootloader listens on.
-async fn reset_and_get_bootloader_address(link: &Connection) -> Result<[u8; 5]> {
-    // Disable safelink so we can send raw "bootloader" messages to the nRF51
-    let packet: Packet = vec![0xFF, TARGET_NRF51, 0xFF, 0x05, 0x00].into();
-    link.send_packet(packet).await?;
-
-    let packet: Packet = vec![0xFF, TARGET_NRF51, 0xFF].into();
-    link.send_packet(packet).await?;
-
-    let mut new_address = Vec::new();
-    loop {
-        let packet = tokio::select! {
-            result = link.recv_packet() => result?,
-            _ = sleep(Duration::from_millis(100)) => {
-                return Err(anyhow!("Timeout waiting for bootloader address"));
-            }
-        };
-        let data = packet.get_data();
-        if data.len() > 2 && data[0..2] == [TARGET_NRF51, 0xFF] {
-            new_address.push(0xb1);
-            for byte in data[2..6].iter().rev() {
-                new_address.push(*byte);
-            }
-            break;
-        }
-    }
-
-    for _ in 0..10 {
-        let packet: Packet = vec![0xFF, TARGET_NRF51, 0xF0, 0x00].into();
-        link.send_packet(packet).await?;
-    }
-    sleep(Duration::from_millis(500)).await;
-
-    new_address
-        .try_into()
-        .map_err(|_| anyhow!("Bootloader address must be exactly 5 bytes"))
-}
-
-/// Flash the STM32 or nRF51 over the radio bootloader using `cfloader`.
-async fn flash_bootloader_target<F>(
-    link_context: &LinkContext,
-    uri: &str,
-    is_stm32: bool,
-    data: &[u8],
-    progress: F,
-) -> Result<()>
-where
-    F: FnMut(usize, usize) + Send,
-{
-    let separator = if uri.contains('?') { "&" } else { "?" };
-    let link = link_context
-        .open_link(&format!("{}{}safelink=0", uri, separator))
-        .await?;
-    let address = reset_and_get_bootloader_address(&link).await?;
-    link.close().await;
-    sleep(Duration::from_millis(500)).await;
-
-    // cfloader opens the Crazyradio itself (its own crazyradio version), so the
-    // radio must be free at this point — the caller disconnects all units first.
-    let bllink = Bllink::new(Some(&address)).await?;
-    let mut cfloader = CFLoader::new(bllink).await?;
-
-    if is_stm32 {
-        let start_address = {
-            let info = cfloader.stm32_info();
-            info.flash_start() as u32 * info.page_size() as u32
-        };
-        cfloader
-            .flash_stm32_with_progress(start_address, data, Some(progress))
-            .await?;
-    } else {
-        let start_address = {
-            let info = cfloader.nrf51_info();
-            info.flash_start() as u32 * info.page_size() as u32
-        };
-        cfloader
-            .flash_nrf51_with_progress(start_address, data, Some(progress))
-            .await?;
-    }
-
-    cfloader.reset_to_firmware().await?;
-    Ok(())
 }
 
 /// Reboot the Crazyflie from bootloader/deck-bootloader back into firmware.
