@@ -8,8 +8,8 @@
 //!
 //! The channel is stored in each Crazyflie's EEPROM config and the firmware
 //! only applies it at boot, so a Crazyflie that moves is reprogrammed on its
-//! current channel, rebooted and then looked for on its new channel. Its URI
-//! in the swarm file only changes once it answers there. Running it again
+//! current channel and rebooted onto its new one, through the client API.
+//! Its URI in the swarm file only changes once it answers there. Running it again
 //! therefore finishes a run that was interrupted: a Crazyflie that no longer
 //! answers on its old channel but does on its new one only gets its URI
 //! updated.
@@ -19,10 +19,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{anyhow, bail, Context, Result};
-use crazyflie_lib::subsystems::memory::{EEPROMConfigMemory, MemoryType};
-use crazyflie_lib::{Crazyflie, TocCache};
-use crazyflie_link::LinkContext;
-use tokio::sync::Semaphore;
+use crazyflie_connection_server::memory::{EEPROMConfigMemory, MemoryType};
+use crazyflie_connection_server::Client;
 use tokio::task::JoinSet;
 
 use crate::radios::{RadioUri, CHANNEL_SPACING};
@@ -30,14 +28,6 @@ use crate::radios::{RadioUri, CHANNEL_SPACING};
 /// The lower channels are the more crowded ones (Wi-Fi), so a channel count
 /// starts here and goes down.
 const FIRST_CHANNEL: u8 = 80;
-/// How long a rebooted Crazyflie gets to show up on its new channel.
-const BOOT_TIMEOUT: Duration = Duration::from_secs(8);
-/// Pause between looking for a rebooting Crazyflie.
-const BOOT_POLL: Duration = Duration::from_millis(300);
-/// Packets sent to a Crazyflie before it counts as not answering.
-const ANSWER_ATTEMPTS: usize = 3;
-/// Crazyflies worked on at the same time.
-const PARALLEL: usize = 8;
 /// Time to connect to a Crazyflie to reprogram it.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -219,19 +209,11 @@ struct Move {
     new_link: String,
 }
 
-/// Move the Crazyflies of `placements` that change channel. Returns the
-/// indices (in the swarm) of those that answer on their new channel, whose
-/// URI should change to [`Placement::new_uri`].
-pub async fn run<C>(
-    link_context: Arc<LinkContext>,
-    toc_cache: C,
-    link_uri: LinkUri,
-    placements: &[Placement],
-    report: Report,
-) -> Vec<usize>
-where
-    C: TocCache + Clone + Send + Sync + 'static,
-{
+/// Move the Crazyflies of `placements` that change channel, through the
+/// client API (also through a connection server). Returns the indices (in
+/// the swarm) of those that answer on their new channel, whose URI should
+/// change to [`Placement::new_uri`].
+pub async fn run(client: Client, link_uri: LinkUri, placements: &[Placement], report: Report) -> Vec<usize> {
     let mut moves = Vec::new();
     for p in placements.iter().filter(|p| p.moves()) {
         let (Some(from), Some(to)) = (p.from, p.to) else { continue };
@@ -250,15 +232,17 @@ where
     for m in &moves {
         unit(m.unit, State::Busy, "Checking…".to_string());
     }
-    let on_old = each(&moves, |m| answers(link_context.clone(), m.old_link.clone())).await;
-    let on_new = each(&moves, |m| answers(link_context.clone(), m.new_link.clone())).await;
+    let on_old = each(&moves, |m| answers(client.clone(), m.old_link.clone())).await;
+    let on_new = each(&moves, |m| answers(client.clone(), m.new_link.clone())).await;
 
-    // 2. Reprogram the ones on their old channel, and reboot them so that
-    //    the firmware picks up the new channel.
+    // 2. Reprogram the ones on their old channel, and reboot them onto the
+    //    new one, which the firmware reads at boot. The reboot returns once
+    //    each answers on the new channel.
     report(Event::Overall("Reprogramming…".to_string()));
     let mut rebooted = vec![false; moves.len()];
+    let mut found_new = vec![false; moves.len()];
     let written = each(&moves, |m| {
-        let (link_context, toc_cache, report, m) = (link_context.clone(), toc_cache.clone(), report.clone(), m.clone());
+        let (client, report, m) = (client.clone(), report.clone(), m.clone());
         let answers = on_old[moves.iter().position(|n| n.unit == m.unit).expect("a move")];
         async move {
             if !answers {
@@ -266,15 +250,15 @@ where
             }
             report(Event::Unit { unit: m.unit, state: State::Busy, status: format!("Reprogramming to channel {}…", m.to) });
             let result = async {
-                let cf = tokio::time::timeout(CONNECT_TIMEOUT, Crazyflie::connect_from_uri(&link_context, &m.old_link, toc_cache))
+                let cf = tokio::time::timeout(CONNECT_TIMEOUT, client.attach(&m.old_link))
                     .await
                     .map_err(|_| anyhow!("connecting timed out"))?
                     .context("could not connect")?;
                 let written = write_radio_channel(&cf, m.to).await;
-                cf.disconnect().await;
+                cf.detach();
                 written.context("not reprogrammed")?;
-                report(Event::Unit { unit: m.unit, state: State::Busy, status: "Rebooting…".to_string() });
-                reboot(&link_context, &m.old_link).await.context("reprogrammed but not rebooted")
+                report(Event::Unit { unit: m.unit, state: State::Busy, status: format!("Rebooting onto channel {}…", m.to) });
+                Ok::<_, anyhow::Error>(client.reboot_to(&m.old_link, &m.new_link).await.is_ok())
             }
             .await;
             Some(result)
@@ -284,7 +268,10 @@ where
     let mut failed: HashMap<usize, String> = HashMap::new();
     for (k, result) in written.into_iter().enumerate() {
         match result {
-            Some(Ok(())) => rebooted[k] = true,
+            Some(Ok(on_new_channel)) => {
+                rebooted[k] = true;
+                found_new[k] = on_new_channel;
+            }
             Some(Err(e)) => {
                 failed.insert(k, format!("{:#}", e));
             }
@@ -292,24 +279,22 @@ where
         }
     }
 
-    // 3. Look for the rebooted ones on their new channel, and for the ones
-    //    that didn't come up there on their old one.
+    // 3. The ones that didn't answer on their new channel in time: there
+    //    after all, on their old one, or gone.
     report(Event::Overall("Looking for the Crazyflies on their new channels…".to_string()));
-    for (k, m) in moves.iter().enumerate() {
-        if rebooted[k] {
-            unit(m.unit, State::Busy, format!("Looking on channel {}…", m.to));
-        }
-    }
-    let found_new = each(&moves, |m| {
+    let late = each(&moves, |m| {
         let k = moves.iter().position(|n| n.unit == m.unit).expect("a move");
-        let (link_context, link, rebooted) = (link_context.clone(), m.new_link.clone(), rebooted[k]);
-        async move { rebooted && wait_for(link_context, link).await }
+        let (client, link, check) = (client.clone(), m.new_link.clone(), rebooted[k] && !found_new[k]);
+        async move { check && answers(client, link).await }
     })
     .await;
+    for (k, late) in late.into_iter().enumerate() {
+        found_new[k] |= late;
+    }
     let still_old = each(&moves, |m| {
         let k = moves.iter().position(|n| n.unit == m.unit).expect("a move");
-        let (link_context, link, check) = (link_context.clone(), m.old_link.clone(), rebooted[k] && !found_new[k]);
-        async move { check && answers(link_context, link).await }
+        let (client, link, check) = (client.clone(), m.old_link.clone(), rebooted[k] && !found_new[k]);
+        async move { check && answers(client, link).await }
     })
     .await;
 
@@ -351,88 +336,49 @@ pub fn crazyflies(n: usize) -> String {
     }
 }
 
-/// Run `op` for every move, [`PARALLEL`] at a time, and return the results
-/// in move order.
+/// Run `op` for every move, all at once, and return the results in move order.
 async fn each<F, R>(moves: &[Move], op: impl Fn(&Move) -> F) -> Vec<R>
 where
     F: std::future::Future<Output = R> + Send + 'static,
     R: Send + 'static,
 {
-    let slots = Arc::new(Semaphore::new(PARALLEL));
     let mut set = JoinSet::new();
     for (k, m) in moves.iter().enumerate() {
-        let (slots, work) = (slots.clone(), op(m));
-        set.spawn(async move {
-            let _slot = slots.acquire_owned().await.expect("the semaphore is never closed");
-            (k, work.await)
-        });
+        let work = op(m);
+        set.spawn(async move { (k, work.await) });
     }
     let mut results = set.join_all().await;
     results.sort_by_key(|(k, _)| *k);
     results.into_iter().map(|(_, result)| result).collect()
 }
 
-/// Whether the Crazyflie answers a packet, without connecting to it.
-async fn answers(link_context: Arc<LinkContext>, link: String) -> bool {
-    for _ in 0..ANSWER_ATTEMPTS {
-        if matches!(link_context.scan_selected(vec![link.as_str()]).await, Ok(found) if !found.is_empty()) {
-            return true;
-        }
-    }
-    false
-}
-
-/// Wait for a rebooted Crazyflie to answer.
-async fn wait_for(link_context: Arc<LinkContext>, link: String) -> bool {
-    let deadline = tokio::time::Instant::now() + BOOT_TIMEOUT;
-    while tokio::time::Instant::now() < deadline {
-        if answers(link_context.clone(), link.clone()).await {
-            return true;
-        }
-        tokio::time::sleep(BOOT_POLL).await;
-    }
-    false
+/// Whether the Crazyflie answers a packet, without connecting to it (a
+/// connected one answers at once).
+async fn answers(client: Client, link: String) -> bool {
+    matches!(client.scan_selected(&[link.as_str()]).await, Ok(found) if !found.is_empty())
 }
 
 /// Write a new radio channel to the EEPROM config and read it back. The
 /// firmware only applies it at boot.
-async fn write_radio_channel(cf: &Crazyflie, channel: u8) -> Result<()> {
+async fn write_radio_channel(cf: &crazyflie_connection_server::Crazyflie, channel: u8) -> Result<()> {
     let mut eeprom = open_eeprom(cf).await?;
     eeprom.set_radio_channel(channel)?;
     eeprom.commit().await?;
-    cf.memory.close_memory(eeprom).await?;
 
     // Opening it again reads it from the Crazyflie.
-    let written = open_eeprom(cf).await?;
-    let stored = written.get_radio_channel();
-    cf.memory.close_memory(written).await?;
+    let stored = open_eeprom(cf).await?.get_radio_channel();
     if stored != channel {
         bail!("the EEPROM config reads back channel {} after writing {}", stored, channel);
     }
     Ok(())
 }
 
-async fn open_eeprom(cf: &Crazyflie) -> Result<EEPROMConfigMemory> {
+async fn open_eeprom(cf: &crazyflie_connection_server::Crazyflie) -> Result<EEPROMConfigMemory> {
     let memories = cf.memory.get_memories(Some(MemoryType::EEPROMConfig));
     if memories.len() != 1 {
         bail!("No EEPROMConfig memory found or more than one ({})", memories.len());
     }
-    match cf.memory.open_memory::<EEPROMConfigMemory>(memories[0].clone()).await {
-        Some(Ok(eeprom)) => Ok(eeprom),
-        Some(Err(e)) => bail!("Could not read the EEPROM config: {}", e),
-        None => bail!("No EEPROM config memory found"),
-    }
-}
-
-/// Restart the Crazyflie into its firmware, through the nRF51.
-async fn reboot(link_context: &LinkContext, link: &str) -> Result<()> {
-    let connection = link_context.open_link(link).await?;
-    for command in [vec![0xFF, 0xFE, 0xFF], vec![0xFF, 0xFE, 0xF0, 0x01]] {
-        connection.send_packet(command.into()).await?;
-    }
-    tokio::time::sleep(Duration::from_millis(500)).await;
-    connection.close().await;
-    Ok(())
+    cf.memory.open_memory::<EEPROMConfigMemory>(memories[0]).await.context("Could not read the EEPROM config")
 }
 
 /// The swarm file with these units (index, new URI) moved. Only the `uri:`

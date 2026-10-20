@@ -937,8 +937,14 @@ async fn follow_jobs(
                 }
                 taken.insert(uri, indices);
             }
-            ServerEvent::Available { uri, connected } => {
+            ServerEvent::Available { uri, connected, moved_to } => {
                 let Some(indices) = taken.remove(&uri) else { continue };
+                // Rebooted onto another channel or address: whoever moved it
+                // (e.g. a rechannel) changes the swarm and connects it there
+                if let Some(moved_to) = moved_to {
+                    eprintln!("{} moved to {}", uri, moved_to);
+                    continue;
+                }
                 // Not when the swarm was disconnected meanwhile, nor for a unit
                 // list that changed.
                 let (tx, rx) = tokio::sync::oneshot::channel();
@@ -1522,12 +1528,6 @@ fn rc_replan(ui: &AppWindow, state: &SharedRechannelState) {
                 status: "".into(),
             })
             .collect()
-    };
-    // Moving a Crazyflie to another channel reboots it onto it, which a
-    // connection server can't do yet
-    let error = match ui.get_drives_radios() {
-        true => error,
-        false => "Rechannel needs Swarmkeeper to drive the Crazyradios: pick a mode that uses this computer's".to_string(),
     };
     ui.set_rc_moving(placements.iter().filter(|p| p.moves()).count() as i32);
     ui.set_rc_rows(slint::ModelRc::new(slint::VecModel::from(rows)));
@@ -3341,7 +3341,7 @@ async fn main() {
         {
             let link_context = link_context.clone();
             let radio_plan = radio_plan.clone();
-            let toc_cache = toc_cache.clone();
+            let connection = connection.clone();
             let swarm_state = swarm_state.clone();
             let positioning_source = positioning_source.clone();
             let rc_state = rc_state.clone();
@@ -3356,13 +3356,17 @@ async fn main() {
 
                 let link_context = link_context.clone();
                 let radio_plan = radio_plan.clone();
-                let toc_cache = toc_cache.clone();
+                let connection = connection.clone();
                 let swarm_state = swarm_state.clone();
                 let positioning_source = positioning_source.clone();
                 let rc_state = rc_state.clone();
                 let ui_weak = ui_weak.clone();
                 tokio::spawn(async move {
                     disconnect_for_flashing(&swarm_state, &positioning_source, &ui_weak).await;
+                    let (client, drives_radios) = {
+                        let connection = connection.read().await;
+                        (connection.client().clone(), connection.drives_radios())
+                    };
 
                     let (path, placements) = {
                         let mut state = rc_state.lock().unwrap();
@@ -3379,14 +3383,21 @@ async fn main() {
                             }).ok();
                         })
                     };
+                    // Through a connection server, the server picks the
+                    // Crazyradios
                     let to_link: rechannel::LinkUri = {
                         let (link_context, radio_plan) = (link_context.clone(), radio_plan.clone());
                         Arc::new(move |uri: String| {
                             let (link_context, radio_plan) = (link_context.clone(), radio_plan.clone());
-                            Box::pin(async move { link_uri(&link_context, &radio_plan, &uri).await })
+                            Box::pin(async move {
+                                match drives_radios {
+                                    true => link_uri(&link_context, &radio_plan, &uri).await,
+                                    false => uri_with_link_timeout(&uri),
+                                }
+                            })
                         })
                     };
-                    let moved = rechannel::run(link_context.clone(), toc_cache, to_link, &placements, report).await;
+                    let moved = rechannel::run(client, to_link, &placements, report).await;
 
                     // The swarm file and the unit list follow the Crazyflies
                     // that answer on their new channel.
