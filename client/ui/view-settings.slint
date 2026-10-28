@@ -17,6 +17,7 @@ export global ViewSettings {
     in-out property <int> selected-unit: -1;
     // Shorter unit rows without the address line.
     in-out property <bool> compact-rows: false;
+    changed compact-rows => { save(); }
 
     // --- Unit sidebar: takeoff ---
     in-out property <string> takeoff-height: "0.5";

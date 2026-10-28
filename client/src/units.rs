@@ -275,6 +275,7 @@ pub(crate) fn rebuild_table_rows(ui: &AppWindow) {
     ui.set_charging_count(summary.charging);
     ui.set_charged_count(summary.charged);
     crate::status::rebuild(ui, &sorted, &rows, &summary);
+    crate::settings::apply_features(ui);
     ui.set_swarm_summary(summary);
 }
 

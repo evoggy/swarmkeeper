@@ -1,10 +1,10 @@
 //! Settings kept between runs, and the view state.
 
 use serde::{Deserialize, Serialize};
-use slint::ComponentHandle;
+use slint::{ComponentHandle, Model};
 
 use crate::app::AppContext;
-use crate::{AppWindow, ViewSettings};
+use crate::{AppWindow, Features, SettingsBridge, Theme, ViewSettings};
 use crate::host;
 
 #[derive(Serialize, Deserialize, Default)]
@@ -21,6 +21,11 @@ pub(crate) struct AppSettings {
     /// How to reach the Crazyflies (see `connection`); None is the default, auto.
     #[serde(default)]
     pub(crate) connection: Option<String>,
+    /// Theme: 0 follows the system, 1 light, 2 dark.
+    #[serde(default)]
+    pub(crate) appearance: i32,
+    #[serde(default)]
+    pub(crate) features: FeatureSettings,
     // Keep last: serialized as a [view] table, which TOML requires after the
     // plain values above.
     #[serde(default)]
@@ -117,6 +122,9 @@ view_state! {
     takeoff_yaw: String = "0".into(), get_takeoff_yaw / set_takeoff_yaw;
     takeoff_time: String = "2".into(), get_takeoff_time / set_takeoff_time;
     takeoff_relative: bool = true, get_takeoff_relative / set_takeoff_relative;
+
+    // Units table
+    compact_rows: bool = false, get_compact_rows / set_compact_rows;
 
     // Unit sidebar: goto
     goto_x: String = "0".into(), get_goto_x / set_goto_x;
@@ -236,7 +244,102 @@ mod settings_tests {
     }
 }
 
-pub(crate) fn setup(ui: &AppWindow, _cx: &AppContext) {
+/// Which features are shown (Settings › Features).
+#[derive(Serialize, Deserialize, Clone)]
+#[serde(default)]
+pub(crate) struct FeatureSettings {
+    /// 0 Automatic (when a connected unit has the deck), 1 On, 2 Off
+    pub(crate) lighthouse: i32,
+    pub(crate) loco: i32,
+    pub(crate) radio: bool,
+    pub(crate) planning: bool,
+    pub(crate) trajectories: bool,
+    pub(crate) manual_control: bool,
+    pub(crate) flashing: bool,
+    pub(crate) developer: bool,
+}
+
+impl Default for FeatureSettings {
+    fn default() -> Self {
+        FeatureSettings {
+            lighthouse: 0,
+            loco: 0,
+            radio: true,
+            planning: true,
+            trajectories: true,
+            manual_control: true,
+            flashing: true,
+            developer: true,
+        }
+    }
+}
+
+/// Show the stored settings on the Settings screen.
+pub(crate) fn show(ui: &AppWindow, settings: &AppSettings) {
+    let bridge = ui.global::<SettingsBridge>();
+    let f = &settings.features;
+    bridge.set_lighthouse_mode(f.lighthouse);
+    bridge.set_loco_mode(f.loco);
+    bridge.set_radio(f.radio);
+    bridge.set_planning(f.planning);
+    bridge.set_trajectories(f.trajectories);
+    bridge.set_manual_control(f.manual_control);
+    bridge.set_flashing(f.flashing);
+    bridge.set_developer(f.developer);
+    bridge.set_data_folder(host::env::data_dir().display().to_string().into());
+    bridge.set_version(env!("CARGO_PKG_VERSION").into());
+    ui.global::<Theme>().set_mode(settings.appearance);
+    apply_features(ui);
+}
+
+/// Show or hide the features. Lighthouse and Loco on Automatic follow the
+/// decks of the connected units, so this runs whenever the units change.
+pub(crate) fn apply_features(ui: &AppWindow) {
+    let bridge = ui.global::<SettingsBridge>();
+    let features = ui.global::<Features>();
+    let units = ui.get_units();
+    let connected = |u: &crate::UnitData| !matches!(u.state, crate::UnitState::Disconnected | crate::UnitState::Error);
+    let lighthouse_units = units.iter().filter(|u| connected(u) && u.deck_lighthouse).count() as i32;
+    let loco_units = units.iter().filter(|u| connected(u) && u.deck_loco).count() as i32;
+    bridge.set_lighthouse_units(lighthouse_units);
+    bridge.set_loco_units(loco_units);
+    let shown = |mode: i32, units: i32| mode == 1 || (mode == 0 && units > 0);
+    features.set_lighthouse(shown(bridge.get_lighthouse_mode(), lighthouse_units));
+    features.set_loco(shown(bridge.get_loco_mode(), loco_units));
+    features.set_radio(bridge.get_radio());
+    features.set_planning(bridge.get_planning());
+    features.set_trajectories(bridge.get_trajectories());
+    features.set_manual_control(bridge.get_manual_control());
+    features.set_flashing(bridge.get_flashing());
+    features.set_developer(bridge.get_developer());
+}
+
+pub(crate) fn setup(ui: &AppWindow, cx: &AppContext) {
+    show(ui, &cx.settings);
+    // Store what changed on the Settings screen, and apply it.
+    {
+        let ui_weak = ui.as_weak();
+        ui.global::<SettingsBridge>().on_changed(move || {
+            let Some(ui) = ui_weak.upgrade() else { return };
+            let bridge = ui.global::<SettingsBridge>();
+            let mut settings: AppSettings = host::store::load();
+            settings.appearance = ui.global::<Theme>().get_mode();
+            settings.features = FeatureSettings {
+                lighthouse: bridge.get_lighthouse_mode(),
+                loco: bridge.get_loco_mode(),
+                radio: bridge.get_radio(),
+                planning: bridge.get_planning(),
+                trajectories: bridge.get_trajectories(),
+                manual_control: bridge.get_manual_control(),
+                flashing: bridge.get_flashing(),
+                developer: bridge.get_developer(),
+            };
+            if let Err(e) = host::store::save(&settings) {
+                eprintln!("Saving the settings: {}", e);
+            }
+            apply_features(&ui);
+        });
+    }
     {
         // The `changed` handlers in the global fire on every keystroke and on
         // every mouse move while orbiting, so coalesce them into one write.

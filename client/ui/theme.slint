@@ -5,6 +5,8 @@ export global Theme {
     // Dark when the setting says so, or when it follows the system and the
     // system is dark. Set from Rust (Settings › Appearance).
     in-out property <bool> dark: false;
+    // Settings › Appearance: 0 follows the system, 1 light, 2 dark.
+    in-out property <int> mode: 0;
 
     // Window background, behind the cards
     out property <color> ground: dark ? #0E1013 : #F3F4F6;

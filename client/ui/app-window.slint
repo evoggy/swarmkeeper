@@ -17,12 +17,13 @@ import { Theme, Icons, Card, Segmented, ScreenTitle } from "kit.slint";
 import { Rail, RailEntry, TopBar } from "shell.slint";
 import { SwarmActionsButton } from "swarm-actions.slint";
 import { Features } from "features.slint";
+import { SettingsScreen, SettingsBridge } from "settings.slint";
 import { UnitRow, SwarmSummary, FilterCounts, Health } from "units-table.slint";
 import { StatusScreen, StatusData, HealthTile, GridCell, HistBar, Fact, AttentionRow, RadioRow, TrafficSeries, ServerRow, ActivityRow } from "status.slint";
 
 // Re-export the plot globals/structs from the root so the Rust side can reach
 // PlotBridge via `ui.global::<PlotBridge>()` and the generated data structs.
-export { PlotBridge, PlotLine, AxisTick, LegendEntry, ViewSettings, Theme, Features, UnitRow, SwarmSummary, FilterCounts, Health, StatusData, HealthTile, GridCell, HistBar, Fact, AttentionRow, RadioRow, TrafficSeries, ServerRow, ActivityRow }
+export { PlotBridge, PlotLine, AxisTick, LegendEntry, ViewSettings, Theme, Features, SettingsBridge, UnitRow, SwarmSummary, FilterCounts, Health, StatusData, HealthTile, GridCell, HistBar, Fact, AttentionRow, RadioRow, TrafficSeries, ServerRow, ActivityRow }
 export { RechannelRow, RcRowState }
 export { SwarmChoice }
 
@@ -61,10 +62,21 @@ export component AppWindow inherits Window {
     callback unit-filter-changed();
 
     background: Theme.ground;
-    // The standard widgets (line edits, combo boxes) follow the theme too.
+    // The theme: the setting, or the desktop's scheme as it was at start.
+    // The standard widgets (line edits, combo boxes) follow it too.
+    property <bool> system-dark;
+    property <int> theme-mode: Theme.mode;
     property <bool> theme-dark: Theme.dark;
+    function apply-theme() {
+        Theme.dark = Theme.mode == 2 || (Theme.mode == 0 && root.system-dark);
+    }
+    changed theme-mode => { root.apply-theme(); }
     changed theme-dark => { Palette.color-scheme = Theme.dark ? ColorScheme.dark : ColorScheme.light; }
-    init => { Palette.color-scheme = Theme.dark ? ColorScheme.dark : ColorScheme.light; }
+    init => {
+        root.system-dark = Palette.color-scheme == ColorScheme.dark;
+        root.apply-theme();
+        Palette.color-scheme = Theme.dark ? ColorScheme.dark : ColorScheme.light;
+    }
     title: "Swarmkeeper";
     preferred-width: 1600px;
     preferred-height: 900px;
@@ -676,6 +688,22 @@ export component AppWindow inherits Window {
                     connect-unit(row) => { root.connect-unit(row); }
                     recover-unit(row) => { root.recover-unit(row); }
                     flash => { root.flash-dialog-visible = true; }
+                }
+
+                SettingsScreen {
+                    visible: root.screen == "settings";
+                    connection-mode: root.connection-mode;
+                    connection-text: root.connection-text;
+                    connection-chosen(mode) => { root.connection-chosen(mode); }
+                    signed-in: root.signed-in;
+                    needs-sign-in: root.needs-sign-in;
+                    account-text: root.account-text;
+                    sign-in => {
+                        sign-in-error = "";
+                        sign-in-dialog-visible = true;
+                    }
+                    sign-out => { sign-out(); }
+                    clear-consoles => { clear-all-console(); }
                 }
 
                 // Units

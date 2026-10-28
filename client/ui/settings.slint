@@ -1,0 +1,381 @@
+// The Settings screen: which features are shown, how the Crazyflies are
+// reached, the account, the look, flight defaults and the data folder.
+
+import { LineEdit, ScrollView } from "std-widgets.slint";
+import { Theme, Icons, Icon, Card, KButton, ButtonKind, Segmented, Switch, Dot, ScreenTitle } from "kit.slint";
+import { ViewSettings } from "view-settings.slint";
+
+// Settings kept between runs, read and written by Rust (settings.rs).
+export global SettingsBridge {
+    // 0 Automatic (shown when a connected unit has the deck), 1 On, 2 Off
+    in-out property <int> lighthouse-mode;
+    in-out property <int> loco-mode;
+    in-out property <bool> radio: true;
+    in-out property <bool> planning: true;
+    in-out property <bool> trajectories: true;
+    in-out property <bool> manual-control: true;
+    in-out property <bool> flashing: true;
+    in-out property <bool> developer: true;
+
+    // Whether a connected unit has the deck, for the Automatic hint.
+    in property <int> lighthouse-units;
+    in property <int> loco-units;
+
+    in property <string> data-folder;
+    in property <string> version;
+
+    // Something above changed: store it and apply it.
+    callback changed();
+}
+
+component SectionItem inherits Rectangle {
+    in property <string> text;
+    in property <image> icon;
+    in property <bool> on;
+    callback clicked();
+    height: 36px;
+    border-radius: Theme.radius-control;
+    background: root.on ? Theme.accent-tint : touch.has-hover ? Theme.hover : transparent;
+    HorizontalLayout {
+        padding-left: 10px;
+        spacing: 10px;
+        Icon {
+            y: (parent.height - self.height) / 2;
+            source: root.icon;
+            color: root.on ? Theme.accent-text : Theme.text3;
+        }
+        Text {
+            text: root.text;
+            font-size: 13px;
+            font-weight: root.on ? 600 : 400;
+            color: root.on ? Theme.accent-text : Theme.text;
+            vertical-alignment: center;
+        }
+    }
+    touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+}
+
+// One setting: a title and a line of explanation on the left, the control
+// on the right.
+component SettingRow inherits Rectangle {
+    in property <string> title;
+    in property <string> note;
+    in property <bool> last;
+    min-height: 64px;
+    Rectangle {
+        visible: !root.last;
+        y: parent.height - 1px;
+        height: 1px;
+        background: Theme.border;
+    }
+    HorizontalLayout {
+        padding-left: 20px;
+        padding-right: 20px;
+        padding-top: 12px;
+        padding-bottom: 12px;
+        spacing: 24px;
+        VerticalLayout {
+            horizontal-stretch: 1;
+            alignment: center;
+            spacing: 2px;
+            Text {
+                text: root.title;
+                font-size: 13px;
+                font-weight: 600;
+                color: Theme.text;
+            }
+            if root.note != "": Text {
+                text: root.note;
+                font-size: Theme.font-small;
+                color: Theme.text2;
+                wrap: word-wrap;
+            }
+        }
+        VerticalLayout {
+            alignment: center;
+            HorizontalLayout {
+                alignment: end;
+                spacing: 8px;
+                @children
+            }
+        }
+    }
+}
+
+component SectionCard inherits Card {
+    in property <string> title;
+    in property <string> note;
+    height: section-layout.preferred-height;
+    section-layout := VerticalLayout {
+        VerticalLayout {
+            padding-left: 20px;
+            padding-right: 20px;
+            padding-top: 16px;
+            padding-bottom: 12px;
+            spacing: 2px;
+            Text {
+                text: root.title;
+                font-size: 14px;
+                font-weight: 600;
+                color: Theme.text;
+            }
+            if root.note != "": Text {
+                text: root.note;
+                font-size: Theme.font-small;
+                color: Theme.text3;
+                wrap: word-wrap;
+            }
+        }
+        Rectangle {
+            height: 1px;
+            background: Theme.border;
+        }
+        @children
+    }
+}
+
+component FeatureSwitch inherits SettingRow {
+    in-out property <bool> checked;
+    Switch {
+        checked <=> root.checked;
+        toggled => { SettingsBridge.changed(); }
+    }
+}
+
+export component SettingsScreen inherits Rectangle {
+    // Connection
+    in property <string> connection-mode;
+    in property <string> connection-text;
+    callback connection-chosen(string);
+    // Account
+    in property <bool> signed-in;
+    in property <bool> needs-sign-in;
+    in property <string> account-text;
+    callback sign-in();
+    callback sign-out();
+    callback clear-consoles();
+
+    property <int> section: 0;
+    property <[{ text: string, icon: image }]> sections: [
+        { text: "Features", icon: Icons.features },
+        { text: "Connection", icon: Icons.radio },
+        { text: "Account", icon: Icons.user },
+        { text: "Appearance", icon: Icons.appearance },
+        { text: "Flight defaults", icon: Icons.takeoff },
+        { text: "Data and files", icon: Icons.folder },
+        { text: "About", icon: Icons.info },
+    ];
+
+    HorizontalLayout {
+        padding-left: 24px;
+        padding-right: 24px;
+        padding-top: 20px;
+        padding-bottom: 24px;
+        spacing: 24px;
+
+        VerticalLayout {
+            width: 220px;
+            spacing: 4px;
+            alignment: start;
+            ScreenTitle {
+                text: "Settings";
+                note: "";
+            }
+            Rectangle { height: 12px; }
+            for item[i] in root.sections: SectionItem {
+                text: item.text;
+                icon: item.icon;
+                on: root.section == i;
+                clicked => { root.section = i; }
+            }
+        }
+
+        ScrollView {
+            horizontal-stretch: 1;
+            VerticalLayout {
+                spacing: 16px;
+                alignment: start;
+                padding-right: 4px;
+
+                // Features
+                if root.section == 0: SectionCard {
+                    title: "Features";
+                    note: "Hide what this swarm doesn't use. Hidden features leave the rail, the menus and the unit panel.";
+                    SettingRow {
+                        title: "Lighthouse";
+                        note: SettingsBridge.lighthouse-mode != 0 ? "Base station geometry, the Lighthouse screen and uploads"
+                            : SettingsBridge.lighthouse-units > 0 ? "Automatic: shown, " + SettingsBridge.lighthouse-units + " connected units have the deck"
+                            : "Automatic: hidden until a connected unit has the deck";
+                        Segmented {
+                            items: [{ label: "Automatic" }, { label: "On" }, { label: "Off" }];
+                            current <=> SettingsBridge.lighthouse-mode;
+                            selected => { SettingsBridge.changed(); }
+                        }
+                    }
+                    SettingRow {
+                        title: "Loco";
+                        note: SettingsBridge.loco-mode != 0 ? "Anchors, the sniffer and TDoA3 planning"
+                            : SettingsBridge.loco-units > 0 ? "Automatic: shown, " + SettingsBridge.loco-units + " connected units have the deck"
+                            : "Automatic: hidden until a connected unit has the deck";
+                        Segmented {
+                            items: [{ label: "Automatic" }, { label: "On" }, { label: "Off" }];
+                            current <=> SettingsBridge.loco-mode;
+                            selected => { SettingsBridge.changed(); }
+                        }
+                    }
+                    FeatureSwitch { title: "Radio"; note: "The radio channel test, and rechanneling the swarm"; checked <=> SettingsBridge.radio; }
+                    FeatureSwitch { title: "Planning"; note: "Rooms, base stations, anchors and coverage"; checked <=> SettingsBridge.planning; }
+                    FeatureSwitch { title: "Trajectories"; note: "Upload, generate and fly trajectories"; checked <=> SettingsBridge.trajectories; }
+                    FeatureSwitch { title: "Manual control"; note: "Fly one unit with a gamepad"; checked <=> SettingsBridge.manual-control; }
+                    FeatureSwitch { title: "Firmware flashing"; note: "Flash firmware to the swarm"; checked <=> SettingsBridge.flashing; }
+                    FeatureSwitch { title: "Developer tools"; note: "Parameters, tuning, TLV storage and the TOC"; checked <=> SettingsBridge.developer; last: true; }
+                }
+
+                // Connection
+                if root.section == 1: SectionCard {
+                    title: "Connection";
+                    note: "How Swarmkeeper reaches the Crazyflies. Switching reconnects the swarm.";
+                    SettingRow {
+                        title: "Mode";
+                        note: root.connection-text;
+                        VerticalLayout {
+                            spacing: 8px;
+                            alignment: center;
+                            Segmented {
+                                items: [{ label: "Automatic" }, { label: "Shared" }, { label: "Direct" }, { label: "Local" }, { label: "Remote" }];
+                                current: root.connection-mode == "auto" ? 0 : root.connection-mode == "shared" ? 1
+                                    : root.connection-mode == "direct" ? 2 : root.connection-mode == "local" ? 3 : 4;
+                                selected(i) => {
+                                    if (i == 0) { root.connection-chosen("auto"); }
+                                    if (i == 1) { root.connection-chosen("shared"); }
+                                    if (i == 2) { root.connection-chosen("direct"); }
+                                    if (i == 3) { root.connection-chosen("local"); }
+                                }
+                            }
+                        }
+                    }
+                    SettingRow {
+                        title: "Remote server";
+                        note: "A connection server on another computer: host or host:port";
+                        last: true;
+                        HorizontalLayout {
+                            spacing: 8px;
+                            remote := LineEdit {
+                                width: 220px;
+                                placeholder-text: "lab-pc:7777";
+                                text: root.connection-mode == "auto" || root.connection-mode == "shared" || root.connection-mode == "direct" || root.connection-mode == "local" ? "" : root.connection-mode;
+                            }
+                            KButton {
+                                    text: "Connect";
+                                enabled: remote.text != "";
+                                clicked => { root.connection-chosen(remote.text); }
+                            }
+                        }
+                    }
+                }
+
+                // Account
+                if root.section == 2: SectionCard {
+                    title: "Account";
+                    note: "arc.bitcraze.io keeps shared swarms and Lighthouse geometries.";
+                    SettingRow {
+                        title: root.signed-in ? (root.needs-sign-in ? "Sign in again" : "Signed in") : "Signed out";
+                        note: root.account-text;
+                        last: true;
+                        if root.needs-sign-in: KButton {
+                            text: root.signed-in ? "Sign in again" : "Sign in";
+                            kind: ButtonKind.primary;
+                            clicked => { root.sign-in(); }
+                        }
+                        if root.signed-in: KButton {
+                            text: "Sign out";
+                            clicked => { root.sign-out(); }
+                        }
+                    }
+                }
+
+                // Appearance
+                if root.section == 3: SectionCard {
+                    title: "Appearance";
+                    SettingRow {
+                        title: "Theme";
+                        note: "System follows the desktop";
+                        Segmented {
+                            items: [{ label: "System" }, { label: "Light" }, { label: "Dark" }];
+                            current <=> Theme.mode;
+                            selected => { SettingsBridge.changed(); }
+                        }
+                    }
+                    SettingRow {
+                        title: "Compact unit rows";
+                        note: "One line per unit, without the address";
+                        last: true;
+                        Switch {
+                            checked <=> ViewSettings.compact-rows;
+                        }
+                    }
+                }
+
+                // Flight defaults
+                if root.section == 4: SectionCard {
+                    title: "Flight defaults";
+                    note: "Used by the unit panel; also changed there.";
+                    SettingRow {
+                        title: "Take-off height";
+                        note: "Metres";
+                        LineEdit { width: 100px; text <=> ViewSettings.takeoff-height; }
+                    }
+                    SettingRow {
+                        title: "Take-off time";
+                        note: "Seconds";
+                        LineEdit { width: 100px; text <=> ViewSettings.takeoff-time; }
+                    }
+                    SettingRow {
+                        title: "Take off relative to the current position";
+                        Switch {
+                            checked <=> ViewSettings.takeoff-relative;
+                        }
+                    }
+                    SettingRow {
+                        title: "Go-to speed";
+                        note: "Metres per second";
+                        last: true;
+                        LineEdit { width: 100px; text <=> ViewSettings.goto-speed; }
+                    }
+                }
+
+                // Data and files
+                if root.section == 5: SectionCard {
+                    title: "Data and files";
+                    SettingRow {
+                        title: "Data folder";
+                        note: SettingsBridge.data-folder;
+                    }
+                    SettingRow {
+                        title: "Consoles";
+                        note: "The console lines kept for every unit";
+                        last: true;
+                        KButton {
+                            text: "Clear all";
+                            icon: Icons.trash;
+                            clicked => { root.clear-consoles(); }
+                        }
+                    }
+                }
+
+                // About
+                if root.section == 6: SectionCard {
+                    title: "About";
+                    SettingRow {
+                        title: "Swarmkeeper " + SettingsBridge.version;
+                        note: "Set up, configure and debug Crazyflie swarms. MIT or Apache-2.0.";
+                        last: true;
+                    }
+                }
+            }
+        }
+    }
+}
