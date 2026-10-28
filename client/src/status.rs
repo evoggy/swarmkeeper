@@ -11,9 +11,11 @@ use crate::{
     StatusData, SwarmSummary, TrafficSeries, UnitData, UnitRow,
 };
 
-/// Traffic samples kept per radio: ten minutes, one every five seconds.
-const TRAFFIC_SAMPLES: usize = 120;
-const TRAFFIC_INTERVAL_S: i64 = 5;
+/// Traffic samples kept per radio: ten minutes, one a second. The chart draws
+/// their means over five seconds, as one a second is jagged.
+const TRAFFIC_SAMPLES: usize = 600;
+const TRAFFIC_INTERVAL_S: i64 = 1;
+const TRAFFIC_MEAN: u64 = 5;
 
 #[derive(Default)]
 struct History {
@@ -23,6 +25,10 @@ struct History {
     /// Packets per second per radio, oldest first.
     traffic: Vec<Vec<f32>>,
     last_sample: i64,
+    /// Samples taken so far, so each mean on the chart keeps its seconds.
+    taken: u64,
+    /// The traffic chart as drawn after the last sample.
+    chart: Vec<TrafficSeries>,
 }
 
 thread_local! {
@@ -312,14 +318,16 @@ pub(crate) fn seed_demo_traffic(radios: usize) {
             .map(|r| {
                 (0..TRAFFIC_SAMPLES)
                     .map(|i| {
-                        let t = i as f32 / 8.0 + r as f32;
-                        let spike = if r == 2 && (70..78).contains(&i) { 900.0 } else { 0.0 };
+                        let t = i as f32 / 40.0 + r as f32;
+                        let spike = if r == 2 && (350..390).contains(&i) { 900.0 } else { 0.0 };
                         2400.0 + 300.0 * (t.sin() + 0.5 * (2.3 * t).cos()) + spike
                     })
                     .collect()
             })
             .collect();
         h.last_sample = now().timestamp();
+        h.taken = TRAFFIC_SAMPLES as u64;
+        h.chart = draw_traffic(&h.traffic, h.taken);
     });
 }
 
@@ -331,17 +339,20 @@ fn attention_line(summary: &SwarmSummary) -> String {
     }
 }
 
-/// Keep a sample per radio every few seconds and draw the last ten minutes
-/// as stacked areas, in a 600 × 100 box (the chart scales it).
+/// Keep a sample per radio every second and draw the last ten minutes. The
+/// chart is drawn again only when a sample is added.
 fn traffic(rates: &[f32]) -> ModelRc<TrafficSeries> {
     HISTORY.with(|h| {
         let mut h = h.borrow_mut();
         let t = now().timestamp();
-        if h.traffic.len() != rates.len() {
+        let radios_changed = h.traffic.len() != rates.len();
+        if radios_changed {
             h.traffic = vec![Vec::new(); rates.len()];
         }
-        if t - h.last_sample >= TRAFFIC_INTERVAL_S {
+        let sampled = t - h.last_sample >= TRAFFIC_INTERVAL_S;
+        if sampled {
             h.last_sample = t;
+            h.taken += 1;
             for (series, &rate) in h.traffic.iter_mut().zip(rates) {
                 series.push(rate);
                 if series.len() > TRAFFIC_SAMPLES {
@@ -349,36 +360,55 @@ fn traffic(rates: &[f32]) -> ModelRc<TrafficSeries> {
                 }
             }
         }
-        let samples = h.traffic.first().map_or(0, |s| s.len());
-        if samples < 2 {
-            return ModelRc::new(VecModel::from(Vec::<TrafficSeries>::new()));
+        if sampled || radios_changed {
+            h.chart = draw_traffic(&h.traffic, h.taken);
         }
-        let totals: Vec<f32> = (0..samples).map(|i| h.traffic.iter().map(|s| s[i]).sum()).collect();
-        let top = totals.iter().cloned().fold(1.0f32, f32::max) * 1.1;
-        let x = |i: usize| 600.0 * (TRAFFIC_SAMPLES - samples + i) as f32 / (TRAFFIC_SAMPLES - 1) as f32;
-        let y = |v: f32| 100.0 - 100.0 * v / top;
-        let mut below = vec![0.0f32; samples];
-        let mut series = Vec::new();
-        for (index, s) in h.traffic.iter().enumerate() {
-            let above: Vec<f32> = below.iter().zip(s).map(|(b, v)| b + v).collect();
-            let mut path = format!("M {:.1} {:.1}", x(0), y(above[0]));
-            for i in 1..samples {
-                path += &format!(" L {:.1} {:.1}", x(i), y(above[i]));
-            }
-            for i in (0..samples).rev() {
-                path += &format!(" L {:.1} {:.1}", x(i), y(below[i]));
-            }
-            path += " Z";
-            let last = samples - 1;
-            series.push(TrafficSeries {
-                index: index as i32,
-                commands: path.into(),
-                label: format!("Radio {}", index).into(),
-                label_y: (y(above[last]) + y(below[last])) / 2.0,
-                value: format!("{:.0}", s[last]).into(),
-            });
-            below = above;
-        }
-        ModelRc::new(VecModel::from(series))
+        ModelRc::new(VecModel::from(h.chart.clone()))
     })
+}
+
+/// The traffic of each radio as stacked areas, in a 600 × 100 box (the chart
+/// scales it). `taken` is the number of samples taken so far.
+fn draw_traffic(traffic: &[Vec<f32>], taken: u64) -> Vec<TrafficSeries> {
+    let samples = traffic.first().map_or(0, |s| s.len());
+    // The means over five seconds, each drawn at its last second: the last
+    // one over the seconds so far, so the right edge moves every second.
+    let first = taken.saturating_sub(samples as u64);
+    let seconds: Vec<usize> = (0..samples).collect();
+    let points: Vec<(usize, Vec<f32>)> = seconds
+        .chunk_by(|&a, &b| (first + a as u64) / TRAFFIC_MEAN == (first + b as u64) / TRAFFIC_MEAN)
+        .map(|mean| {
+            let (from, to) = (mean[0], mean[mean.len() - 1]);
+            (to, traffic.iter().map(|s| s[from..=to].iter().sum::<f32>() / mean.len() as f32).collect())
+        })
+        .collect();
+    if points.len() < 2 {
+        return Vec::new();
+    }
+    let top = points.iter().map(|(_, rates)| rates.iter().sum()).fold(1.0f32, f32::max) * 1.1;
+    let x = |i: usize| 600.0 * (TRAFFIC_SAMPLES - samples + i) as f32 / (TRAFFIC_SAMPLES - 1) as f32;
+    let y = |v: f32| 100.0 - 100.0 * v / top;
+    let mut below = vec![0.0f32; points.len()];
+    let mut series = Vec::new();
+    for index in 0..traffic.len() {
+        let above: Vec<f32> = below.iter().zip(&points).map(|(b, (_, rates))| b + rates[index]).collect();
+        let mut path = format!("M {:.1} {:.1}", x(points[0].0), y(above[0]));
+        for (k, (i, _)) in points.iter().enumerate().skip(1) {
+            path += &format!(" L {:.1} {:.1}", x(*i), y(above[k]));
+        }
+        for (k, (i, _)) in points.iter().enumerate().rev() {
+            path += &format!(" L {:.1} {:.1}", x(*i), y(below[k]));
+        }
+        path += " Z";
+        let last = points.len() - 1;
+        series.push(TrafficSeries {
+            index: index as i32,
+            commands: path.into(),
+            label: format!("Radio {}", index).into(),
+            label_y: (y(above[last]) + y(below[last])) / 2.0,
+            value: format!("{:.0}", points[last].1[index]).into(),
+        });
+        below = above;
+    }
+    series
 }
