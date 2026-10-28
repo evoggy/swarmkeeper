@@ -23,6 +23,9 @@ export global ViewSettings {
     changed unit-docked => { save(); }
     in-out property <bool> show-legend: true;
     changed show-legend => { save(); }
+    // The unit panel's tab
+    in-out property <int> unit-tab: 0;
+    changed unit-tab => { save(); }
 
     // --- Unit sidebar: takeoff ---
     in-out property <string> takeoff-height: "0.5";

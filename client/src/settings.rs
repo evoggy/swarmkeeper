@@ -129,6 +129,7 @@ view_state! {
     // 3D view: docked unit panel, legend
     unit_docked: bool = false, get_unit_docked / set_unit_docked;
     show_legend: bool = true, get_show_legend / set_show_legend;
+    unit_tab: i32 = 0, get_unit_tab / set_unit_tab;
 
     // Unit sidebar: goto
     goto_x: String = "0".into(), get_goto_x / set_goto_x;

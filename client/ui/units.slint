@@ -3,8 +3,14 @@ import { UnitData, UnitState, JournalEntryData, ConsoleLineData } from "unit-car
 import { SectionHeader } from "widgets.slint";
 import { PlotPanel, PlotBridge } from "plot.slint";
 import { ViewSettings } from "view-settings.slint";
-import { Theme, Icons, Card, Dot, IconButton } from "kit.slint";
+import { Theme, Icons, Card, Dot, IconButton, Segmented } from "kit.slint";
 import { UnitsTiles, UnitsToolbar, UnitsTable, UnitRow, SwarmSummary, FilterCounts, Health, HealthColors } from "units-table.slint";
+
+component SectionTitle inherits Text {
+    font-size: Theme.font-small;
+    font-weight: 600;
+    color: Theme.text3;
+}
 
 component DetailRow inherits HorizontalLayout {
     in property <string> label;
@@ -233,6 +239,9 @@ export component UnitSidebar inherits Rectangle {
 
     // Collapsible section state (Status/Flight expanded by default), shared with
     // the sidebar embedded in the other tab
+    // The tab shown: Overview, Flight, Trajectory or Tools. Kept across units
+    // and shared with the 3D view.
+    property <int> tab <=> ViewSettings.unit-tab;
     property <bool> status-expanded <=> ViewSettings.section-status-expanded;
     property <bool> info-expanded <=> ViewSettings.section-info-expanded;
     property <bool> link-expanded <=> ViewSettings.section-link-expanded;
@@ -313,6 +322,19 @@ export component UnitSidebar inherits Rectangle {
             }
         }
 
+        // Tabs
+        if has-selection: HorizontalLayout {
+            padding-left: 12px;
+            padding-right: 12px;
+            padding-top: 10px;
+            padding-bottom: 10px;
+            Segmented {
+                fill: true;
+                items: [{ label: "Overview" }, { label: "Flight" }, { label: "Trajectory" }, { label: "Tools" }];
+                current <=> root.tab;
+            }
+        }
+
         // Divider
         Rectangle {
             height: 1px;
@@ -360,16 +382,12 @@ export component UnitSidebar inherits Rectangle {
                 }
 
                 // Status section
-                HorizontalLayout {
+                if root.tab == 0: HorizontalLayout {
                     padding-left: 16px;
                     padding-right: 16px;
-                    SectionHeader {
-                        title: "Status";
-                        expanded <=> root.status-expanded;
-                        horizontal-stretch: 1;
-                    }
+                    SectionTitle { text: "Status"; }
                 }
-                if root.status-expanded: VerticalLayout {
+                if root.tab == 0: VerticalLayout {
                     spacing: 8px;
                     padding-bottom: 4px;
 
@@ -382,16 +400,12 @@ export component UnitSidebar inherits Rectangle {
                 }
 
                 // Flight section
-                HorizontalLayout {
+                if root.tab == 1: HorizontalLayout {
                     padding-left: 16px;
                     padding-right: 16px;
-                    SectionHeader {
-                        title: "Flight";
-                        expanded <=> root.flight-expanded;
-                        horizontal-stretch: 1;
-                    }
+                    SectionTitle { text: "Flight"; }
                 }
-                if root.flight-expanded: VerticalLayout {
+                if root.tab == 1: VerticalLayout {
                     padding-left: 16px;
                     padding-right: 16px;
                     padding-bottom: 8px;
@@ -561,16 +575,12 @@ export component UnitSidebar inherits Rectangle {
                 }
 
                 // Crazyflie info section
-                HorizontalLayout {
+                if root.tab == 0: HorizontalLayout {
                     padding-left: 16px;
                     padding-right: 16px;
-                    SectionHeader {
-                        title: "Crazyflie info";
-                        expanded <=> root.info-expanded;
-                        horizontal-stretch: 1;
-                    }
+                    SectionTitle { text: "Crazyflie info"; }
                 }
-                if root.info-expanded: VerticalLayout {
+                if root.tab == 0: VerticalLayout {
                     spacing: 4px;
                     padding-bottom: 4px;
 
@@ -621,16 +631,12 @@ export component UnitSidebar inherits Rectangle {
                 }
 
                 // Link Statistics section
-                HorizontalLayout {
+                if root.tab == 0: HorizontalLayout {
                     padding-left: 16px;
                     padding-right: 16px;
-                    SectionHeader {
-                        title: "Link Statistics";
-                        expanded <=> root.link-expanded;
-                        horizontal-stretch: 1;
-                    }
+                    SectionTitle { text: "Link Statistics"; }
                 }
-                if root.link-expanded: VerticalLayout {
+                if root.tab == 0: VerticalLayout {
                     spacing: 8px;
                     padding-bottom: 4px;
 
@@ -665,11 +671,8 @@ export component UnitSidebar inherits Rectangle {
                     spacing: 4px;
 
                 // Trajectory
-                SectionHeader {
-                    title: "Trajectory";
-                    expanded <=> root.trajectory-expanded;
-                }
-                if root.trajectory-expanded: VerticalLayout {
+                if root.tab == 2: SectionTitle { text: "Trajectory"; }
+                if root.tab == 2: VerticalLayout {
                     spacing: 8px;
                     padding-bottom: 8px;
 
@@ -885,12 +888,8 @@ export component UnitSidebar inherits Rectangle {
                 }
 
                 // Tools
-                SectionHeader {
-                    title: "Tools";
-                    count: unit.journal-entry-count;
-                    expanded <=> root.tools-expanded;
-                }
-                if root.tools-expanded: VerticalLayout {
+                if root.tab == 3: SectionTitle { text: "Tools"; }
+                if root.tab == 3: VerticalLayout {
                     spacing: 8px;
                     padding-bottom: 8px;
 
@@ -932,11 +931,8 @@ export component UnitSidebar inherits Rectangle {
                 }
 
                 // Power & System
-                SectionHeader {
-                    title: "Power & System";
-                    expanded <=> root.power-expanded;
-                }
-                if root.power-expanded: VerticalLayout {
+                if root.tab == 3: SectionTitle { text: "Power & System"; }
+                if root.tab == 3: VerticalLayout {
                     spacing: 8px;
                     padding-bottom: 8px;
 
