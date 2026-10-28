@@ -419,6 +419,30 @@ pub(crate) async fn setup(ui: &AppWindow, cx: &AppContext) {
         });
     }
 
+    // SWARMKEEPER_CONNECT=1 connects the swarm as soon as it is open, without
+    // a click, e.g. to try a connection server from a terminal
+    if host::env::var("SWARMKEEPER_CONNECT").is_some() {
+        let ui_weak = ui.as_weak();
+        host::spawn(async move {
+            loop {
+                host::sleep(std::time::Duration::from_millis(500)).await;
+                let (tx, rx) = tokio::sync::oneshot::channel();
+                let ui_weak = ui_weak.clone();
+                slint::invoke_from_event_loop(move || {
+                    let open = ui_weak.upgrade().filter(|ui| ui.get_units().row_count() > 0);
+                    if let Some(ui) = &open {
+                        ui.invoke_connect_swarm();
+                    }
+                    tx.send(open.is_some()).ok();
+                })
+                .ok();
+                if rx.await.unwrap_or(true) {
+                    break;
+                }
+            }
+        });
+    }
+
     // The connection menu at the right of the menu bar
     {
         let ui_weak = ui.as_weak();
