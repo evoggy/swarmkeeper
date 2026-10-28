@@ -22,6 +22,7 @@ mod app;
 mod connection;
 mod console;
 mod coverage;
+mod demo;
 mod flashing;
 mod flight;
 mod health;
@@ -60,6 +61,9 @@ slint::include_modules!();
 
 #[tokio::main]
 async fn main() {
+    if let Some(path) = host::screenshot::requested() {
+        return host::screenshot::take(&path);
+    }
     host::env::enter_data_dir();
 
     slint::BackendSelector::new()

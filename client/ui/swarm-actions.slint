@@ -1,0 +1,104 @@
+// The Swarm actions menu: every command for the whole swarm, grouped.
+// Replaces the Swarm, Flight, System, Setup and Diagnostics menus.
+
+import { Theme, Icons, KButton, MenuPanel, MenuRow, MenuGroupTitle, MenuSeparator } from "kit.slint";
+
+export component SwarmActionsButton inherits KButton {
+    in property <bool> connected;
+    in property <bool> drives-radios: true;
+
+    callback arm-all();
+    callback disarm-all();
+    callback upload-trajectory();
+    callback fly-trajectory();
+    callback land-all();
+    callback sync-blink();
+    callback delayed-sync-blink();
+    callback health-test();
+    callback download-toc();
+    callback clear-consoles();
+    callback reboot();
+    callback sleep();
+    callback wake-up();
+    callback power-off();
+    callback flash-firmware();
+    callback clear-tlv();
+    callback rechannel();
+    callback upload-geometry();
+    callback upload-params();
+    callback set-parameter();
+    callback tuning();
+
+    text: "Swarm actions";
+    icon: Icons.swarm;
+    clicked => { menu.show(); }
+
+    menu := PopupWindow {
+        x: root.width - 520px;
+        y: root.height + 4px;
+        width: 520px;
+
+        MenuPanel {
+            width: 520px;
+            height: columns.preferred-height;
+
+            columns := HorizontalLayout {
+                padding: 6px;
+                spacing: 6px;
+
+                VerticalLayout {
+                    alignment: start;
+                    width: 251px;
+                    MenuGroupTitle { text: "FLIGHT"; }
+                    MenuRow { text: "Arm all"; icon: Icons.arm; enabled: root.connected; clicked => { menu.close(); root.arm-all(); } }
+                    MenuRow { text: "Disarm all"; enabled: root.connected; clicked => { menu.close(); root.disarm-all(); } }
+                    MenuRow { text: "Upload trajectory…"; icon: Icons.upload; enabled: root.connected; clicked => { menu.close(); root.upload-trajectory(); } }
+                    MenuRow { text: "Fly trajectory"; icon: Icons.play; enabled: root.connected; clicked => { menu.close(); root.fly-trajectory(); } }
+                    MenuRow { text: "Land all"; icon: Icons.land; enabled: root.connected; clicked => { menu.close(); root.land-all(); } }
+                    MenuRow {
+                        text: "Sync blink";
+                        hint: root.drives-radios ? "" : "own radios only";
+                        icon: Icons.identify;
+                        enabled: root.drives-radios;
+                        clicked => { menu.close(); root.sync-blink(); }
+                    }
+                    MenuRow {
+                        text: "Delayed sync blink";
+                        hint: root.drives-radios ? "" : "own radios only";
+                        enabled: root.drives-radios;
+                        clicked => { menu.close(); root.delayed-sync-blink(); }
+                    }
+                    MenuSeparator {}
+                    MenuGroupTitle { text: "DIAGNOSTICS"; }
+                    MenuRow { text: "Health test…"; icon: Icons.check-circle; enabled: root.connected; clicked => { menu.close(); root.health-test(); } }
+                    MenuRow { text: "Download TOC"; icon: Icons.download; clicked => { menu.close(); root.download-toc(); } }
+                    MenuRow { text: "Clear all consoles"; icon: Icons.console; clicked => { menu.close(); root.clear-consoles(); } }
+                }
+
+                Rectangle {
+                    width: 1px;
+                    background: Theme.border;
+                }
+
+                VerticalLayout {
+                    alignment: start;
+                    width: 251px;
+                    MenuGroupTitle { text: "POWER AND SYSTEM"; }
+                    MenuRow { text: "Reboot"; icon: Icons.reconnect; enabled: root.connected; clicked => { menu.close(); root.reboot(); } }
+                    MenuRow { text: "Sleep"; icon: Icons.sleep; enabled: root.connected; clicked => { menu.close(); root.sleep(); } }
+                    MenuRow { text: "Wake up"; icon: Icons.sun; enabled: root.connected; clicked => { menu.close(); root.wake-up(); } }
+                    MenuRow { text: "Power off…"; icon: Icons.power; danger: true; enabled: root.connected; clicked => { menu.close(); root.power-off(); } }
+                    MenuRow { text: "Flash firmware…"; icon: Icons.chip; clicked => { menu.close(); root.flash-firmware(); } }
+                    MenuRow { text: "Clear TLV storage…"; icon: Icons.trash; danger: true; clicked => { menu.close(); root.clear-tlv(); } }
+                    MenuSeparator {}
+                    MenuGroupTitle { text: "SETUP"; }
+                    MenuRow { text: "Rechannel swarm…"; icon: Icons.radio; clicked => { menu.close(); root.rechannel(); } }
+                    MenuRow { text: "Upload Lighthouse geometry"; icon: Icons.lighthouse; enabled: root.connected; clicked => { menu.close(); root.upload-geometry(); } }
+                    MenuRow { text: "Upload parameters"; icon: Icons.upload; clicked => { menu.close(); root.upload-params(); } }
+                    MenuRow { text: "Set parameter…"; icon: Icons.settings; enabled: root.connected; clicked => { menu.close(); root.set-parameter(); } }
+                    MenuRow { text: "Tuning…"; clicked => { menu.close(); root.tuning(); } }
+                }
+            }
+        }
+    }
+}

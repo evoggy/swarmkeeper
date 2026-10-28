@@ -8,7 +8,8 @@
 //! - [`fs`], [`dialog`], [`store`], [`env`]: files, file dialogs, stored
 //!   settings, environment variables and opening web pages
 //! - [`gamepad`], [`sniffer`] (serial port): devices
-//! - [`renderer`], [`rendering`]: OpenGL for the 3D views
+//! - [`renderer`], [`rendering`]: OpenGL for the 3D views, and
+//!   [`screenshot`] for pictures of the UI without a display
 //! - [`server`], [`radios`], [`swarm_connect`], [`bootloader_flash`],
 //!   [`toc_cache`], [`radio_test`]: the connection server in this process,
 //!   driving this computer's Crazyradios in `shared` and `direct` mode
@@ -35,6 +36,7 @@ pub mod radios;
 pub mod server;
 pub mod renderer;
 pub mod rendering;
+pub mod screenshot;
 pub mod sniffer;
 pub mod store;
 pub mod swarm_connect;
