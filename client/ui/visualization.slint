@@ -3,6 +3,8 @@ import { UnitSidebar, UnitActionPopups } from "units.slint";
 import { UnitData, JournalEntryData, ConsoleLineData } from "unit-card.slint";
 import { PlotPanel, PlotBridge } from "plot.slint";
 import { ViewSettings } from "view-settings.slint";
+import { Theme, Icons, Icon, Card, KButton, IconButton, Dot } from "kit.slint";
+import { UnitRow, Health, HealthColors } from "units-table.slint";
 
 export struct VizLabel {
     text: string,
@@ -68,6 +70,12 @@ export component VisualizationContent inherits Rectangle {
     // It lives in the ViewSettings global so selecting a unit here also selects
     // it in the Units tab table, and vice versa.
     in property <[UnitData]> sorted-units;
+    // Status of each unit, in sorted-units order (units.rs).
+    in property <[UnitRow]> unit-rows;
+    // The selected unit as a card over the view, or docked as the full panel.
+    property <bool> docked <=> ViewSettings.unit-docked;
+    property <bool> has-unit: root.selected-unit >= 0 && root.selected-unit < root.sorted-units.length;
+    property <UnitRow> unit-info: root.has-unit && root.selected-unit < root.unit-rows.length ? root.unit-rows[root.selected-unit] : { slot: -1 };
     in-out property <int> selected-unit <=> ViewSettings.selected-unit;
     in property <[JournalEntryData]> journal-entries;
     in property <[ConsoleLineData]> console-lines;
@@ -150,7 +158,8 @@ export component VisualizationContent inherits Rectangle {
             y: label.screen-y * 1px;
             text: label.text;
             font-size: 11px;
-            color: #4d94ff;
+            font-weight: 500;
+            color: Theme.text;
         }
     }
 
@@ -307,6 +316,11 @@ export component VisualizationContent inherits Rectangle {
                     }
 
                     CheckBox {
+                        text: "Legend";
+                        checked <=> ViewSettings.show-legend;
+                    }
+
+                    CheckBox {
                         text: "Ground drop lines";
                         checked <=> root.show-drop-lines;
                     }
@@ -452,10 +466,10 @@ export component VisualizationContent inherits Rectangle {
 
     // Positioning source dropdown (must be after TouchArea to receive events)
     Rectangle {
-        x: 8px;
-        y: 8px;
+        x: 12px;
+        y: 12px;
         width: 220px;
-        height: 32px;
+        height: 34px;
 
         HorizontalLayout {
             spacing: 6px;
@@ -479,10 +493,171 @@ export component VisualizationContent inherits Rectangle {
         }
     }
 
-    // Unit sidebar overlay (shared component with the Units tab), anchored right.
-    if selected-unit >= 0 && selected-unit < sorted-units.length: Rectangle {
+    // Layers, next to the positioning source
+    HorizontalLayout {
+        x: 244px;
+        y: 12px;
+        width: self.preferred-width;
+        height: 34px;
+        spacing: 8px;
+        KButton {
+            text: "Layers";
+            icon: Icons.layers;
+            clicked => { context-menu.show(); }
+        }
+    }
+
+    // What the unit colours mean, bottom left
+    if ViewSettings.show-legend && root.show-units: Card {
+        x: 12px;
+        y: parent.height - self.height - 12px;
+        width: legend-layout.preferred-width;
+        height: legend-layout.preferred-height;
+        drop-shadow-blur: 12px;
+        drop-shadow-color: Theme.shadow;
+        legend-layout := VerticalLayout {
+            padding: 12px;
+            padding-top: 8px;
+            spacing: 6px;
+            HorizontalLayout {
+                spacing: 12px;
+                Text {
+                    horizontal-stretch: 1;
+                    text: "Units";
+                    font-size: Theme.font-small;
+                    font-weight: 600;
+                    color: Theme.text;
+                    vertical-alignment: center;
+                }
+                IconButton {
+                    icon: Icons.close;
+                    size: 22px;
+                    icon-size: 14px;
+                    clicked => { ViewSettings.show-legend = false; }
+                }
+            }
+            for item in [
+                { label: "Ready, charged", tint: Theme.good },
+                { label: "Flying", tint: Theme.flying },
+                { label: "Charging, needs a look", tint: Theme.warn },
+                { label: "Fault", tint: Theme.crit },
+                { label: "Not connected", tint: Theme.off },
+            ]: HorizontalLayout {
+                spacing: 8px;
+                Dot {
+                    y: (parent.height - self.height) / 2;
+                    tint: item.tint;
+                }
+                Text {
+                    text: item.label;
+                    font-size: Theme.font-small;
+                    color: Theme.text2;
+                }
+            }
+        }
+    }
+
+    // The selected unit as a card over the view
+    if root.has-unit && !root.docked: Card {
+        x: parent.width - self.width - 12px;
+        y: 12px;
+        width: 300px;
+        height: card-layout.preferred-height;
+        drop-shadow-blur: 24px;
+        drop-shadow-color: Theme.shadow;
+        drop-shadow-offset-y: 8px;
+
+        // Absorb clicks so they don't reach the camera.
+        TouchArea { }
+
+        card-layout := VerticalLayout {
+            padding: 14px;
+            spacing: 10px;
+            HorizontalLayout {
+                spacing: 4px;
+                VerticalLayout {
+                    horizontal-stretch: 1;
+                    spacing: 3px;
+                    Text {
+                        text: root.sorted-units[root.selected-unit].name;
+                        font-size: 15px;
+                        font-weight: 600;
+                        color: Theme.text;
+                    }
+                    HorizontalLayout {
+                        spacing: 6px;
+                        alignment: start;
+                        Dot {
+                            y: (parent.height - self.height) / 2;
+                            tint: HealthColors.dot(root.unit-info.health);
+                            hollow: root.unit-info.health == Health.off;
+                        }
+                        Text {
+                            text: root.unit-info.status;
+                            font-size: Theme.font-small;
+                            color: HealthColors.label(root.unit-info.health);
+                        }
+                    }
+                }
+                IconButton {
+                    icon: Icons.close;
+                    size: 28px;
+                    clicked => { root.selected-unit = -1; }
+                }
+            }
+            if root.unit-info.detail != "": Text {
+                text: root.unit-info.detail;
+                font-size: Theme.font-small;
+                color: Theme.text2;
+                wrap: word-wrap;
+            }
+            HorizontalLayout {
+                spacing: 12px;
+                for fact in [
+                    { label: "Battery", value: root.unit-info.battery == "" ? "–" : root.unit-info.battery },
+                    { label: "Link", value: root.unit-info.link == "" ? "–" : root.unit-info.link },
+                    { label: "Radio", value: root.unit-info.radio },
+                ]: VerticalLayout {
+                    horizontal-stretch: 1;
+                    Text { text: fact.label; font-size: Theme.font-tiny; color: Theme.text3; }
+                    Text { text: fact.value; font-family: Theme.font-mono; font-size: Theme.font-small; color: Theme.text; }
+                }
+            }
+            VerticalLayout {
+                Text { text: "Position (m)"; font-size: Theme.font-tiny; color: Theme.text3; }
+                Text { text: root.unit-info.position; font-family: Theme.font-mono; font-size: Theme.font-small; color: Theme.text; }
+            }
+            HorizontalLayout {
+                spacing: 8px;
+                KButton {
+                    small: true;
+                    text: "Identify";
+                    icon: Icons.identify;
+                    clicked => { root.identify-requested(root.selected-unit); }
+                }
+                if root.unit-info.health == Health.off || (root.unit-info.health == Health.fault && root.unit-info.link == ""): KButton {
+                    small: true;
+                    text: "Connect";
+                    clicked => { root.connect-unit-requested(root.selected-unit); }
+                }
+                Rectangle { horizontal-stretch: 1; }
+            }
+            KButton {
+                text: "Dock to the side for all details";
+                icon: Icons.dock;
+                clicked => { root.docked = true; }
+            }
+        }
+    }
+
+    // The selected unit docked as the full panel (shared with the Units screen), anchored right.
+    if root.has-unit && root.docked: Card {
         width: sidebar-width;
-        x: parent.width - self.width;
+        x: parent.width - self.width - 12px;
+        y: 12px;
+        height: parent.height - 24px;
+        drop-shadow-blur: 24px;
+        drop-shadow-color: Theme.shadow;
 
         // Absorb clicks on the sidebar so they don't reach the camera TouchArea.
         TouchArea { }
@@ -491,6 +666,9 @@ export component VisualizationContent inherits Rectangle {
             width: 100%;
             height: 100%;
             unit: sorted-units[selected-unit];
+            info: root.unit-info;
+            can-undock: true;
+            undock-clicked => { root.docked = false; }
             has-selection: true;
             journal-entries: root.journal-entries;
             journal-clicked => { open-journal-requested(selected-unit); journal-open = true; }

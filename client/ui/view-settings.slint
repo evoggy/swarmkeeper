@@ -18,6 +18,11 @@ export global ViewSettings {
     // Shorter unit rows without the address line.
     in-out property <bool> compact-rows: false;
     changed compact-rows => { save(); }
+    // 3D view: the selected unit docked as the full panel, and the legend.
+    in-out property <bool> unit-docked: false;
+    changed unit-docked => { save(); }
+    in-out property <bool> show-legend: true;
+    changed show-legend => { save(); }
 
     // --- Unit sidebar: takeoff ---
     in-out property <string> takeoff-height: "0.5";

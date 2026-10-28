@@ -3,8 +3,8 @@ import { UnitData, UnitState, JournalEntryData, ConsoleLineData } from "unit-car
 import { SectionHeader } from "widgets.slint";
 import { PlotPanel, PlotBridge } from "plot.slint";
 import { ViewSettings } from "view-settings.slint";
-import { Theme, Card } from "kit.slint";
-import { UnitsTiles, UnitsToolbar, UnitsTable, UnitRow, SwarmSummary, FilterCounts } from "units-table.slint";
+import { Theme, Icons, Card, Dot, IconButton } from "kit.slint";
+import { UnitsTiles, UnitsToolbar, UnitsTable, UnitRow, SwarmSummary, FilterCounts, Health, HealthColors } from "units-table.slint";
 
 component DetailRow inherits HorizontalLayout {
     in property <string> label;
@@ -196,6 +196,11 @@ component LinkQualityBar inherits Rectangle {
 export component UnitSidebar inherits Rectangle {
     in property <UnitData> unit;
     in property <bool> has-selection;
+    // Status and address from the unit table (units.rs).
+    in property <UnitRow> info;
+    // In the 3D view the panel can go back to a floating card.
+    in property <bool> can-undock;
+    callback undock-clicked();
     in property <[JournalEntryData]> journal-entries;
     callback close-clicked();
     callback journal-clicked();
@@ -254,33 +259,55 @@ export component UnitSidebar inherits Rectangle {
 
     property <bool> is-crashed: unit.state == UnitState.crashed;
 
-    border-width: 1px;
-    border-color: Palette.border;
-    background: Palette.background;
+    background: transparent;
 
     VerticalLayout {
         spacing: 0px;
 
-        // Header
+        // Header: name, status and address, then undock and close
         Rectangle {
-            height: 40px;
+            height: 64px;
 
             HorizontalLayout {
                 padding-left: 16px;
-                padding-right: 8px;
+                padding-right: 10px;
+                spacing: 4px;
 
-                Text {
-                    text: has-selection ? unit.name : "No selection";
-                    font-size: 15px;
-                    font-weight: 700;
-                    vertical-alignment: center;
+                VerticalLayout {
                     horizontal-stretch: 1;
+                    alignment: center;
+                    spacing: 3px;
+                    Text {
+                        text: has-selection ? unit.name : "No selection";
+                        font-size: 16px;
+                        font-weight: 600;
+                        color: Theme.text;
+                    }
+                    HorizontalLayout {
+                        spacing: 6px;
+                        alignment: start;
+                        Dot {
+                            y: (parent.height - self.height) / 2;
+                            tint: HealthColors.dot(root.info.health);
+                            hollow: root.info.health == Health.off;
+                        }
+                        Text {
+                            text: root.info.status + (root.info.address == "" ? "" : "  ·  " + root.info.address);
+                            font-size: Theme.font-small;
+                            color: HealthColors.label(root.info.health);
+                            overflow: elide;
+                        }
+                    }
                 }
 
-                Button {
-                    text: "✕";
-                    height: 28px;
-                    width: 28px;
+                if root.can-undock: IconButton {
+                    y: (parent.height - self.height) / 2;
+                    icon: Icons.undock;
+                    clicked => { root.undock-clicked(); }
+                }
+                IconButton {
+                    y: (parent.height - self.height) / 2;
+                    icon: Icons.close;
                     clicked => { close-clicked(); }
                 }
             }
@@ -289,7 +316,7 @@ export component UnitSidebar inherits Rectangle {
         // Divider
         Rectangle {
             height: 1px;
-            background: Palette.border;
+            background: Theme.border;
         }
 
         if has-selection: ScrollView {
@@ -1768,6 +1795,7 @@ export component UnitsContent inherits Rectangle {
                 link-quality: 0,
             };
             has-selection: selected-row >= 0 && selected-row < sorted-units.length;
+            info: selected-row >= 0 && selected-row < root.unit-rows.length ? root.unit-rows[selected-row] : { slot: -1 };
             journal-entries: root.journal-entries;
             journal-clicked => {
                 open-journal-requested(selected-row);

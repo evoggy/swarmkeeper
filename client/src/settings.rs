@@ -126,6 +126,10 @@ view_state! {
     // Units table
     compact_rows: bool = false, get_compact_rows / set_compact_rows;
 
+    // 3D view: docked unit panel, legend
+    unit_docked: bool = false, get_unit_docked / set_unit_docked;
+    show_legend: bool = true, get_show_legend / set_show_legend;
+
     // Unit sidebar: goto
     goto_x: String = "0".into(), get_goto_x / set_goto_x;
     goto_y: String = "0".into(), get_goto_y / set_goto_y;

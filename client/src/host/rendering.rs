@@ -4,7 +4,7 @@ use slint::{ComponentHandle, Model};
 
 use crate::app::AppContext;
 use crate::units::sort_unit_indices;
-use crate::{AppWindow, planning, host::renderer, UnitState, ViewSettings, VizLabel};
+use crate::{AppWindow, planning, host::renderer, Health, ViewSettings, VizLabel};
 
 pub(crate) fn setup(ui: &AppWindow, cx: &AppContext) {
     let AppContext { settings: _, positioning_data, goto_targets, viz_scene_state, trajectory_data, coverage_state, tdoa3_state, planning_state, wizard_state, .. } = cx;
@@ -115,16 +115,17 @@ pub(crate) fn setup(ui: &AppWindow, cx: &AppContext) {
                                 -1
                             };
 
+                            // Coloured by health, as everywhere else (theme.slint).
+                            let health = crate::units::health_by_unit(&app);
                             let mut unit_positions = Vec::new();
                             for i in 0..units_model.row_count() {
                                 if let Some(u) = units_model.row_data(i) {
-                                    let color = match u.state {
-                                        UnitState::Disconnected => [0.5, 0.5, 0.5],
-                                        UnitState::Connected => [0.12, 0.56, 1.0],
-                                        UnitState::Charging => [1.0, 0.65, 0.0],
-                                        UnitState::Charged => [0.2, 0.9, 0.4],
-                                        UnitState::Flying => [0.2, 0.9, 0.4],
-                                        UnitState::Crashed | UnitState::Error => [0.94, 0.27, 0.27],
+                                    let color = match health.get(i).copied().unwrap_or(Health::Off) {
+                                        Health::Ready | Health::Charged => [0.047, 0.639, 0.047],
+                                        Health::Flying => [0.184, 0.482, 0.941],
+                                        Health::Charging | Health::Warn => [0.910, 0.635, 0.059],
+                                        Health::Fault => [0.816, 0.231, 0.231],
+                                        Health::Off => [0.604, 0.627, 0.659],
                                     };
                                     unit_positions.push(renderer::UnitPos {
                                         x: u.pos_x,

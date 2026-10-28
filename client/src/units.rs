@@ -150,6 +150,13 @@ fn short_address(uri: &str) -> String {
     uri.to_string()
 }
 
+/// The health of each unit, in `units` model order (for the 3D view).
+pub(crate) fn health_by_unit(ui: &AppWindow) -> Vec<Health> {
+    let units = ui.get_units();
+    let firmware = ui.get_swarm_summary().firmware.to_string();
+    units.iter().map(|u| classify(&u, &firmware).0).collect()
+}
+
 /// Whether a row passes the filter chip (`filter`) and the search text.
 fn shown(u: &UnitData, health: Health, filter: i32, search: &str) -> bool {
     let chip = match filter {
