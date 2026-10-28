@@ -197,6 +197,7 @@ pub(crate) async fn follow_jobs(
             return;
         }
     };
+    let radios = host::spawn(follow_radios(client.clone(), setup.clone()));
     // The units each running job took over, by URI.
     let mut taken: HashMap<String, Vec<usize>> = HashMap::new();
     while let Some(event) = events.next().await {
@@ -244,6 +245,35 @@ pub(crate) async fn follow_jobs(
                 let setup = UnitSetup { unit_count: uris.len(), ..setup.clone() };
                 host::spawn(connect_units(units, link_context.clone(), radio_plan.clone(), toc_cache.clone(), setup));
             }
+        }
+    }
+    radios.abort();
+}
+
+/// How often to ask the connection server which Crazyradio each unit is on.
+const RADIOS_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Through a connection server, show which of its Crazyradios each unit is
+/// on, for the Radios panel on the Status screen. When Swarmkeeper drives the
+/// Crazyradios, the radio plan says instead (see `connect_units`).
+async fn follow_radios(client: crazyflie_connection_server::Client, setup: UnitSetup) {
+    if setup.connection.read().await.drives_radios() {
+        return;
+    }
+    let mut interval = host::interval(RADIOS_INTERVAL);
+    loop {
+        interval.tick().await;
+        let Ok(cfs) = client.list().await else { continue };
+        let radios: HashMap<String, usize> = cfs.into_iter().filter_map(|cf| Some((cf.uri, cf.radio?))).collect();
+        let units: Vec<(usize, i32)> = setup
+            .swarm_state
+            .lock()
+            .await
+            .iter()
+            .filter_map(|(index, unit)| Some((*index, *radios.get(unit.cf.uri())? as i32)))
+            .collect();
+        for (index, radio) in units {
+            update_unit(&setup.ui_weak, index, move |u| u.radio = radio);
         }
     }
 }
