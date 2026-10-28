@@ -2,6 +2,7 @@
 //!
 //! ```sh
 //! SWARMKEEPER_SCREENSHOT=units.png SWARMKEEPER_SCREEN=units SWARMKEEPER_THEME=dark cargo run
+//! # also SWARMKEEPER_SIZE=1280x800, SWARMKEEPER_SELECT=<row>, SWARMKEEPER_FILTER=<chip>
 //! ```
 //!
 //! Shows the demo swarm (`crate::demo`) and draws one frame with Slint's
@@ -45,6 +46,14 @@ pub fn take(path: &Path) {
     ui.global::<Theme>().set_dark(std::env::var("SWARMKEEPER_THEME").is_ok_and(|t| t == "dark"));
     ui.set_screen(std::env::var("SWARMKEEPER_SCREEN").unwrap_or_else(|_| "units".into()).into());
     crate::demo::show(&ui);
+    // A row to select (opens the unit panel) and a filter chip.
+    if let Some(row) = std::env::var("SWARMKEEPER_SELECT").ok().and_then(|r| r.parse().ok()) {
+        ui.global::<crate::ViewSettings>().set_selected_unit(row);
+    }
+    if let Some(filter) = std::env::var("SWARMKEEPER_FILTER").ok().and_then(|f| f.parse().ok()) {
+        ui.set_unit_filter(filter);
+        crate::units::rebuild_table_rows(&ui);
+    }
     ui.show().expect("show");
 
     slint::platform::update_timers_and_animations();

@@ -3,155 +3,8 @@ import { UnitData, UnitState, JournalEntryData, ConsoleLineData } from "unit-car
 import { SectionHeader } from "widgets.slint";
 import { PlotPanel, PlotBridge } from "plot.slint";
 import { ViewSettings } from "view-settings.slint";
-
-component HeaderCell inherits Rectangle {
-    in property <string> label;
-    in property <int> column-index;
-    in property <int> active-col;
-    in property <bool> active-ascending;
-    in-out property <length> col-width;
-    in property <length> min-col-width: 40px;
-    callback clicked();
-
-    border-width: 1px;
-    border-color: Palette.border;
-
-    HorizontalLayout {
-        padding-left: 6px;
-        padding-right: 8px;
-
-        Text {
-            text: active-col == column-index ? (active-ascending ? label + " ▲" : label + " ▼") : label;
-            font-size: 12px;
-            font-weight: 600;
-            vertical-alignment: center;
-            overflow: elide;
-        }
-    }
-
-    // Main click area for sorting (excludes resize handle)
-    TouchArea {
-        x: 0px;
-        y: 0px;
-        width: root.width - 5px;
-        height: root.height;
-        clicked => { root.clicked(); }
-        mouse-cursor: pointer;
-    }
-
-    // Resize handle on right edge
-    Rectangle {
-        x: root.width - 5px;
-        y: 0px;
-        width: 5px;
-        height: root.height;
-        background: resize-ta.has-hover || resize-ta.pressed ? Palette.accent-background : transparent;
-
-        resize-ta := TouchArea {
-            mouse-cursor: col-resize;
-            moved => {
-                root.col-width = max(root.min-col-width, root.col-width + (self.mouse-x - self.pressed-x));
-            }
-        }
-    }
-}
-
-component BatteryCell inherits Rectangle {
-    in property <float> voltage;
-
-    property <float> level: clamp((voltage - 3.0) / 1.2, 0.0, 1.0);
-    property <color> bar-color: level < 0.2 ? red
-                               : level < 0.5 ? orange
-                               : limegreen;
-
-    VerticalLayout {
-        padding-top: 2px;
-        padding-bottom: 2px;
-        padding-left: 6px;
-        padding-right: 6px;
-        spacing: 1px;
-        alignment: center;
-
-        Rectangle {
-            height: 10px;
-            border-radius: 2px;
-            border-width: 1px;
-            border-color: Palette.foreground.transparentize(0.5);
-
-            Rectangle {
-                x: 2px;
-                y: 2px;
-                width: max(0px, (parent.width - 4px) * level);
-                height: parent.height - 4px;
-                border-radius: 1px;
-                background: bar-color;
-            }
-        }
-
-        Text {
-            text: voltage > 0 ? "\{round(voltage * 100) / 100}V" : "";
-            font-size: 9px;
-            horizontal-alignment: center;
-            overflow: elide;
-        }
-    }
-}
-
-component LinkQualityCell inherits Rectangle {
-    in property <float> quality;
-
-    property <color> bar-color: quality < 0.5 ? red
-                               : quality < 0.8 ? orange
-                               : limegreen;
-
-    VerticalLayout {
-        padding-top: 2px;
-        padding-bottom: 2px;
-        padding-left: 6px;
-        padding-right: 6px;
-        spacing: 1px;
-        alignment: center;
-
-        Rectangle {
-            height: 10px;
-            border-radius: 2px;
-            border-width: 1px;
-            border-color: Palette.foreground.transparentize(0.5);
-
-            Rectangle {
-                x: 2px;
-                y: 2px;
-                width: max(0px, (parent.width - 4px) * quality);
-                height: parent.height - 4px;
-                border-radius: 1px;
-                background: bar-color;
-            }
-        }
-
-        Text {
-            text: quality > 0 ? "\{round(quality * 100)}%" : "";
-            font-size: 9px;
-            horizontal-alignment: center;
-            overflow: elide;
-        }
-    }
-}
-
-component Cell inherits Rectangle {
-    in property <string> value;
-
-    HorizontalLayout {
-        padding-left: 6px;
-        padding-right: 2px;
-
-        Text {
-            text: value;
-            font-size: 12px;
-            vertical-alignment: center;
-            overflow: elide;
-        }
-    }
-}
+import { Theme, Card } from "kit.slint";
+import { UnitsTiles, UnitsToolbar, UnitsTable, UnitRow, SwarmSummary, FilterCounts } from "units-table.slint";
 
 component DetailRow inherits HorizontalLayout {
     in property <string> label;
@@ -1755,7 +1608,13 @@ export component UnitActionPopups inherits Rectangle {
 export component UnitsContent inherits Rectangle {
     in property <[UnitData]> units;
     in property <[UnitData]> sorted-units;
-    in property <[[StandardListViewItem]]> table-rows;
+    in property <[UnitRow]> unit-rows;
+    in property <int> visible-count;
+    in property <SwarmSummary> summary;
+    in property <FilterCounts> counts;
+    in-out property <int> filter;
+    in-out property <string> search;
+    callback filter-changed();
     in property <int> sort-column: -1;
     in property <bool> sort-ascending: true;
     in property <[JournalEntryData]> journal-entries;
@@ -1809,20 +1668,6 @@ export component UnitsContent inherits Rectangle {
     // Selection lives in the ViewSettings global so the Visualization tab shows
     // the same unit; the sidebar is open exactly when something is selected.
     property <int> selected-row <=> ViewSettings.selected-unit;
-    // The selection may have been made in the Visualization tab, so bring the
-    // row into view rather than assuming the user just clicked it here.
-    changed selected-row => {
-        // Guard on the height: while the tab is hidden it can still be 0, and
-        // clamping against that would scroll the table to a nonsense offset.
-        if (selected-row >= 0 && rows-flick.height >= 34px) {
-            rows-flick.viewport-y = clamp(
-                rows-flick.viewport-y,
-                // Scrolled far enough down that the row's top is visible...
-                -selected-row * 34px,
-                // ...but not so far that its bottom falls past the viewport.
-                rows-flick.height - (selected-row + 1) * 34px);
-        }
-    }
     private property <bool> sidebar-open: selected-row >= 0 && selected-row < sorted-units.length;
     private property <bool> journal-open: false;
     private property <bool> console-open: false;
@@ -1832,24 +1677,6 @@ export component UnitsContent inherits Rectangle {
     private property <bool> confirm-clear-tlv-open: false;
     property <length> sidebar-width <=> ViewSettings.sidebar-width;
 
-    // Column widths (shared between header and data rows for alignment, and
-    // persisted so a resized table survives a restart)
-    property <length> col-indicator-w <=> ViewSettings.col-indicator-w;
-    property <length> col-status-w <=> ViewSettings.col-status-w;
-    property <length> col-name-w <=> ViewSettings.col-name-w;
-    property <length> col-uri-w <=> ViewSettings.col-uri-w;
-    property <length> col-x-w <=> ViewSettings.col-x-w;
-    property <length> col-y-w <=> ViewSettings.col-y-w;
-    property <length> col-z-w <=> ViewSettings.col-z-w;
-    property <length> col-battery-w <=> ViewSettings.col-battery-w;
-    property <length> col-link-w <=> ViewSettings.col-link-w;
-    property <length> col-power-w <=> ViewSettings.col-power-w;
-    property <length> col-supervisor-w <=> ViewSettings.col-supervisor-w;
-    property <length> col-lh-w <=> ViewSettings.col-lh-w;
-    property <length> col-loco-w <=> ViewSettings.col-loco-w;
-    property <length> col-ledup-w <=> ViewSettings.col-ledup-w;
-    property <length> col-leddn-w <=> ViewSettings.col-leddn-w;
-
     function toggle-sort(c: int) {
         if (sort-column == c) {
             sort-requested(c, !sort-ascending);
@@ -1858,99 +1685,55 @@ export component UnitsContent inherits Rectangle {
         }
     }
 
-    // Outer split: table + sidebar on top, the (shared) plot dock below.
+    // Tiles, then the table and the unit panel, then the (shared) plot dock.
     VerticalLayout {
-        spacing: 0px;
+        spacing: 16px;
+
+        UnitsTiles {
+            summary: root.summary;
+            show-attention => {
+                root.filter = 3;
+                root.filter-changed();
+            }
+        }
 
         HorizontalLayout {
         vertical-stretch: 1;
         spacing: 0px;
 
-        // Table
-        VerticalLayout {
+        Card {
             horizontal-stretch: 1;
-
-            // Header row
-            Rectangle {
-                height: 32px;
-                background: Palette.background;
-
-                HorizontalLayout {
-                    spacing: 0px;
-
-                    HeaderCell { width: col-indicator-w; col-width <=> col-indicator-w; min-col-width: 30px; label: "●"; column-index: 0; active-col: sort-column; active-ascending: sort-ascending; clicked => { toggle-sort(0); } }
-                    HeaderCell { horizontal-stretch: 1; min-width: col-status-w; col-width <=> col-status-w; min-col-width: 60px; label: "Status"; column-index: 1; active-col: sort-column; active-ascending: sort-ascending; clicked => { toggle-sort(1); } }
-                    HeaderCell { horizontal-stretch: 1; min-width: col-name-w; col-width <=> col-name-w; min-col-width: 60px; label: "Name"; column-index: 2; active-col: sort-column; active-ascending: sort-ascending; clicked => { toggle-sort(2); } }
-                    HeaderCell { horizontal-stretch: 1; min-width: col-uri-w; col-width <=> col-uri-w; min-col-width: 80px; label: "URI"; column-index: 3; active-col: sort-column; active-ascending: sort-ascending; clicked => { toggle-sort(3); } }
-                    HeaderCell { width: col-x-w; col-width <=> col-x-w; min-col-width: 40px; label: "X"; column-index: 4; active-col: sort-column; active-ascending: sort-ascending; clicked => { toggle-sort(4); } }
-                    HeaderCell { width: col-y-w; col-width <=> col-y-w; min-col-width: 40px; label: "Y"; column-index: 5; active-col: sort-column; active-ascending: sort-ascending; clicked => { toggle-sort(5); } }
-                    HeaderCell { width: col-z-w; col-width <=> col-z-w; min-col-width: 40px; label: "Z"; column-index: 6; active-col: sort-column; active-ascending: sort-ascending; clicked => { toggle-sort(6); } }
-                    HeaderCell { width: col-battery-w; col-width <=> col-battery-w; min-col-width: 70px; label: "Battery"; column-index: 7; active-col: sort-column; active-ascending: sort-ascending; clicked => { toggle-sort(7); } }
-                    HeaderCell { width: col-link-w; col-width <=> col-link-w; min-col-width: 60px; label: "Link"; column-index: 8; active-col: sort-column; active-ascending: sort-ascending; clicked => { toggle-sort(8); } }
-                    HeaderCell { width: col-power-w; col-width <=> col-power-w; min-col-width: 50px; label: "Power"; column-index: 9; active-col: sort-column; active-ascending: sort-ascending; clicked => { toggle-sort(9); } }
-                    HeaderCell { width: col-supervisor-w; col-width <=> col-supervisor-w; min-col-width: 50px; label: "Supervisor"; column-index: 10; active-col: sort-column; active-ascending: sort-ascending; clicked => { toggle-sort(10); } }
-                    HeaderCell { width: col-lh-w; col-width <=> col-lh-w; min-col-width: 35px; label: "LH"; column-index: 11; active-col: sort-column; active-ascending: sort-ascending; clicked => { toggle-sort(11); } }
-                    HeaderCell { width: col-loco-w; col-width <=> col-loco-w; min-col-width: 35px; label: "Loco"; column-index: 12; active-col: sort-column; active-ascending: sort-ascending; clicked => { toggle-sort(12); } }
-                    HeaderCell { width: col-ledup-w; col-width <=> col-ledup-w; min-col-width: 40px; label: "LED ⬆"; column-index: 13; active-col: sort-column; active-ascending: sort-ascending; clicked => { toggle-sort(13); } }
-                    HeaderCell { width: col-leddn-w; col-width <=> col-leddn-w; min-col-width: 40px; label: "LED ⬇"; column-index: 14; active-col: sort-column; active-ascending: sort-ascending; clicked => { toggle-sort(14); } }
+            VerticalLayout {
+                UnitsToolbar {
+                    counts: root.counts;
+                    filter <=> root.filter;
+                    search <=> root.search;
+                    changed-filter => { root.filter-changed(); }
                 }
-            }
-
-            // Data rows
-            rows-flick := Flickable {
-                vertical-stretch: 1;
-                viewport-height: table-rows.length * 34px;
-
-                for row[i] in table-rows: Rectangle {
-                    width: parent.width;
-                    y: i * 34px;
-                    height: 34px;
-                    background: selected-row == i ? Palette.foreground.transparentize(0.85)
-                              : sorted-units[i].state != UnitState.disconnected && !sorted-units[i].selftest-passed ? #ff000025
-                              : mod(i, 2) == 0 ? transparent
-                              : Palette.background.darker(0.03);
-                    border-width: 1px;
-                    border-color: Palette.border.transparentize(0.6);
-
-                    TouchArea {
-                        clicked => {
-                            if (selected-row == i) {
-                                selected-row = -1;
-                            } else {
-                                selected-row = i;
-                                row-selected(i);
-                            }
-                        }
-                        mouse-cursor: pointer;
-                    }
-
-                    HorizontalLayout {
-                        spacing: 0px;
-
-                        Cell { width: col-indicator-w; value: row[0].text; }
-                        Cell { horizontal-stretch: 1; min-width: col-status-w; value: row[1].text; }
-                        Cell { horizontal-stretch: 1; min-width: col-name-w; value: row[2].text; }
-                        Cell { horizontal-stretch: 1; min-width: col-uri-w; value: row[3].text; }
-                        Cell { width: col-x-w; value: row[4].text; }
-                        Cell { width: col-y-w; value: row[5].text; }
-                        Cell { width: col-z-w; value: row[6].text; }
-                        BatteryCell { width: col-battery-w; voltage: sorted-units[i].battery-voltage; }
-                        LinkQualityCell { width: col-link-w; quality: sorted-units[i].link-quality; }
-                        Cell { width: col-power-w; value: row[9].text; }
-                        Cell { width: col-supervisor-w; value: row[10].text; }
-                        Cell { width: col-lh-w; value: row[11].text; }
-                        Cell { width: col-loco-w; value: row[12].text; }
-                        Cell { width: col-ledup-w; value: row[13].text; }
-                        Cell { width: col-leddn-w; value: row[14].text; }
-                    }
+                UnitsTable {
+                    vertical-stretch: 1;
+                    units: root.sorted-units;
+                    rows: root.unit-rows;
+                    visible-count: root.visible-count;
+                    selected-row <=> root.selected-row;
+                    narrow: root.sidebar-open;
+                    compact: ViewSettings.compact-rows;
+                    sort-column: root.sort-column;
+                    sort-ascending: root.sort-ascending;
+                    sort(key) => { root.toggle-sort(key); }
+                    row-selected(i) => { root.row-selected(i); }
                 }
             }
         }
 
-        // Sidebar resize handle
+        // Sidebar resize handle, in the gap between the cards
         if sidebar-open: Rectangle {
-            width: 4px;
-            background: sidebar-drag.has-hover || sidebar-drag.pressed ? Palette.accent-background : transparent;
+            width: 16px;
+            Rectangle {
+                width: 2px;
+                border-radius: 1px;
+                background: sidebar-drag.has-hover || sidebar-drag.pressed ? Theme.accent : transparent;
+            }
 
             sidebar-drag := TouchArea {
                 mouse-cursor: ew-resize;
@@ -1961,8 +1744,11 @@ export component UnitsContent inherits Rectangle {
         }
 
         // Sidebar
-        if sidebar-open: UnitSidebar {
+        if sidebar-open: Card {
             width: sidebar-width;
+            UnitSidebar {
+            width: parent.width;
+            height: parent.height;
             unit: selected-row >= 0 && selected-row < sorted-units.length ? sorted-units[selected-row] : {
                 name: "",
                 uri: "",
@@ -2029,10 +1815,14 @@ export component UnitsContent inherits Rectangle {
             close-clicked => {
                 selected-row = -1;
             }
+            }
         }
         }
 
-        if PlotBridge.dock-visible: PlotPanel {}
+        if PlotBridge.dock-visible: Card {
+            height: plot-panel.preferred-height;
+            plot-panel := PlotPanel {}
+        }
     }
 
     // Sidebar action popups (journal, manual control, power-off confirm)

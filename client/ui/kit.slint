@@ -244,12 +244,16 @@ export component Tile inherits Rectangle {
                 color: root.attention ? Theme.crit-text : Theme.text;
                 vertical-alignment: bottom;
             }
-            if root.unit != "": Text {
-                text: root.unit;
-                font-size: 13px;
-                font-weight: 500;
-                color: Theme.text3;
-                vertical-alignment: bottom;
+            // Lifted to sit on the baseline of the bigger number.
+            if root.unit != "": VerticalLayout {
+                padding-bottom: 3px;
+                Text {
+                    text: root.unit;
+                    font-size: 13px;
+                    font-weight: 500;
+                    color: Theme.text3;
+                    vertical-alignment: bottom;
+                }
             }
         }
         @children

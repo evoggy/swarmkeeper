@@ -17,10 +17,11 @@ import { Theme, Icons, Card, Segmented, ScreenTitle } from "kit.slint";
 import { Rail, RailEntry, TopBar } from "shell.slint";
 import { SwarmActionsButton } from "swarm-actions.slint";
 import { Features } from "features.slint";
+import { UnitRow, SwarmSummary, FilterCounts, Health } from "units-table.slint";
 
 // Re-export the plot globals/structs from the root so the Rust side can reach
 // PlotBridge via `ui.global::<PlotBridge>()` and the generated data structs.
-export { PlotBridge, PlotLine, AxisTick, LegendEntry, ViewSettings, Theme, Features }
+export { PlotBridge, PlotLine, AxisTick, LegendEntry, ViewSettings, Theme, Features, UnitRow, SwarmSummary, FilterCounts, Health }
 export { RechannelRow, RcRowState }
 export { SwarmChoice }
 
@@ -44,6 +45,15 @@ export component AppWindow inherits Window {
     // lighthouse, loco, radio, settings.
     in-out property <string> screen: "units";
 
+    // The Units screen, worked out in Rust (units.rs)
+    in property <[UnitRow]> unit-rows;
+    in property <int> unit-visible-count;
+    in property <SwarmSummary> swarm-summary;
+    in property <FilterCounts> unit-filter-counts;
+    in-out property <int> unit-filter;
+    in-out property <string> unit-search;
+    callback unit-filter-changed();
+
     background: Theme.ground;
     // The standard widgets (line edits, combo boxes) follow the theme too.
     property <bool> theme-dark: Theme.dark;
@@ -55,7 +65,6 @@ export component AppWindow inherits Window {
 
     in-out property <string> swarm-name;
     in-out property <[UnitData]> units;
-    in-out property <[[StandardListViewItem]]> unit-table-rows;
     in-out property <[UnitData]> sorted-units;
     in-out property <bool> swarm-connected;
     in-out property <int> connected-count;
@@ -703,58 +712,62 @@ export component AppWindow inherits Window {
                         }
                     }
 
-                    Card {
+                    units-content := UnitsContent {
                         vertical-stretch: 1;
-                        units-content := UnitsContent {
-                            units: root.units;
-                            sorted-units: root.sorted-units;
-                            table-rows: root.unit-table-rows;
-                            sort-column: root.sort-column;
-                            sort-ascending: root.sort-ascending;
-                            journal-entries: root.journal-entries;
-                            console-lines: root.console-lines;
-                            assert-text: root.assert-text;
-                            assert-busy: root.assert-busy;
-                            sort-requested(col, ascending) => { sort-units(col, ascending); }
-                            open-journal-requested(row) => { open-journal(row); }
-                            add-journal-entry-requested(row, text) => { add-journal-entry(row, text); }
-                            open-console-requested(row) => { open-console(row); }
-                            clear-console-requested(row) => { clear-console(row); }
-                            clear-all-console-requested() => { clear-all-console(); }
-                            read-assert-requested(row) => { read-assert(row); }
-                            upload-trajectory-requested(row) => { upload-trajectory(row); }
-                            download-trajectory-requested(row) => { download-trajectory(row); }
-                            fly-trajectory-requested(row) => { fly-trajectory(row); }
-                            clear-trajectory-requested(row) => { clear-trajectory(row); }
-                            generate-primitive-requested(row, shape, size, sizey, zoff, ziter) => { generate-primitive(row, shape, size, sizey, zoff, ziter); }
-                            generate-wave-requested(row, x, y, reps, sim, speed, zoff, ziter) => { generate-wave(row, x, y, reps, sim, speed, zoff, ziter); }
-                            takeoff-requested(row, height, yaw, time, relative) => { hlc-takeoff(row, height, yaw, time, relative); }
-                            goto-requested(row, x, y, z, yaw, relative, speed) => { hlc-goto(row, x, y, z, yaw, relative, speed); }
-                            random-goto-requested(row) => { random-goto(row); }
-                            go-home-requested(row) => { hlc-go-home(row); }
-                            land-requested(row) => { hlc-land(row); }
-                            identify-requested(row) => { identify-unit(row); }
-                            connect-unit-requested(row) => { connect-unit(row); }
-                            disconnect-unit-requested(row) => { disconnect-unit(row); }
-                            delete-journal-entry-requested(row, entry-idx) => { delete-journal-entry(row, entry-idx); }
-                            row-selected(row) => { unit-row-selected(row); }
-                            joystick-names: root.joystick-names;
-                            stick-lx: root.stick-lx;
-                            stick-ly: root.stick-ly;
-                            stick-rx: root.stick-rx;
-                            stick-ry: root.stick-ry;
-                            manual-control-armed: root.manual-control-armed;
-                            open-manual-control-requested(row) => { open-manual-control(row); }
-                            joystick-selected(row, idx) => { start-manual-control(row, idx); }
-                            manual-control-stopped(row) => { stop-manual-control(row); }
-                            arm-requested(row, arm) => { arm-unit(row, arm); }
-                            recover-requested(row) => { recover-unit(row); }
-                            reboot-requested(row) => { reboot-unit(row); }
-                            power-off-requested(row) => { power-off-unit(row); }
-                            sysoff-requested(row) => { sysoff-unit(row); }
-                            syson-requested(row) => { syson-unit(row); }
-                            clear-tlv-requested(row) => { clear-tlv-unit(row); }
-                        }
+                        unit-rows: root.unit-rows;
+                        visible-count: root.unit-visible-count;
+                        summary: root.swarm-summary;
+                        counts: root.unit-filter-counts;
+                        filter <=> root.unit-filter;
+                        search <=> root.unit-search;
+                        filter-changed => { root.unit-filter-changed(); }
+                        units: root.units;
+                        sorted-units: root.sorted-units;
+                        sort-column: root.sort-column;
+                        sort-ascending: root.sort-ascending;
+                        journal-entries: root.journal-entries;
+                        console-lines: root.console-lines;
+                        assert-text: root.assert-text;
+                        assert-busy: root.assert-busy;
+                        sort-requested(col, ascending) => { sort-units(col, ascending); }
+                        open-journal-requested(row) => { open-journal(row); }
+                        add-journal-entry-requested(row, text) => { add-journal-entry(row, text); }
+                        open-console-requested(row) => { open-console(row); }
+                        clear-console-requested(row) => { clear-console(row); }
+                        clear-all-console-requested() => { clear-all-console(); }
+                        read-assert-requested(row) => { read-assert(row); }
+                        upload-trajectory-requested(row) => { upload-trajectory(row); }
+                        download-trajectory-requested(row) => { download-trajectory(row); }
+                        fly-trajectory-requested(row) => { fly-trajectory(row); }
+                        clear-trajectory-requested(row) => { clear-trajectory(row); }
+                        generate-primitive-requested(row, shape, size, sizey, zoff, ziter) => { generate-primitive(row, shape, size, sizey, zoff, ziter); }
+                        generate-wave-requested(row, x, y, reps, sim, speed, zoff, ziter) => { generate-wave(row, x, y, reps, sim, speed, zoff, ziter); }
+                        takeoff-requested(row, height, yaw, time, relative) => { hlc-takeoff(row, height, yaw, time, relative); }
+                        goto-requested(row, x, y, z, yaw, relative, speed) => { hlc-goto(row, x, y, z, yaw, relative, speed); }
+                        random-goto-requested(row) => { random-goto(row); }
+                        go-home-requested(row) => { hlc-go-home(row); }
+                        land-requested(row) => { hlc-land(row); }
+                        identify-requested(row) => { identify-unit(row); }
+                        connect-unit-requested(row) => { connect-unit(row); }
+                        disconnect-unit-requested(row) => { disconnect-unit(row); }
+                        delete-journal-entry-requested(row, entry-idx) => { delete-journal-entry(row, entry-idx); }
+                        row-selected(row) => { unit-row-selected(row); }
+                        joystick-names: root.joystick-names;
+                        stick-lx: root.stick-lx;
+                        stick-ly: root.stick-ly;
+                        stick-rx: root.stick-rx;
+                        stick-ry: root.stick-ry;
+                        manual-control-armed: root.manual-control-armed;
+                        open-manual-control-requested(row) => { open-manual-control(row); }
+                        joystick-selected(row, idx) => { start-manual-control(row, idx); }
+                        manual-control-stopped(row) => { stop-manual-control(row); }
+                        arm-requested(row, arm) => { arm-unit(row, arm); }
+                        recover-requested(row) => { recover-unit(row); }
+                        reboot-requested(row) => { reboot-unit(row); }
+                        power-off-requested(row) => { power-off-unit(row); }
+                        sysoff-requested(row) => { sysoff-unit(row); }
+                        syson-requested(row) => { syson-unit(row); }
+                        clear-tlv-requested(row) => { clear-tlv-unit(row); }
                     }
                 }
 
