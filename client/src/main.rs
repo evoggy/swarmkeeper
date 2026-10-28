@@ -43,6 +43,7 @@ mod plot;
 mod rechannel;
 mod rechannel_dialog;
 mod settings;
+mod status;
 mod shared_swarms;
 mod sniffer_ui;
 mod swarm;

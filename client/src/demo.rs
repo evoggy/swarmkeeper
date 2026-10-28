@@ -101,5 +101,20 @@ pub(crate) fn show(ui: &AppWindow) {
     ui.set_drives_radios(true);
     ui.set_connection_mode("shared".into());
     ui.set_connection_label("This computer's Crazyradios, shared on port 7777".into());
+    ui.set_signed_in(true);
+    ui.set_needs_sign_in(false);
+    ui.set_account_text("Signed in as pilot@example.com".into());
+    crate::status::seed_demo_traffic(4);
+    rebuild_table_rows(ui);
+    use crate::Health;
+    for (text, tone) in [
+        ("Connected 47 of 49 units in 2.4 s", Health::Ready),
+        ("CF-17: timed out", Health::Fault),
+        ("CF-31: tumbled", Health::Fault),
+        ("Radio 2: retries up to 0.8 for 40 s", Health::Warn),
+        ("cfcli on lab-pc attached to CF-05", Health::Ready),
+    ] {
+        crate::status::log(text, tone);
+    }
     rebuild_table_rows(ui);
 }

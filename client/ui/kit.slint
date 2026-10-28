@@ -31,6 +31,8 @@ export component KButton inherits Rectangle {
 
     height: root.small ? 30px : 34px;
     min-width: layout.min-width;
+    preferred-width: layout.preferred-width;
+    horizontal-stretch: 0;
     border-radius: Theme.radius-control;
     border-width: root.kind == ButtonKind.ghost ? 0px : 1px;
     border-color: root.kind == ButtonKind.primary ? Theme.accent-button

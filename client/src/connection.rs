@@ -130,6 +130,7 @@ pub fn show(ui: &AppWindow, connection: &Connection, others: &str) {
     ui.set_connection_text(text.into());
     ui.set_connection_mode(connection.mode.clone().into());
     ui.set_drives_radios(connection.drives_radios());
+    ui.set_connection_problem(connection.problem.is_some());
 }
 
 /// The other programs attached to the Crazyflies the server has, one line

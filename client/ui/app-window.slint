@@ -18,10 +18,11 @@ import { Rail, RailEntry, TopBar } from "shell.slint";
 import { SwarmActionsButton } from "swarm-actions.slint";
 import { Features } from "features.slint";
 import { UnitRow, SwarmSummary, FilterCounts, Health } from "units-table.slint";
+import { StatusScreen, StatusData, HealthTile, GridCell, HistBar, Fact, AttentionRow, RadioRow, TrafficSeries, ServerRow, ActivityRow } from "status.slint";
 
 // Re-export the plot globals/structs from the root so the Rust side can reach
 // PlotBridge via `ui.global::<PlotBridge>()` and the generated data structs.
-export { PlotBridge, PlotLine, AxisTick, LegendEntry, ViewSettings, Theme, Features, UnitRow, SwarmSummary, FilterCounts, Health }
+export { PlotBridge, PlotLine, AxisTick, LegendEntry, ViewSettings, Theme, Features, UnitRow, SwarmSummary, FilterCounts, Health, StatusData, HealthTile, GridCell, HistBar, Fact, AttentionRow, RadioRow, TrafficSeries, ServerRow, ActivityRow }
 export { RechannelRow, RcRowState }
 export { SwarmChoice }
 
@@ -43,7 +44,12 @@ export struct SwarmParamData {
 export component AppWindow inherits Window {
     // The screen shown, by rail id: status, units, view3d, planning,
     // lighthouse, loco, radio, settings.
-    in-out property <string> screen: "units";
+    in-out property <string> screen: "status";
+
+    // The Status screen, worked out in Rust (status.rs)
+    in property <StatusData> status;
+    // The chosen connection mode didn't work and Swarmkeeper fell back to direct.
+    in property <bool> connection-problem;
 
     // The Units screen, worked out in Rust (units.rs)
     in property <[UnitRow]> unit-rows;
@@ -651,6 +657,26 @@ export component AppWindow inherits Window {
                 min-height: 0px;
                 max-height: 100000px;
                 background: Theme.ground;
+
+                StatusScreen {
+                    visible: root.screen == "status";
+                    data: root.status;
+                    connected: root.swarm-connected;
+                    navigate(screen) => { root.screen = screen; }
+                    show-issues => {
+                        root.unit-filter = 3;
+                        root.unit-filter-changed();
+                        root.screen = "units";
+                    }
+                    open-unit(row) => {
+                        ViewSettings.selected-unit = row;
+                        root.unit-row-selected(row);
+                        root.screen = "units";
+                    }
+                    connect-unit(row) => { root.connect-unit(row); }
+                    recover-unit(row) => { root.recover-unit(row); }
+                    flash => { root.flash-dialog-visible = true; }
+                }
 
                 // Units
                 VerticalLayout {

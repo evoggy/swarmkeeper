@@ -263,9 +263,9 @@ pub(crate) fn rebuild_table_rows(ui: &AppWindow) {
         summary.lowest_battery_level = battery_level(voltage);
     }
 
-    ui.set_unit_rows(slint::ModelRc::new(slint::VecModel::from(rows)));
+    ui.set_unit_rows(slint::ModelRc::new(slint::VecModel::from(rows.clone())));
     ui.set_unit_visible_count(slot);
-    ui.set_sorted_units(slint::ModelRc::new(slint::VecModel::from(sorted)));
+    ui.set_sorted_units(slint::ModelRc::new(slint::VecModel::from(sorted.clone())));
     ui.set_unit_filter_counts(counts);
 
     let selftest_passed = all.iter().filter(|u| connected(u) && u.selftest_passed).count();
@@ -274,6 +274,7 @@ pub(crate) fn rebuild_table_rows(ui: &AppWindow) {
     ui.set_battery_count(summary.on_battery);
     ui.set_charging_count(summary.charging);
     ui.set_charged_count(summary.charged);
+    crate::status::rebuild(ui, &sorted, &rows, &summary);
     ui.set_swarm_summary(summary);
 }
 
@@ -286,9 +287,28 @@ pub(crate) fn update_unit(ui_weak: &slint::Weak<AppWindow>, index: usize, f: imp
                 f(&mut unit);
                 model.set_row_data(index, unit);
             }
-            rebuild_table_rows(&ui);
+            schedule_rebuild(&ui);
         }
     }).ok();
+}
+
+thread_local! {
+    static REBUILD_PENDING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Rebuild the tables soon. Telemetry updates every unit several times a
+/// second; one rebuild per 100 ms covers them all.
+fn schedule_rebuild(ui: &AppWindow) {
+    if REBUILD_PENDING.with(|p| p.replace(true)) {
+        return;
+    }
+    let ui_weak = ui.as_weak();
+    slint::Timer::single_shot(std::time::Duration::from_millis(100), move || {
+        REBUILD_PENDING.with(|p| p.set(false));
+        if let Some(ui) = ui_weak.upgrade() {
+            rebuild_table_rows(&ui);
+        }
+    });
 }
 
 /// Lazily fetch platform/firmware info for the unit at a `sorted-units` row
