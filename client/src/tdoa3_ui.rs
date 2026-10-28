@@ -3,7 +3,8 @@
 use slint::ComponentHandle;
 
 use crate::app::AppContext;
-use crate::{AppWindow, renderer, tdoa3, Tdoa3AnchorData};
+use crate::{AppWindow, host::renderer, tdoa3, Tdoa3AnchorData};
+use crate::host;
 
 // TDoA3 Coverage shared state
 pub(crate) struct Tdoa3State {
@@ -48,7 +49,7 @@ pub(crate) fn setup(ui: &AppWindow, cx: &AppContext) {
             );
             drop(ts_lock);
             slint::spawn_local(async move {
-                let Some(handle) = rfd::AsyncFileDialog::new()
+                let Some(handle) = host::dialog::FileDialog::new()
                     .set_title("Save TDoA3 Scene")
                     .add_filter("YAML", &["yaml", "yml"])
                     .save_file().await
@@ -69,7 +70,7 @@ pub(crate) fn setup(ui: &AppWindow, cx: &AppContext) {
             let uw2 = ui.as_weak();
             let ts = ts.clone();
             slint::spawn_local(async move {
-                let Some(handle) = rfd::AsyncFileDialog::new()
+                let Some(handle) = host::dialog::FileDialog::new()
                     .set_title("Open TDoA3 Scene")
                     .add_filter("YAML", &["yaml", "yml"])
                     .pick_file().await

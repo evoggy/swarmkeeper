@@ -17,6 +17,7 @@ use serde::{Deserialize, Serialize};
 use slint::{ComponentHandle, Model, ModelRc, SharedString, VecModel};
 
 use crate::{AppWindow, AxisTick, LegendEntry, LogVarRow, PlotBridge, PlotLine};
+use crate::host;
 
 /// One time/value sample. `ts_ms` is monotonic milliseconds.
 #[derive(Debug, Clone, Copy)]
@@ -853,16 +854,16 @@ pub fn log_configs_dir() -> PathBuf {
 }
 
 pub fn load_log_config(path: &Path) -> Result<LogConfig, String> {
-    let s = std::fs::read_to_string(path).map_err(|e| format!("read {path:?}: {e}"))?;
+    let s = host::fs::read_to_string(path).map_err(|e| format!("read {path:?}: {e}"))?;
     serde_yaml::from_str(&s).map_err(|e| format!("parse {path:?}: {e}"))
 }
 
 pub fn save_log_config(cfg: &LogConfig) -> Result<PathBuf, String> {
     let dir = log_configs_dir();
-    std::fs::create_dir_all(&dir).map_err(|e| format!("create {dir:?}: {e}"))?;
+    host::fs::create_dir_all(&dir).map_err(|e| format!("create {dir:?}: {e}"))?;
     let path = dir.join(format!("{}.yaml", sanitize_file_name(&cfg.name)));
     let s = serde_yaml::to_string(cfg).map_err(|e| format!("serialize: {e}"))?;
-    std::fs::write(&path, s).map_err(|e| format!("write {path:?}: {e}"))?;
+    host::fs::write(&path, s).map_err(|e| format!("write {path:?}: {e}"))?;
     Ok(path)
 }
 
@@ -878,7 +879,7 @@ fn sanitize_file_name(name: &str) -> String {
 /// Scan `log_configs/` and return all parseable configs, sorted by name.
 pub fn list_log_configs() -> Vec<LogConfig> {
     let mut out = Vec::new();
-    if let Ok(rd) = std::fs::read_dir(log_configs_dir()) {
+    if let Ok(rd) = host::fs::read_dir(log_configs_dir()) {
         for entry in rd.flatten() {
             let path = entry.path();
             let is_yaml = path
@@ -1047,7 +1048,7 @@ fn push_toc_rows(ui: &AppWindow, picker: &SharedToc) {
 }
 
 /// Type of the shared abort handle for the active plot-log task.
-pub type LogTask = Arc<tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>>;
+pub type LogTask = Arc<tokio::sync::Mutex<Option<host::JoinHandle<()>>>>;
 /// Shared "unit selected for logging" — the unsorted original index, updated by
 /// the unit-selection callbacks.
 pub type SelectedIndex = Arc<Mutex<Option<usize>>>;
@@ -1086,7 +1087,7 @@ fn resolve_and_start(
     let state = state.clone();
     let swarm_state = swarm_state.clone();
     let log_task = log_task.clone();
-    tokio::spawn(async move {
+    host::spawn(async move {
         // Abort any previous task first (drops its log blocks).
         if let Some(h) = log_task.lock().await.take() {
             h.abort();
@@ -1100,7 +1101,7 @@ fn resolve_and_start(
             set_logging_active(&weak, false);
             return;
         };
-        let handle = tokio::spawn(run_plot_log(cf, state, weak.clone(), cfg));
+        let handle = host::spawn(run_plot_log(cf, state, weak.clone(), cfg));
         *log_task.lock().await = Some(handle);
     });
 }
@@ -1139,7 +1140,7 @@ pub fn wire_logging(
         bridge.on_stop_logging(move || {
             let log_task = log_task.clone();
             let weak = weak.clone();
-            tokio::spawn(async move {
+            host::spawn(async move {
                 if let Some(h) = log_task.lock().await.take() {
                     h.abort();
                 }
@@ -1211,7 +1212,7 @@ pub fn wire_logging(
             let swarm_state = swarm_state.clone();
             let picker = picker.clone();
             let weak = weak.clone();
-            tokio::spawn(async move {
+            host::spawn(async move {
                 let cf = {
                     let st = swarm_state.lock().await;
                     st.get(&orig).map(|cu| cu.cf.clone())

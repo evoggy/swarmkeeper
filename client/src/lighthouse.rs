@@ -10,6 +10,7 @@ use crate::AppWindow;
 use crate::app::AppContext;
 use crate::swarm::client_units;
 use crate::swarm_file::uri_with_link_timeout;
+use crate::host;
 
 // Lighthouse geometry YAML file format (compatible with crazyflie-lib-python)
 #[derive(Deserialize)]
@@ -56,9 +57,9 @@ pub(crate) fn setup(ui: &AppWindow, cx: &AppContext) {
             let connection = connection.clone();
             let ui_weak = ui_weak.clone();
 
-            tokio::spawn(async move {
+            host::spawn(async move {
                 // Open file dialog
-                let Some(handle) = rfd::AsyncFileDialog::new()
+                let Some(handle) = host::dialog::FileDialog::new()
                     .add_filter("YAML", &["yaml", "yml"])
                     .pick_file()
                     .await
@@ -66,7 +67,7 @@ pub(crate) fn setup(ui: &AppWindow, cx: &AppContext) {
                 let path = handle.path().to_path_buf();
 
                 // Parse YAML
-                let contents = match std::fs::read_to_string(&path) {
+                let contents = match host::fs::read_to_string(&path) {
                     Ok(c) => c,
                     Err(e) => {
                         eprintln!("Failed to read geometry file: {:?}", e);
@@ -173,7 +174,7 @@ pub(crate) fn setup(ui: &AppWindow, cx: &AppContext) {
                 };
                 let client = connection.read().await.client().clone();
 
-                let mut join_set = tokio::task::JoinSet::new();
+                let mut join_set = host::JoinSet::new();
                 for (idx, (uri, name)) in unit_info.into_iter().enumerate() {
                     let existing_cf = connected_units.get(&idx).cloned();
                     let client = client.clone();
@@ -188,7 +189,7 @@ pub(crate) fn setup(ui: &AppWindow, cx: &AppContext) {
                         let temp_connection = existing_cf.is_none();
                         let connect_result = match existing_cf {
                             Some(cf) => Ok(Ok(cf)),
-                            None => tokio::time::timeout(
+                            None => host::timeout(
                                 std::time::Duration::from_secs(30),
                                 client.attach(&uri_with_link_timeout(&uri)),
                             )
@@ -271,7 +272,7 @@ pub(crate) fn setup(ui: &AppWindow, cx: &AppContext) {
                 // Wait for all uploads to complete
                 while join_set.join_next().await.is_some() {}
 
-                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                host::sleep(std::time::Duration::from_millis(500)).await;
 
                 let ui_weak_inner = ui_weak.clone();
                 slint::invoke_from_event_loop(move || {

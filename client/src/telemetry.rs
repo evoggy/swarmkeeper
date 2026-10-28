@@ -8,6 +8,7 @@ use crate::loco::SharedPositioningData;
 use crate::trajectory::SharedGotoTargets;
 use crate::units::{pm_state_text, supervisor_text, update_unit};
 use crate::{AppWindow, UnitState};
+use crate::host;
 
 /// Telemetry log period scaled to the size of the swarm, since all units share
 /// the same radio bandwidth: up to 30 units 10 Hz, 31-70 units 5 Hz, above 1 Hz.
@@ -69,7 +70,7 @@ pub(crate) async fn start_telemetry(
     // they are read at most this often rather than with every sample.
     const STATS_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500);
     let mut stats = crazyflie_connection_server::LinkStatistics::default();
-    let mut stats_read: Option<std::time::Instant> = None;
+    let mut stats_read: Option<host::Instant> = None;
 
     loop {
         let data = match log_stream.next().await {
@@ -154,7 +155,7 @@ pub(crate) async fn start_telemetry(
             if let Ok(read) = cf.link_service.get_statistics().await {
                 stats = read;
             }
-            stats_read = Some(std::time::Instant::now());
+            stats_read = Some(host::Instant::now());
         }
         let link_quality = stats.link_quality.unwrap_or(0.0);
         let uplink_rate = stats.uplink_rate.unwrap_or(0.0);

@@ -5,7 +5,8 @@ use slint::{ComponentHandle, Model};
 use crate::app::AppContext;
 use crate::settings::AppSettings;
 use crate::units::{fetch_unit_details, sort_unit_indices};
-use crate::{AppWindow, planning, renderer, ViewSettings};
+use crate::{AppWindow, planning, host::renderer, ViewSettings};
+use crate::host;
 
 // Visualizer scene overlay (loaded scene's flight area + pads + obstacles)
 #[derive(Default)]
@@ -38,9 +39,8 @@ pub(crate) fn setup(ui: &AppWindow, cx: &AppContext) {
             let uw = ui.as_weak();
             let viz_scene_state = viz_scene_state.clone();
             slint::spawn_local(async move {
-                let Some(handle) = rfd::AsyncFileDialog::new()
+                let Some(handle) = host::dialog::FileDialog::new()
                     .add_filter("YAML", &["yaml", "yml"])
-                    .set_directory(std::env::current_dir().unwrap_or_default())
                     .pick_file().await
                 else { return };
                 let path = handle.path().to_path_buf();
@@ -54,9 +54,9 @@ pub(crate) fn setup(ui: &AppWindow, cx: &AppContext) {
                             let obs = scene.obstacles();
                             s.set_obstacles(&obs);
                         }
-                        let mut settings: AppSettings = confy::load("swarmkeeper", None).unwrap_or_default();
+                        let mut settings: AppSettings = host::store::load();
                         settings.last_scene_config = Some(path.to_string_lossy().into_owned());
-                        if let Err(e) = confy::store("swarmkeeper", None, &settings) {
+                        if let Err(e) = host::store::save(&settings) {
                             eprintln!("Failed to persist last_scene_config: {}", e);
                         }
                         if let Some(ui) = uw.upgrade() {
@@ -120,7 +120,7 @@ pub(crate) fn setup(ui: &AppWindow, cx: &AppContext) {
             }
 
             // Pick file: last-loaded scene if present, else file picker
-            let settings: AppSettings = confy::load("swarmkeeper", None).unwrap_or_default();
+            let settings: AppSettings = host::store::load();
             let known_path = settings.last_scene_config.clone();
 
             let uw = ui.as_weak();
@@ -128,10 +128,9 @@ pub(crate) fn setup(ui: &AppWindow, cx: &AppContext) {
                 let path = if let Some(p) = known_path {
                     std::path::PathBuf::from(p)
                 } else {
-                    let Some(handle) = rfd::AsyncFileDialog::new()
+                    let Some(handle) = host::dialog::FileDialog::new()
                         .add_filter("YAML", &["yaml", "yml"])
                         .set_file_name("scene.yaml")
-                        .set_directory(std::env::current_dir().unwrap_or_default())
                         .save_file().await
                     else { return };
                     handle.path().to_path_buf()
@@ -141,9 +140,9 @@ pub(crate) fn setup(ui: &AppWindow, cx: &AppContext) {
                     eprintln!("Failed to save pads: {}", e);
                     return;
                 }
-                let mut settings: AppSettings = confy::load("swarmkeeper", None).unwrap_or_default();
+                let mut settings: AppSettings = host::store::load();
                 settings.last_scene_config = Some(path.to_string_lossy().into_owned());
-                if let Err(e) = confy::store("swarmkeeper", None, &settings) {
+                if let Err(e) = host::store::save(&settings) {
                     eprintln!("Failed to persist last_scene_config: {}", e);
                 }
                 if let Some(ui) = uw.upgrade() {

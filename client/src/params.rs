@@ -10,11 +10,26 @@ use crate::settings::AppSettings;
 use crate::swarm::client_units;
 use crate::swarm_file::{load_persistent_params, uri_with_link_timeout};
 use crate::{AppWindow, SwarmParamData};
+use crate::host;
 
-/// The `ValueType` of a parameter type name, as the client API gives it
-/// (`u8`, `f32`, …).
-pub(crate) fn value_type_from_name(name: &str) -> Option<crazyflie_lib::ValueType> {
-    use crazyflie_lib::ValueType::*;
+/// A parameter's type, by the name the client API gives it (`u8`, `f32`, …).
+#[derive(Clone, Copy)]
+pub(crate) enum ParamType {
+    U8,
+    U16,
+    U32,
+    U64,
+    I8,
+    I16,
+    I32,
+    I64,
+    F16,
+    F32,
+    F64,
+}
+
+pub(crate) fn value_type_from_name(name: &str) -> Option<ParamType> {
+    use ParamType::*;
     Some(match name {
         "u8" => U8,
         "u16" => U16,
@@ -31,22 +46,19 @@ pub(crate) fn value_type_from_name(name: &str) -> Option<crazyflie_lib::ValueTyp
     })
 }
 
-/// Parse a user-entered string into a [`crazyflie_lib::Value`] of the given
-/// type, enforcing that the value actually fits the type (range for integers,
-/// numeric for floats). Returns `Err(message)` describing the problem otherwise.
-pub(crate) fn parse_param_value(
-    vt: crazyflie_lib::ValueType,
-    s: &str,
-) -> Result<crazyflie_lib::Value, String> {
-    use crazyflie_lib::{Value, ValueType};
+/// Parse a user-entered value of the given type, enforcing that it fits the
+/// type (range for integers, numeric for floats). The value is returned as
+/// the f64 every value is sent as through the client API. Returns
+/// `Err(message)` describing the problem otherwise.
+pub(crate) fn parse_param_value(vt: ParamType, s: &str) -> Result<f64, String> {
     let s = s.trim();
     if s.is_empty() {
         return Err("Enter a value".to_string());
     }
     macro_rules! parse_int {
-        ($variant:ident, $ty:ty) => {
+        ($ty:ty) => {
             match s.parse::<$ty>() {
-                Ok(v) => Ok(Value::$variant(v)),
+                Ok(v) => Ok(v as f64),
                 Err(_) => Err(format!(
                     "Expected an integer between {} and {}",
                     <$ty>::MIN,
@@ -56,25 +68,25 @@ pub(crate) fn parse_param_value(
         };
     }
     match vt {
-        ValueType::U8 => parse_int!(U8, u8),
-        ValueType::U16 => parse_int!(U16, u16),
-        ValueType::U32 => parse_int!(U32, u32),
-        ValueType::U64 => parse_int!(U64, u64),
-        ValueType::I8 => parse_int!(I8, i8),
-        ValueType::I16 => parse_int!(I16, i16),
-        ValueType::I32 => parse_int!(I32, i32),
-        ValueType::I64 => parse_int!(I64, i64),
-        ValueType::F16 => match s.parse::<f64>() {
-            Ok(v) if v.is_finite() => Ok(Value::from_f64_lossy(ValueType::F16, v)),
+        ParamType::U8 => parse_int!(u8),
+        ParamType::U16 => parse_int!(u16),
+        ParamType::U32 => parse_int!(u32),
+        ParamType::U64 => parse_int!(u64),
+        ParamType::I8 => parse_int!(i8),
+        ParamType::I16 => parse_int!(i16),
+        ParamType::I32 => parse_int!(i32),
+        ParamType::I64 => parse_int!(i64),
+        ParamType::F16 => match s.parse::<f64>() {
+            Ok(v) if v.is_finite() => Ok(v),
             Ok(_) => Err("Expected a finite number".to_string()),
             Err(_) => Err("Expected a number".to_string()),
         },
-        ValueType::F32 => match s.parse::<f32>() {
-            Ok(v) => Ok(Value::F32(v)),
+        ParamType::F32 => match s.parse::<f32>() {
+            Ok(v) => Ok(v as f64),
             Err(_) => Err("Expected a number".to_string()),
         },
-        ValueType::F64 => match s.parse::<f64>() {
-            Ok(v) => Ok(Value::F64(v)),
+        ParamType::F64 => match s.parse::<f64>() {
+            Ok(v) => Ok(v),
             Err(_) => Err("Expected a number".to_string()),
         },
     }
@@ -127,13 +139,13 @@ pub(crate) fn setup(ui: &AppWindow, cx: &AppContext) {
             };
 
             // Persist the tuning values locally
-            let mut settings: AppSettings = confy::load("swarmkeeper", None).unwrap_or_default();
+            let mut settings: AppSettings = host::store::load();
             settings.tuning_thrust_base = Some(thrust_base);
             settings.tuning_vx_ki = Some(vx_ki);
             settings.tuning_vy_ki = Some(vy_ki);
             settings.tuning_prop_test_threshold = Some(prop_threshold);
             settings.tuning_prop_test_pwm_ratio = Some(prop_pwm_ratio);
-            if let Err(e) = confy::store("swarmkeeper", None, &settings) {
+            if let Err(e) = host::store::save(&settings) {
                 eprintln!("Failed to save tuning settings: {}", e);
             }
 
@@ -172,7 +184,7 @@ pub(crate) fn setup(ui: &AppWindow, cx: &AppContext) {
             let connection = connection.clone();
             let ui_weak = ui_weak.clone();
 
-            tokio::spawn(async move {
+            host::spawn(async move {
                 // Check if units are already connected
                 let connected_units: HashMap<usize, Arc<crazyflie_connection_server::Crazyflie>> = {
                     let state = swarm_state.lock().await;
@@ -184,7 +196,7 @@ pub(crate) fn setup(ui: &AppWindow, cx: &AppContext) {
 
                 let completed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
 
-                let mut join_set = tokio::task::JoinSet::new();
+                let mut join_set = host::JoinSet::new();
                 for (idx, (uri, name)) in unit_info.into_iter().enumerate() {
                     let ui_weak = ui_weak.clone();
                     let completed = completed.clone();
@@ -206,7 +218,7 @@ pub(crate) fn setup(ui: &AppWindow, cx: &AppContext) {
                             (cf, false)
                         } else {
                             eprintln!("Tuning {}: connecting to {}...", name, uri);
-                            match tokio::time::timeout(
+                            match host::timeout(
                                 std::time::Duration::from_secs(30),
                                 client.attach(&uri_with_link_timeout(&uri)),
                             ).await {
@@ -274,7 +286,7 @@ pub(crate) fn setup(ui: &AppWindow, cx: &AppContext) {
                 while join_set.join_next().await.is_some() {}
 
                 eprintln!("All tuning params set, closing dialog");
-                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                host::sleep(std::time::Duration::from_millis(500)).await;
 
                 let ui_weak_inner = ui_weak.clone();
                 slint::invoke_from_event_loop(move || {
@@ -307,7 +319,7 @@ pub(crate) fn setup(ui: &AppWindow, cx: &AppContext) {
         ui.on_refresh_swarm_params(move || {
             let swarm_state = swarm_state.clone();
             let ui_weak = ui_weak.clone();
-            tokio::spawn(async move {
+            host::spawn(async move {
                 let cfs: Vec<Arc<crazyflie_connection_server::Crazyflie>> = {
                     let state = swarm_state.lock().await;
                     client_units(&state).into_iter().map(|(_, cf)| cf).collect()
@@ -391,7 +403,7 @@ pub(crate) fn setup(ui: &AppWindow, cx: &AppContext) {
                 ui.set_progress_dialog_visible(true);
             }
 
-            tokio::spawn(async move {
+            host::spawn(async move {
                 let units: Vec<(usize, Arc<crazyflie_connection_server::Crazyflie>)> = {
                     let state = swarm_state.lock().await;
                     client_units(&state)
@@ -411,7 +423,7 @@ pub(crate) fn setup(ui: &AppWindow, cx: &AppContext) {
                 let completed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
                 let failed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
 
-                let mut join_set = tokio::task::JoinSet::new();
+                let mut join_set = host::JoinSet::new();
                 for (idx, cf) in units {
                     let name = name.clone();
                     let value = value.clone();
@@ -430,7 +442,7 @@ pub(crate) fn setup(ui: &AppWindow, cx: &AppContext) {
                             // as f64 like every value through the client API.
                             let parsed = parse_param_value(vt, &value)?;
                             cf.param
-                                .set_lossy(name.as_str(), parsed.to_f64_lossy())
+                                .set_lossy(name.as_str(), parsed)
                                 .await
                                 .map_err(|e| format!("set failed: {:?}", e))?;
                             // Optionally store to flash so the value survives reboot.
@@ -488,7 +500,7 @@ pub(crate) fn setup(ui: &AppWindow, cx: &AppContext) {
 
                 while join_set.join_next().await.is_some() {}
 
-                tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+                host::sleep(std::time::Duration::from_millis(600)).await;
                 let ui_weak_inner = ui_weak.clone();
                 slint::invoke_from_event_loop(move || {
                     if let Some(ui) = ui_weak_inner.upgrade() {
@@ -521,9 +533,9 @@ pub(crate) fn setup(ui: &AppWindow, cx: &AppContext) {
             let connection = connection.clone();
             let ui_weak = ui_weak.clone();
 
-            tokio::spawn(async move {
+            host::spawn(async move {
                 // Open file dialog
-                let Some(handle) = rfd::AsyncFileDialog::new()
+                let Some(handle) = host::dialog::FileDialog::new()
                     .add_filter("YAML", &["yaml", "yml"])
                     .pick_file()
                     .await
@@ -573,7 +585,7 @@ pub(crate) fn setup(ui: &AppWindow, cx: &AppContext) {
 
                 let completed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
 
-                let mut join_set = tokio::task::JoinSet::new();
+                let mut join_set = host::JoinSet::new();
                 for (idx, (uri, name)) in unit_info.into_iter().enumerate() {
                     let ui_weak = ui_weak.clone();
                     let completed = completed.clone();
@@ -588,7 +600,7 @@ pub(crate) fn setup(ui: &AppWindow, cx: &AppContext) {
                             (cf, false)
                         } else {
                             eprintln!("Param upload {}: connecting to {}...", name, uri);
-                            match tokio::time::timeout(
+                            match host::timeout(
                                 std::time::Duration::from_secs(30),
                                 client.attach(&uri_with_link_timeout(&uri)),
                             ).await {
@@ -665,7 +677,7 @@ pub(crate) fn setup(ui: &AppWindow, cx: &AppContext) {
                 while join_set.join_next().await.is_some() {}
 
                 eprintln!("All params uploaded, closing dialog");
-                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                host::sleep(std::time::Duration::from_millis(500)).await;
 
                 let ui_weak_inner = ui_weak.clone();
                 slint::invoke_from_event_loop(move || {

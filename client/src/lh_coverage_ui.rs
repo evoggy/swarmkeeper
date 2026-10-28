@@ -3,7 +3,8 @@
 use slint::{ComponentHandle, Model};
 
 use crate::app::AppContext;
-use crate::{AppWindow, coverage, LhBaseStationData, renderer};
+use crate::{AppWindow, coverage, LhBaseStationData, host::renderer};
+use crate::host;
 
 // LH Coverage shared state (Mutex for thread-safe access from rendering notifier)
 pub(crate) struct CoverageState {
@@ -38,7 +39,7 @@ pub(crate) fn setup(ui: &AppWindow, cx: &AppContext) {
             let uw2 = ui.as_weak();
             let cs = cs.clone();
             slint::spawn_local(async move {
-                let Some(handle) = rfd::AsyncFileDialog::new()
+                let Some(handle) = host::dialog::FileDialog::new()
                     .add_filter("YAML", &["yaml", "yml"])
                     .pick_file().await
                 else { return };
@@ -90,7 +91,7 @@ pub(crate) fn setup(ui: &AppWindow, cx: &AppContext) {
             let uw2 = ui.as_weak();
             let cs = cs.clone();
             slint::spawn_local(async move {
-                let Some(handle) = rfd::AsyncFileDialog::new()
+                let Some(handle) = host::dialog::FileDialog::new()
                     .add_filter("YAML", &["yaml", "yml"])
                     .set_file_name("lh_coverage.yaml")
                     .save_file().await
@@ -137,7 +138,7 @@ pub(crate) fn setup(ui: &AppWindow, cx: &AppContext) {
             let uw2 = ui.as_weak();
             let cs = cs.clone();
             slint::spawn_local(async move {
-                let Some(handle) = rfd::AsyncFileDialog::new()
+                let Some(handle) = host::dialog::FileDialog::new()
                     .add_filter("YAML", &["yaml", "yml"])
                     .pick_file().await
                 else { return };
@@ -370,7 +371,7 @@ pub(crate) fn setup(ui: &AppWindow, cx: &AppContext) {
             let uw2 = ui.as_weak();
             let cs = cs.clone();
             slint::spawn_local(async move {
-                let Some(handle) = rfd::AsyncFileDialog::new()
+                let Some(handle) = host::dialog::FileDialog::new()
                     .add_filter("CSV files", &["csv"])
                     .set_title("Load Trajectories CSV")
                     .pick_file().await

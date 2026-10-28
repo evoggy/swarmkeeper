@@ -4,7 +4,7 @@ use slint::{ComponentHandle, Model};
 
 use crate::app::AppContext;
 use crate::units::sort_unit_indices;
-use crate::{AppWindow, planning, renderer, UnitState, ViewSettings, VizLabel};
+use crate::{AppWindow, planning, host::renderer, UnitState, ViewSettings, VizLabel};
 
 pub(crate) fn setup(ui: &AppWindow, cx: &AppContext) {
     let AppContext { settings: _, positioning_data, goto_targets, viz_scene_state, trajectory_data, coverage_state, tdoa3_state, planning_state, wizard_state, .. } = cx;

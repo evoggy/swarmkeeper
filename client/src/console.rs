@@ -11,6 +11,7 @@ use crate::app::AppContext;
 use crate::swarm_file::uri_with_link_timeout;
 use crate::units::{rebuild_table_rows, sort_unit_indices, update_unit};
 use crate::{AppWindow, ConsoleLineData};
+use crate::host;
 
 /// Firmware parameter that makes the Crazyflie dump its stored assert snapshot
 /// as a single `DEBUG_PRINT` line on the console (`printAssertSnapshotData()`
@@ -55,15 +56,15 @@ pub(crate) async fn read_assert_info(
         .await
         .map_err(|e| format!("could not set {}: {}", ASSERT_INFO_PARAM, e))?;
 
-    let deadline = tokio::time::Instant::now() + wait_timeout;
+    let deadline = host::Instant::now() + wait_timeout;
     let mut first_line: Option<String> = None;
 
     loop {
-        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        let remaining = deadline.saturating_duration_since(host::Instant::now());
         if remaining.is_zero() {
             break;
         }
-        match tokio::time::timeout(remaining, stream.next()).await {
+        match host::timeout(remaining, stream.next()).await {
             Ok(Some(line)) => {
                 let text = strip_console_prefix(&line).trim_end().to_string();
                 if ASSERT_LINE_MARKERS.iter().any(|m| text.contains(m)) {
@@ -139,7 +140,7 @@ pub(crate) fn console_path() -> std::path::PathBuf {
 pub(crate) fn load_console() -> ConsoleStore {
     let path = console_path();
     if path.exists() {
-        let contents = std::fs::read_to_string(&path).unwrap_or_default();
+        let contents = host::fs::read_to_string(&path).unwrap_or_default();
         serde_yaml::from_str(&contents).unwrap_or_default()
     } else {
         HashMap::new()
@@ -149,10 +150,10 @@ pub(crate) fn load_console() -> ConsoleStore {
 pub(crate) fn save_console(store: &ConsoleStore) {
     let path = console_path();
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).ok();
+        host::fs::create_dir_all(parent).ok();
     }
     if let Ok(yaml) = serde_yaml::to_string(store) {
-        std::fs::write(&path, yaml).ok();
+        host::fs::write(&path, yaml).ok();
     }
 }
 
@@ -171,7 +172,7 @@ pub(crate) fn start_console_capture(
     if serial.is_empty() {
         return;
     }
-    tokio::spawn(async move {
+    host::spawn(async move {
         use futures::StreamExt;
         let mut stream = match cf.console.line_stream().await {
             Ok(stream) => stream,

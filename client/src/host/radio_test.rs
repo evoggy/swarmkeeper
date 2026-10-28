@@ -3,10 +3,12 @@
 use slint::{ComponentHandle, Model};
 
 use crate::app::AppContext;
-use crate::radios;
-use crate::swarm::{link_uri, SwarmState};
+use crate::host::radios;
+use crate::host::radios::link_uri;
+use crate::swarm::SwarmState;
 use crate::units::update_unit;
 use crate::{AppWindow, ChannelResult, UnitState};
+use crate::host;
 
 pub(crate) async fn run_radio_channel_test(
     uri: String,
@@ -62,7 +64,7 @@ pub(crate) async fn run_radio_channel_test(
         }
         // Brief delay to let all radio connections fully close
         if had_connections {
-            tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+            host::sleep(std::time::Duration::from_millis(500)).await;
         }
     }
 
@@ -227,7 +229,7 @@ pub(crate) fn setup(ui: &AppWindow, cx: &AppContext) {
             ui_ref.set_radio_test_status("Starting...".into());
             ui_ref.set_radio_test_results(slint::ModelRc::new(slint::VecModel::from(Vec::<ChannelResult>::new())));
 
-            tokio::spawn(async move {
+            host::spawn(async move {
                 let uri = link_uri(&link_context, &radio_plan, &uri).await;
                 run_radio_channel_test(uri, swarm_state, unit_index as usize, ui_weak).await;
             });

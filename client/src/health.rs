@@ -9,6 +9,7 @@ use crate::app::AppContext;
 use crate::swarm::client_units;
 use crate::swarm_file::uri_with_link_timeout;
 use crate::{AppWindow, HealthTestResult};
+use crate::host;
 
 pub(crate) fn setup(ui: &AppWindow, cx: &AppContext) {
     let AppContext { connection, swarm_state, .. } = cx;
@@ -55,7 +56,7 @@ pub(crate) fn setup(ui: &AppWindow, cx: &AppContext) {
             let swarm_state = swarm_state.clone();
             let ui_weak = ui_weak.clone();
 
-            tokio::spawn(async move {
+            host::spawn(async move {
                 let completed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
                 // Connected units are tested through their connection, the
                 // others are attached to for the test
@@ -65,7 +66,7 @@ pub(crate) fn setup(ui: &AppWindow, cx: &AppContext) {
                 };
                 let client = connection.read().await.client().clone();
 
-                let mut join_set = tokio::task::JoinSet::new();
+                let mut join_set = host::JoinSet::new();
                 for (idx, (uri, name)) in unit_info.into_iter().enumerate() {
                     let ui_weak = ui_weak.clone();
                     let completed = completed.clone();
@@ -91,7 +92,7 @@ pub(crate) fn setup(ui: &AppWindow, cx: &AppContext) {
                         let temp_connection = existing_cf.is_none();
                         let attached = match existing_cf {
                             Some(cf) => Ok(Ok(cf)),
-                            None => tokio::time::timeout(
+                            None => host::timeout(
                                 std::time::Duration::from_secs(30),
                                 client.attach(&uri_with_link_timeout(&uri)),
                             )
@@ -168,7 +169,7 @@ pub(crate) fn setup(ui: &AppWindow, cx: &AppContext) {
                             cf.param.set_lossy("health.startPropTest", 1.0).await?;
                             eprintln!("Health test {}: prop test started", name);
 
-                            let result = tokio::time::timeout(
+                            let result = host::timeout(
                                 std::time::Duration::from_secs(15),
                                 async {
                                     loop {

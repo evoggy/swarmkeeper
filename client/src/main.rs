@@ -14,19 +14,18 @@ use crate::settings::{AppSettings, save_view_state};
 use crate::swarm::{follow_jobs, SwarmState, unit_uris, UnitSetup};
 use crate::swarm_file::{apply_swarm_config, load_swarm_config};
 use crate::tdoa3_ui::{Tdoa3GizmoState, Tdoa3State};
-use crate::toc_cache::FileTocCache;
+use crate::host::toc_cache::FileTocCache;
 use crate::trajectory::{SharedGotoTargets, SharedTrajectoryData};
 use crate::view3d::VizSceneState;
 
-mod account;
 mod app;
-mod bootloader_flash;
 mod connection;
 mod console;
 mod coverage;
 mod flashing;
 mod flight;
 mod health;
+mod host;
 mod journal;
 mod lh_coverage_ui;
 mod lh_geo;
@@ -40,24 +39,17 @@ mod params;
 mod planning;
 mod planning_ui;
 mod plot;
-mod radio_test;
-mod radios;
 mod rechannel;
 mod rechannel_dialog;
-mod renderer;
-mod rendering;
 mod settings;
 mod shared_swarms;
-mod sniffer;
 mod sniffer_ui;
 mod swarm;
-mod swarm_connect;
 mod swarm_file;
 mod system;
 mod tdoa3;
 mod tdoa3_ui;
 mod telemetry;
-mod toc_cache;
 mod trajectory;
 mod trajectory_ui;
 mod units;
@@ -65,26 +57,10 @@ mod view3d;
 
 slint::include_modules!();
 
-/// Swarms, scenes, plans, log configs, journals and recordings are all kept
-/// relative to the working directory. Run from a source checkout (`cargo run`
-/// in client/) that is the checkout itself; started any other way (installed,
-/// from a desktop menu) they go in ~/Documents/Swarmkeeper instead.
-fn enter_data_dir() {
-    if std::path::Path::new("swarms").is_dir() {
-        return;
-    }
-    let Some(base) = dirs_next::document_dir().or_else(dirs_next::home_dir) else {
-        return;
-    };
-    let dir = base.join("Swarmkeeper");
-    if let Err(e) = std::fs::create_dir_all(&dir).and_then(|_| std::env::set_current_dir(&dir)) {
-        eprintln!("Could not use {} as data directory: {e}", dir.display());
-    }
-}
 
 #[tokio::main]
 async fn main() {
-    enter_data_dir();
+    host::env::enter_data_dir();
 
     slint::BackendSelector::new()
         .require_opengl_es()
@@ -150,7 +126,7 @@ async fn main() {
     ));
     let swarm_state: SwarmState = Arc::new(Mutex::new(HashMap::new()));
     // Which Crazyradio the `radio:///` URIs of the swarm use.
-    let radio_plan: radios::SharedRadioPlan = Arc::new(Mutex::new(radios::RadioPlan::default()));
+    let radio_plan: host::radios::SharedRadioPlan = Arc::new(Mutex::new(host::radios::RadioPlan::default()));
     radio_plan.lock().await.set_swarm(unit_uris(&ui));
 
     // Plot dock log streaming: the unit selected for logging (unsorted original
@@ -331,8 +307,8 @@ async fn main() {
     console::setup(&ui, &cx);
     view3d::setup(&ui, &cx);
     manual_control::setup(&ui, &cx);
-    rendering::setup(&ui, &cx);
-    radio_test::setup(&ui, &cx);
+    host::rendering::setup(&ui, &cx);
+    host::radio_test::setup(&ui, &cx);
     health::setup(&ui, &cx);
     lh_coverage_ui::setup(&ui, &cx);
     tdoa3_ui::setup(&ui, &cx);

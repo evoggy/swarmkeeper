@@ -1,5 +1,5 @@
 //! Swarms shared through the server Swarmkeeper is signed in to (see
-//! [`crate::account`]). Ported from cfcli's `documents` module, and laid out
+//! [`crate::host::account`]). Ported from cfcli's `documents` module, and laid out
 //! on disk the same way.
 //!
 //! A shared swarm's ID is `<org>/<swarm>`. Swarmkeeper keeps a copy of each
@@ -29,7 +29,8 @@ use anyhow::{bail, Context, Result};
 use reqwest::{header, RequestBuilder, Response, StatusCode};
 use serde::{Deserialize, Serialize};
 
-use crate::account::{self, Credentials, KeyRejected};
+use crate::host::account::{self, Credentials, KeyRejected};
+use crate::host;
 
 /// The folder of the copies, the key in the state file and the server's API
 /// path.
@@ -219,7 +220,7 @@ impl Shared {
 
     fn forget(&self, id: &SharedId) -> Result<()> {
         let path = self.copy_path(id);
-        match std::fs::remove_file(&path) {
+        match host::fs::remove_file(&path) {
             Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
                 return Err(e).with_context(|| format!("removing {}", path.display()));
             }
@@ -231,7 +232,7 @@ impl Shared {
     /// The copy of `id` and its revision, without asking the server.
     pub fn cached(&self, id: &SharedId) -> Result<(String, i32)> {
         let path = self.copy_path(id);
-        let yaml = std::fs::read_to_string(&path)
+        let yaml = host::fs::read_to_string(&path)
             .with_context(|| format!("this computer has no copy of '{}' from {}", id, self.host()))?;
         Ok((yaml, self.copy_state(id)?.unwrap_or_default().revision))
     }
@@ -246,7 +247,7 @@ impl Shared {
             .into_iter()
             .filter_map(|(key, copy)| {
                 let id = SharedId::parse(&key)?;
-                let yaml = std::fs::read_to_string(self.copy_path(&id)).ok()?;
+                let yaml = host::fs::read_to_string(self.copy_path(&id)).ok()?;
                 let (name, units) = summary(&yaml).unwrap_or_else(|| ("(can't read the copy)".to_string(), 0));
                 Some(Listed { id, name, units, revision: copy.revision })
             })
@@ -314,9 +315,9 @@ impl Shared {
                 for id in ids {
                     let copy = copies.remove(&id.to_string()).unwrap_or_default();
                     let path = self.dir.join(kind).join(old).join(format!("{}.yaml", id.name));
-                    let yaml = match std::fs::read(&path) {
+                    let yaml = match host::fs::read(&path) {
                         Ok(yaml) => {
-                            std::fs::remove_file(&path).with_context(|| format!("moving {}", path.display()))?;
+                            host::fs::remove_file(&path).with_context(|| format!("moving {}", path.display()))?;
                             Some(yaml)
                         }
                         Err(_) => None,
@@ -335,7 +336,7 @@ impl Shared {
         for kind in state.keys() {
             for (old, _) in &renames {
                 // Only goes when empty.
-                let _ = std::fs::remove_dir(self.dir.join(kind).join(old));
+                let _ = host::fs::remove_dir(self.dir.join(kind).join(old));
             }
         }
         Ok(renames)
@@ -486,7 +487,7 @@ impl Shared {
 }
 
 fn read_json<T: Default + serde::de::DeserializeOwned>(path: &Path) -> Result<T> {
-    match std::fs::read_to_string(path) {
+    match host::fs::read_to_string(path) {
         Ok(text) => serde_json::from_str(&text).with_context(|| format!("reading {}", path.display())),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(T::default()),
         Err(e) => Err(e).with_context(|| format!("reading {}", path.display())),
@@ -496,11 +497,11 @@ fn read_json<T: Default + serde::de::DeserializeOwned>(path: &Path) -> Result<T>
 /// Write a file, replacing any old one in one step.
 fn write_atomic(path: &Path, contents: &[u8]) -> Result<()> {
     let dir = path.parent().unwrap_or(Path::new("."));
-    std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+    host::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
     let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
     let tmp = dir.join(format!(".{}.tmp", name));
-    std::fs::write(&tmp, contents).with_context(|| format!("writing {}", tmp.display()))?;
-    std::fs::rename(&tmp, path).with_context(|| format!("writing {}", path.display()))
+    host::fs::write(&tmp, contents).with_context(|| format!("writing {}", tmp.display()))?;
+    host::fs::rename(&tmp, path).with_context(|| format!("writing {}", path.display()))
 }
 
 /// The revision in a response's ETag, `"N"`.

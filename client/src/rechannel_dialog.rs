@@ -5,12 +5,14 @@ use std::sync::Arc;
 use slint::{ComponentHandle, Model};
 
 use crate::app::AppContext;
+use crate::host::radios::link_uri;
 use crate::flashing::disconnect_for_flashing;
 use crate::settings::AppSettings;
-use crate::swarm::{join_channels, link_uri};
+use crate::swarm::{join_channels};
 use crate::swarm_file::{load_swarm_config, uri_with_default_timeout, uri_with_link_timeout};
 use crate::units::rebuild_table_rows;
-use crate::{AppWindow, radios, RcRowState, rechannel, RechannelRow};
+use crate::{AppWindow, host::radios, RcRowState, rechannel, RechannelRow};
+use crate::host;
 
 /// The swarm file as the Rechannel dialog last read it, and the plan for it.
 #[derive(Default)]
@@ -116,7 +118,7 @@ pub(crate) fn setup(ui: &AppWindow, cx: &AppContext) {
                 if ui.get_rc_running() {
                     return;
                 }
-                let settings: AppSettings = confy::load("swarmkeeper", None).unwrap_or_default();
+                let settings: AppSettings = host::store::load();
                 let shared = settings.last_shared_swarm.filter(|_| settings.last_swarm_config.is_none());
                 let path = settings.last_swarm_config.map(std::path::PathBuf::from);
                 let units: Vec<rechannel::Unit> = match path.as_deref().map(load_swarm_config) {
@@ -206,7 +208,7 @@ pub(crate) fn setup(ui: &AppWindow, cx: &AppContext) {
                 let positioning_source = positioning_source.clone();
                 let rc_state = rc_state.clone();
                 let ui_weak = ui_weak.clone();
-                tokio::spawn(async move {
+                host::spawn(async move {
                     disconnect_for_flashing(&swarm_state, &positioning_source, &ui_weak).await;
                     let (client, drives_radios) = {
                         let connection = connection.read().await;
@@ -254,10 +256,10 @@ pub(crate) fn setup(ui: &AppWindow, cx: &AppContext) {
                     let saved = match (&path, new_uris.is_empty()) {
                         (_, true) => Ok(false),
                         (None, false) => Err(anyhow::anyhow!("no swarm file is open")),
-                        (Some(path), false) => std::fs::read_to_string(path)
+                        (Some(path), false) => host::fs::read_to_string(path)
                             .map_err(anyhow::Error::from)
                             .and_then(|text| rechannel::rewrite_swarm_file(&text, &new_uris))
-                            .and_then(|text| std::fs::write(path, text).map_err(anyhow::Error::from))
+                            .and_then(|text| host::fs::write(path, text).map_err(anyhow::Error::from))
                             .map(|()| true),
                     };
                     let mut uris: Vec<String> = placements.iter().map(|p| uri_with_default_timeout(&p.uri)).collect();

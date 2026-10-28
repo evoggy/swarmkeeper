@@ -2,7 +2,7 @@
 //! `cfcli swarm rechannel`.
 //!
 //! Crazyflies on the same channel always share a Crazyradio (see
-//! [`crate::radios::assign`]), so a swarm on one channel can't use more than
+//! [`crate::host::radios::assign`]), so a swarm on one channel can't use more than
 //! one. With one Crazyradio per channel, each radio serves its own part of the
 //! swarm.
 //!
@@ -21,9 +21,10 @@ use std::time::Duration;
 use anyhow::{anyhow, bail, Context, Result};
 use crazyflie_connection_server::memory::{EEPROMConfigMemory, MemoryType};
 use crazyflie_connection_server::Client;
-use tokio::task::JoinSet;
+use crate::host::JoinSet;
 
-use crate::radios::{RadioUri, CHANNEL_SPACING};
+use crate::host::radios::{RadioUri, CHANNEL_SPACING};
+use crate::host;
 
 /// The lower channels are the more crowded ones (Wi-Fi), so a channel count
 /// starts here and goes down.
@@ -250,7 +251,7 @@ pub async fn run(client: Client, link_uri: LinkUri, placements: &[Placement], re
             }
             report(Event::Unit { unit: m.unit, state: State::Busy, status: format!("Reprogramming to channel {}…", m.to) });
             let result = async {
-                let cf = tokio::time::timeout(CONNECT_TIMEOUT, client.attach(&m.old_link))
+                let cf = host::timeout(CONNECT_TIMEOUT, client.attach(&m.old_link))
                     .await
                     .map_err(|_| anyhow!("connecting timed out"))?
                     .context("could not connect")?;

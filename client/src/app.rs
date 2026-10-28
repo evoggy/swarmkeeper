@@ -13,15 +13,16 @@ use crate::planning_ui::{PlanningGizmoState, PlanningState};
 use crate::settings::AppSettings;
 use crate::swarm::SwarmState;
 use crate::tdoa3_ui::{Tdoa3GizmoState, Tdoa3State};
-use crate::toc_cache::FileTocCache;
+use crate::host::toc_cache::FileTocCache;
 use crate::trajectory::{SharedGotoTargets, SharedTrajectoryData};
 use crate::view3d::VizSceneState;
-use crate::{AppWindow, connection, lh_wizard, plot, radios};
+use crate::{AppWindow, connection, lh_wizard, plot, host::radios};
+use crate::host;
 
 /// Everything the parts of the app share, built once in `main`.
 pub(crate) struct AppContext {
     pub(crate) settings: AppSettings,
-    pub(crate) link_context: Arc<crazyflie_link::LinkContext>,
+    pub(crate) link_context: Arc<host::radios::LinkContext>,
     pub(crate) toc_cache: FileTocCache,
     pub(crate) connection: connection::SharedConnection,
     pub(crate) swarm_state: SwarmState,
@@ -34,7 +35,7 @@ pub(crate) struct AppContext {
     pub(crate) journal_store: SharedJournalStore,
     pub(crate) console_store: SharedConsoleStore,
     pub(crate) viz_scene_state: Arc<std::sync::Mutex<VizSceneState>>,
-    pub(crate) gilrs: Arc<std::sync::Mutex<gilrs::Gilrs>>,
+    pub(crate) gilrs: Arc<std::sync::Mutex<host::gamepad::Gilrs>>,
     pub(crate) gamepad_ids: SharedGamepadIds,
     pub(crate) manual_control: SharedManualControl,
     pub(crate) trajectory_data: SharedTrajectoryData,

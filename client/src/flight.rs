@@ -8,6 +8,7 @@ use slint::{ComponentHandle, Model};
 use crate::app::AppContext;
 use crate::units::sort_unit_indices;
 use crate::{AppWindow, planning};
+use crate::host;
 
 pub(crate) fn setup(ui: &AppWindow, cx: &AppContext) {
     let AppContext { swarm_state, goto_targets, viz_scene_state, .. } = cx;
@@ -30,7 +31,7 @@ pub(crate) fn setup(ui: &AppWindow, cx: &AppContext) {
                 None => HashMap::new(),
             };
 
-            tokio::spawn(async move {
+            host::spawn(async move {
                 // Each unit lands back on the surface it launched from. land() takes an
                 // absolute world-frame height, and the origin is not the floor once it has
                 // been moved - descending to a hard-coded 0.0 would cut the motors while
@@ -69,7 +70,7 @@ pub(crate) fn setup(ui: &AppWindow, cx: &AppContext) {
         ui.on_emergency_stop(move || {
             let swarm_state = swarm_state.clone();
 
-            tokio::spawn(async move {
+            host::spawn(async move {
                 let connected_units: Vec<(usize, Arc<crazyflie_connection_server::Crazyflie>)> = {
                     let state = swarm_state.lock().await;
                     state.iter().map(|(idx, cu)| (*idx, cu.cf.clone())).collect()
@@ -91,14 +92,14 @@ pub(crate) fn setup(ui: &AppWindow, cx: &AppContext) {
         ui.on_arm_swarm(move || {
             let swarm_state = swarm_state.clone();
 
-            tokio::spawn(async move {
+            host::spawn(async move {
                 let connected_units: Vec<(usize, Arc<crazyflie_connection_server::Crazyflie>)> = {
                     let state = swarm_state.lock().await;
                     state.iter().map(|(idx, cu)| (*idx, cu.cf.clone())).collect()
                 };
 
                 eprintln!("Arming {} units...", connected_units.len());
-                let mut join_set = tokio::task::JoinSet::new();
+                let mut join_set = host::JoinSet::new();
                 for (idx, cf) in connected_units {
                     join_set.spawn(async move {
                         if let Err(e) = cf.supervisor.send_arming_request(true).await {
@@ -117,14 +118,14 @@ pub(crate) fn setup(ui: &AppWindow, cx: &AppContext) {
         ui.on_disarm_swarm(move || {
             let swarm_state = swarm_state.clone();
 
-            tokio::spawn(async move {
+            host::spawn(async move {
                 let connected_units: Vec<(usize, Arc<crazyflie_connection_server::Crazyflie>)> = {
                     let state = swarm_state.lock().await;
                     state.iter().map(|(idx, cu)| (*idx, cu.cf.clone())).collect()
                 };
 
                 eprintln!("Disarming {} units...", connected_units.len());
-                let mut join_set = tokio::task::JoinSet::new();
+                let mut join_set = host::JoinSet::new();
                 for (idx, cf) in connected_units {
                     join_set.spawn(async move {
                         if let Err(e) = cf.supervisor.send_arming_request(false).await {
@@ -168,7 +169,7 @@ pub(crate) fn setup(ui: &AppWindow, cx: &AppContext) {
             let swarm_state = swarm_state.clone();
             let ui_weak_inner = ui_weak.clone();
 
-            tokio::spawn(async move {
+            host::spawn(async move {
                 let cf = {
                     let state = swarm_state.lock().await;
                     match state.get(&original_index) {
@@ -219,7 +220,7 @@ pub(crate) fn setup(ui: &AppWindow, cx: &AppContext) {
                     return;
                 }
                 // Wait for propellers to spin up before taking off
-                tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+                host::sleep(std::time::Duration::from_secs(2)).await;
 
                 eprintln!("Taking off unit {} to {:.2}m{}, yaw={:.1}deg, over {:.1}s...", original_index, target_height, if relative { " (relative)" } else { "" }, yaw_deg, duration);
                 if let Err(e) = cf.high_level_commander.take_off(target_height, Some(yaw_rad), duration, None).await {
@@ -295,7 +296,7 @@ pub(crate) fn setup(ui: &AppWindow, cx: &AppContext) {
             let swarm_state = swarm_state.clone();
             let goto_targets = goto_targets.clone();
 
-            tokio::spawn(async move {
+            host::spawn(async move {
                 let cf = {
                     let state = swarm_state.lock().await;
                     match state.get(&original_index) {
@@ -349,7 +350,7 @@ pub(crate) fn setup(ui: &AppWindow, cx: &AppContext) {
             let swarm_state = swarm_state.clone();
             let goto_targets = goto_targets.clone();
 
-            tokio::spawn(async move {
+            host::spawn(async move {
                 // Landing cancels any in-progress goto, so drop its marker.
                 goto_targets.lock().await.remove(&original_index);
 
@@ -407,7 +408,7 @@ pub(crate) fn setup(ui: &AppWindow, cx: &AppContext) {
 
             let swarm_state = swarm_state.clone();
 
-            tokio::spawn(async move {
+            host::spawn(async move {
                 let (cf, home) = {
                     let state = swarm_state.lock().await;
                     match state.get(&original_index) {
@@ -511,7 +512,7 @@ pub(crate) fn setup(ui: &AppWindow, cx: &AppContext) {
             let swarm_state = swarm_state.clone();
             let ui_weak = ui_weak.clone();
 
-            tokio::spawn(async move {
+            host::spawn(async move {
                 let cf = {
                     let state = swarm_state.lock().await;
                     match state.get(&original_index) {
@@ -566,7 +567,7 @@ pub(crate) fn setup(ui: &AppWindow, cx: &AppContext) {
 
             let swarm_state = swarm_state.clone();
 
-            tokio::spawn(async move {
+            host::spawn(async move {
                 let cf = {
                     let state = swarm_state.lock().await;
                     match state.get(&original_index) {

@@ -4,6 +4,7 @@ use slint::ComponentHandle;
 
 use crate::app::AppContext;
 use crate::{AppWindow, lh_wizard, WizardBsData, WizardSampleData};
+use crate::host;
 
 pub(crate) fn setup(ui: &AppWindow, cx: &AppContext) {
     let AppContext { swarm_state, wizard_state, .. } = cx;
@@ -98,7 +99,7 @@ pub(crate) fn setup(ui: &AppWindow, cx: &AppContext) {
 
             let unit_index = selected_cf as usize;
 
-            tokio::spawn(async move {
+            host::spawn(async move {
                 // Get CF from swarm state
                 let cf = {
                     let state = ss.lock().await;
@@ -148,9 +149,9 @@ pub(crate) fn setup(ui: &AppWindow, cx: &AppContext) {
                 };
                 let mut bs_samples: std::collections::HashMap<u8, Vec<([f32; 4], [f32; 4])>> = std::collections::HashMap::new();
                 let samples_needed = 50;
-                let timeout = tokio::time::Duration::from_secs(3);
+                let timeout = std::time::Duration::from_secs(3);
 
-                let result = tokio::time::timeout(timeout, async {
+                let result = host::timeout(timeout, async {
                     loop {
                         let all_have_enough = !bs_samples.is_empty() &&
                             bs_samples.values().all(|v| v.len() >= samples_needed);
@@ -336,13 +337,13 @@ pub(crate) fn setup(ui: &AppWindow, cx: &AppContext) {
             let ws = ws.clone();
             let uw = uw.clone();
             slint::spawn_local(async move {
-                let Some(handle) = rfd::AsyncFileDialog::new()
+                let Some(handle) = host::dialog::FileDialog::new()
                     .add_filter("YAML", &["yaml", "yml"])
                     .pick_file().await
                 else { return };
                 let path = handle.path().to_path_buf();
 
-                match std::fs::read_to_string(&path) {
+                match host::fs::read_to_string(&path) {
                     Ok(yaml_str) => {
                         let ws_lock = ws.lock().unwrap();
                         match ws_lock.container.load_from_yaml(&yaml_str) {
@@ -366,7 +367,7 @@ pub(crate) fn setup(ui: &AppWindow, cx: &AppContext) {
         ui.on_lh_wizard_export(move || {
             let ws = ws.clone();
             slint::spawn_local(async move {
-                let Some(handle) = rfd::AsyncFileDialog::new()
+                let Some(handle) = host::dialog::FileDialog::new()
                     .add_filter("YAML", &["yaml", "yml"])
                     .set_file_name("lh_geo_session.yaml")
                     .save_file().await
@@ -376,7 +377,7 @@ pub(crate) fn setup(ui: &AppWindow, cx: &AppContext) {
                 let ws_lock = ws.lock().unwrap();
                 match ws_lock.container.save_to_yaml() {
                     Ok(yaml_str) => {
-                        if let Err(e) = std::fs::write(&path, yaml_str) {
+                        if let Err(e) = host::fs::write(&path, yaml_str) {
                             eprintln!("Failed to write file: {}", e);
                         }
                     }

@@ -7,7 +7,8 @@ use slint::{ComponentHandle, Model};
 
 use crate::app::AppContext;
 use crate::loco::AnchorPositionEntry;
-use crate::{AppWindow, sniffer, SnifferAnchorRow, SnifferFeedRow, SnifferMatrixRow, SnifferSurveyRow};
+use crate::{AppWindow, host::sniffer, SnifferAnchorRow, SnifferFeedRow, SnifferMatrixRow, SnifferSurveyRow};
+use crate::host;
 
 /// Build the Slint models from the current sniffer state and push them to the
 /// UI thread. Safe to call from the serial reader thread.
@@ -25,7 +26,7 @@ pub(crate) fn update_sniffer_ui(
     state: &Arc<std::sync::Mutex<sniffer::SnifferState>>,
     pending: Option<Arc<AtomicBool>>,
 ) {
-    let build_start = std::time::Instant::now();
+    let build_start = host::Instant::now();
     let Ok(st) = state.lock() else {
         eprintln!("[sniffer] update_sniffer_ui: state lock poisoned/contended, skipping");
         if let Some(p) = pending {
@@ -179,14 +180,14 @@ pub(crate) fn update_sniffer_ui(
     );
 
     let ui_weak = ui_weak.clone();
-    let post_instant = std::time::Instant::now();
+    let post_instant = host::Instant::now();
     slint::invoke_from_event_loop(move || {
         // Clear the in-flight flag as soon as this update runs, so the reader is
         // free to queue the next one — but only after the prior render finished.
         if let Some(p) = pending {
             p.store(false, Ordering::Release);
         }
-        let apply_start = std::time::Instant::now();
+        let apply_start = host::Instant::now();
         eprintln!(
             "[sniffer] applied on UI thread: queue_latency={:?}",
             post_instant.elapsed(),
@@ -227,195 +228,6 @@ pub(crate) fn update_sniffer_ui(
     .ok();
 }
 
-/// Open the serial port, switch the node to binary sniffer mode, and stream
-/// decoded packets into `state` until `stop` is set. Runs on its own thread.
-pub(crate) fn start_sniffer(
-    port: String,
-    state: Arc<std::sync::Mutex<sniffer::SnifferState>>,
-    stop: Arc<AtomicBool>,
-    recording: Arc<AtomicBool>,
-    ui_weak: slint::Weak<AppWindow>,
-    ui_pending: Arc<AtomicBool>,
-) -> std::thread::JoinHandle<()> {
-    std::thread::spawn(move || {
-        eprintln!("[sniffer] reader thread started, opening {port}");
-        let opened = serialport::new(&port, 9600)
-            .timeout(std::time::Duration::from_millis(50))
-            .open();
-        let mut sp = match opened {
-            Ok(p) => {
-                eprintln!("[sniffer] port {port} opened");
-                p
-            }
-            Err(e) => {
-                eprintln!("[sniffer] open failed: {e}");
-                if let Ok(mut st) = state.lock() {
-                    st.connected = false;
-                    st.port_name = port.clone();
-                    st.error = Some(e.to_string());
-                }
-                update_sniffer_ui(&ui_weak, &state, None);
-                return;
-            }
-        };
-
-        // The node only enables its USB output once the host asserts DTR — it
-        // watches SET_CONTROL_LINE_STATE and drops everything until then.
-        // pyserial asserts DTR on open; the serialport crate does not, so do it
-        // explicitly or we never see a single byte.
-        match sp.write_data_terminal_ready(true) {
-            Ok(()) => eprintln!("[sniffer] write_data_terminal_ready(true) OK"),
-            Err(e) => eprintln!("[sniffer] write_data_terminal_ready FAILED: {e}"),
-        }
-
-        // Switch the node from human-readable to binary output.
-        match sp.write_all(b"b") {
-            Ok(()) => eprintln!("[sniffer] wrote 'b' OK"),
-            Err(e) => eprintln!("[sniffer] write 'b' FAILED: {e}"),
-        }
-        match sp.flush() {
-            Ok(()) => eprintln!("[sniffer] flush OK — entering read loop"),
-            Err(e) => eprintln!("[sniffer] flush FAILED: {e}"),
-        }
-        if let Ok(mut st) = state.lock() {
-            st.connected = true;
-            st.error = None;
-            st.port_name = port.clone();
-        }
-        update_sniffer_ui(&ui_weak, &state, None);
-
-        let start = std::time::Instant::now();
-        let mut dec = sniffer::FrameDecoder::new();
-        let mut rxbuf = [0u8; 2048];
-        let mut packets = Vec::new();
-        // Opt-in recorder, opened/closed in the loop to track the `recording`
-        // flag. Owned here so all file I/O stays off the shared state mutex.
-        let mut recorder: Option<sniffer::SnifferRecorder> = None;
-        let mut last_ui = std::time::Instant::now();
-        let mut bytes_total: u64 = 0;
-        let mut packets_total: u64 = 0;
-        let mut reads_total: u64 = 0;
-        let mut timeouts: u64 = 0;
-        let mut zero_reads: u64 = 0;
-
-        while !stop.load(Ordering::Relaxed) {
-            // Open/close the recording file to match the UI checkbox.
-            match (recording.load(Ordering::Relaxed), recorder.is_some()) {
-                (true, false) => {
-                    let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S").to_string();
-                    match sniffer::SnifferRecorder::create(
-                        std::path::Path::new("recordings/sniffer"),
-                        &stamp,
-                    ) {
-                        Ok(r) => {
-                            eprintln!("[sniffer] recording to {}", r.path.display());
-                            recorder = Some(r);
-                        }
-                        Err(e) => {
-                            eprintln!("[sniffer] cannot start recording: {e}");
-                            // Clear the flag so we don't retry (and spam) every loop.
-                            recording.store(false, Ordering::Relaxed);
-                        }
-                    }
-                }
-                (false, true) => {
-                    if let Some(mut r) = recorder.take() {
-                        r.flush();
-                        eprintln!(
-                            "[sniffer] recording stopped: {} packets -> {}",
-                            r.count,
-                            r.path.display()
-                        );
-                    }
-                }
-                _ => {}
-            }
-
-            match sp.read(&mut rxbuf) {
-                Ok(0) => {
-                    zero_reads += 1;
-                }
-                Ok(n) => {
-                    reads_total += 1;
-                    bytes_total += n as u64;
-                    packets.clear();
-                    dec.push(&rxbuf[..n], &mut packets);
-                    packets_total += packets.len() as u64;
-                    let now = start.elapsed().as_secs_f64();
-                    // Record every decoded sample, outside the state lock, so a
-                    // recording is full-fidelity (the live feed is capped).
-                    if let Some(r) = recorder.as_mut() {
-                        for p in &packets {
-                            r.record(now, p);
-                        }
-                    }
-                    if let Ok(mut st) = state.lock() {
-                        st.now = now;
-                        st.host_resyncs = dec.resyncs;
-                        for p in packets.drain(..) {
-                            st.ingest(p, now);
-                        }
-                    }
-                }
-                Err(ref e) if e.kind() == std::io::ErrorKind::TimedOut => {
-                    timeouts += 1;
-                    if let Ok(mut st) = state.lock() {
-                        st.now = start.elapsed().as_secs_f64();
-                    }
-                }
-                Err(ref e) => {
-                    eprintln!("[sniffer] read error: {e} — stopping reader");
-                    break;
-                }
-            }
-            // Throttle to ~6 Hz. Reset the timer every tick so the debug line is
-            // rate-limited even when an update is skipped, and watch ui_pending:
-            // if it stays `true` the event loop isn't draining our closures.
-            if last_ui.elapsed().as_millis() >= 150 {
-                last_ui = std::time::Instant::now();
-                // Flush buffered samples and mirror recording status to the UI.
-                if let Some(r) = recorder.as_mut() {
-                    r.flush();
-                }
-                if let Ok(mut st) = state.lock() {
-                    st.recording = recorder.is_some();
-                    st.rec_count = recorder.as_ref().map(|r| r.count).unwrap_or(0);
-                    st.rec_path = recorder
-                        .as_ref()
-                        .map(|r| r.path.display().to_string())
-                        .unwrap_or_default();
-                }
-                let pend = ui_pending.load(Ordering::Acquire);
-                eprintln!(
-                    "[sniffer] tick: okN={reads_total} bytes={bytes_total} packets={packets_total} timeouts={timeouts} zero={zero_reads} ui_pending={pend}"
-                );
-                if !ui_pending.swap(true, Ordering::AcqRel) {
-                    update_sniffer_ui(&ui_weak, &state, Some(ui_pending.clone()));
-                } else {
-                    eprintln!("[sniffer] tick: skipped update (previous still in flight)");
-                }
-            }
-        }
-
-        eprintln!("[sniffer] reader loop exited (stop={})", stop.load(Ordering::Relaxed));
-        // Finalise any in-progress recording before the thread ends.
-        if let Some(mut r) = recorder.take() {
-            r.flush();
-            eprintln!(
-                "[sniffer] recording closed: {} packets -> {}",
-                r.count,
-                r.path.display()
-            );
-        }
-        if let Ok(mut st) = state.lock() {
-            st.connected = false;
-            st.recording = false;
-            st.rec_count = 0;
-            st.rec_path = String::new();
-        }
-        update_sniffer_ui(&ui_weak, &state, None);
-    })
-}
 
 pub(crate) fn setup(ui: &AppWindow, _cx: &AppContext) {
     // ---- LPS sniffer tab ----
@@ -426,7 +238,7 @@ pub(crate) fn setup(ui: &AppWindow, _cx: &AppContext) {
         // Opt-in capture: while true the reader thread writes every sniffed
         // packet to a JSONL recording file. Toggled by the UI "Record" checkbox.
         let sniffer_recording = Arc::new(AtomicBool::new(false));
-        let sniffer_thread: Arc<std::sync::Mutex<Option<std::thread::JoinHandle<()>>>> =
+        let sniffer_thread: Arc<std::sync::Mutex<Option<host::ThreadHandle>>> =
             Arc::new(std::sync::Mutex::new(None));
         // Back-pressure: true while a UI refresh is queued but not yet applied,
         // so the reader never floods the event loop with model rebuilds.
@@ -472,7 +284,7 @@ pub(crate) fn setup(ui: &AppWindow, _cx: &AppContext) {
                 };
                 stop.store(false, Ordering::Relaxed);
                 ui_pending.store(false, Ordering::Relaxed);
-                let handle = start_sniffer(
+                let handle = sniffer::start(
                     port.to_string(),
                     state.clone(),
                     stop.clone(),
@@ -536,8 +348,8 @@ pub(crate) fn setup(ui: &AppWindow, _cx: &AppContext) {
                 if survey.is_empty() {
                     return;
                 }
-                tokio::spawn(async move {
-                    let Some(file) = rfd::AsyncFileDialog::new()
+                host::spawn(async move {
+                    let Some(file) = host::dialog::FileDialog::new()
                         .add_filter("YAML", &["yaml", "yml"])
                         .set_file_name("sniffer-geometry.yaml")
                         .save_file()
@@ -561,7 +373,7 @@ pub(crate) fn setup(ui: &AppWindow, _cx: &AppContext) {
                         .collect();
                     match serde_yaml::to_string(&entries) {
                         Ok(text) => {
-                            if let Err(e) = std::fs::write(file.path(), text) {
+                            if let Err(e) = host::fs::write(file.path(), text) {
                                 eprintln!("Failed to write survey geometry: {e}");
                             }
                         }

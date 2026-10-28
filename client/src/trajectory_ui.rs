@@ -10,6 +10,7 @@ use crate::swarm::client_units;
 use crate::trajectory::{build_wave_compressed, generate_primitive, PRIMITIVE_SPEED, sample_trajectory, stack_trajectory_z, TRAJECTORY_TAKEOFF_RISE, trajectory_within_flight_areas, TrajectoryConfig, TrajectoryData, upload_compressed_trajectory_to_unit, upload_trajectory_config_to_unit, UploadedTrajectory};
 use crate::units::sort_unit_indices;
 use crate::{AppWindow, UnitState};
+use crate::host;
 
 pub(crate) fn setup(ui: &AppWindow, cx: &AppContext) {
     let AppContext { swarm_state, viz_scene_state, trajectory_data, .. } = cx;
@@ -24,9 +25,9 @@ pub(crate) fn setup(ui: &AppWindow, cx: &AppContext) {
             let trajectory_data = trajectory_data.clone();
             let ui_weak = ui_weak.clone();
 
-            tokio::spawn(async move {
+            host::spawn(async move {
                 // Open file dialog
-                let Some(handle) = rfd::AsyncFileDialog::new()
+                let Some(handle) = host::dialog::FileDialog::new()
                     .add_filter("YAML", &["yaml", "yml"])
                     .pick_file()
                     .await
@@ -34,7 +35,7 @@ pub(crate) fn setup(ui: &AppWindow, cx: &AppContext) {
                 let path = handle.path().to_path_buf();
 
                 // Parse trajectory
-                let contents = match std::fs::read_to_string(&path) {
+                let contents = match host::fs::read_to_string(&path) {
                     Ok(c) => c,
                     Err(e) => {
                         eprintln!("Failed to read trajectory file: {}", e);
@@ -101,7 +102,7 @@ pub(crate) fn setup(ui: &AppWindow, cx: &AppContext) {
 
                 let completed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
 
-                let mut join_set = tokio::task::JoinSet::new();
+                let mut join_set = host::JoinSet::new();
                 for (unit_idx, cf) in &connected_units {
                     let unit_idx = *unit_idx;
                     let cf = cf.clone();
@@ -164,7 +165,7 @@ pub(crate) fn setup(ui: &AppWindow, cx: &AppContext) {
                     }
                 }
 
-                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                host::sleep(std::time::Duration::from_millis(500)).await;
 
                 let ui_weak_inner = ui_weak.clone();
                 slint::invoke_from_event_loop(move || {
@@ -188,7 +189,7 @@ pub(crate) fn setup(ui: &AppWindow, cx: &AppContext) {
             let viz_scene_state = viz_scene_state.clone();
             let ui_weak = ui_weak.clone();
 
-            tokio::spawn(async move {
+            host::spawn(async move {
                 let connected_units: Vec<(usize, Arc<crazyflie_connection_server::Crazyflie>)> = {
                     let state = swarm_state.lock().await;
                     client_units(&state)
@@ -254,7 +255,7 @@ pub(crate) fn setup(ui: &AppWindow, cx: &AppContext) {
 
                 // Arm all units in parallel
                 eprintln!("Arming {} units...", connected_units.len());
-                let mut join_set = tokio::task::JoinSet::new();
+                let mut join_set = host::JoinSet::new();
                 for (idx, cf) in &connected_units {
                     let cf = cf.clone();
                     let idx = *idx;
@@ -266,7 +267,7 @@ pub(crate) fn setup(ui: &AppWindow, cx: &AppContext) {
                 }
                 while join_set.join_next().await.is_some() {}
                 // Wait for propellers to spin up before taking off
-                tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+                host::sleep(std::time::Duration::from_secs(2)).await;
 
                 // Snapshot positions before takeoff and show takeoff line. The supervisor's
                 // "is flying" bit comes along so we can tell a ground start from a unit that
@@ -339,7 +340,7 @@ pub(crate) fn setup(ui: &AppWindow, cx: &AppContext) {
                 };
 
                 eprintln!("Taking off...");
-                let mut join_set = tokio::task::JoinSet::new();
+                let mut join_set = host::JoinSet::new();
                 for (idx, cf) in &connected_units {
                     let cf = cf.clone();
                     let idx = *idx;
@@ -351,7 +352,7 @@ pub(crate) fn setup(ui: &AppWindow, cx: &AppContext) {
                     });
                 }
                 while join_set.join_next().await.is_some() {}
-                tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
+                host::sleep(std::time::Duration::from_secs(3)).await;
 
                 // Restore real trajectory points and snapshot post-takeoff positions as anchors
                 {
@@ -427,9 +428,9 @@ pub(crate) fn setup(ui: &AppWindow, cx: &AppContext) {
             let trajectory_data = trajectory_data.clone();
             let ui_weak = ui_weak.clone();
 
-            tokio::spawn(async move {
+            host::spawn(async move {
                 // Open file dialog
-                let Some(handle) = rfd::AsyncFileDialog::new()
+                let Some(handle) = host::dialog::FileDialog::new()
                     .add_filter("YAML", &["yaml", "yml"])
                     .pick_file()
                     .await
@@ -437,7 +438,7 @@ pub(crate) fn setup(ui: &AppWindow, cx: &AppContext) {
                 let path = handle.path().to_path_buf();
 
                 // Parse trajectory
-                let contents = match std::fs::read_to_string(&path) {
+                let contents = match host::fs::read_to_string(&path) {
                     Ok(c) => c,
                     Err(e) => {
                         eprintln!("Failed to read trajectory file: {}", e);
@@ -501,7 +502,7 @@ pub(crate) fn setup(ui: &AppWindow, cx: &AppContext) {
             let trajectory_data = trajectory_data.clone();
             let ui_weak = ui_weak.clone();
 
-            tokio::spawn(async move {
+            host::spawn(async move {
                 let Some(traj_config) = generate_primitive(&shape, size, size_y) else {
                     eprintln!("Unknown primitive shape: {}", shape);
                     return;
@@ -565,7 +566,7 @@ pub(crate) fn setup(ui: &AppWindow, cx: &AppContext) {
             let trajectory_data = trajectory_data.clone();
             let ui_weak = ui_weak.clone();
 
-            tokio::spawn(async move {
+            host::spawn(async move {
                 let (start, segments, viz_points, total_duration, poly_config) = build_wave_compressed(
                     x_step,
                     y_amp,
@@ -636,7 +637,7 @@ pub(crate) fn setup(ui: &AppWindow, cx: &AppContext) {
             let trajectory_data = trajectory_data.clone();
             let ui_weak = ui_weak.clone();
 
-            tokio::spawn(async move {
+            host::spawn(async move {
                 let uploaded = {
                     let td = trajectory_data.lock().await;
                     td.get(&original_index).and_then(|d| d.uploaded.clone())
@@ -666,16 +667,15 @@ pub(crate) fn setup(ui: &AppWindow, cx: &AppContext) {
                     }
                 };
 
-                let Some(handle) = rfd::AsyncFileDialog::new()
+                let Some(handle) = host::dialog::FileDialog::new()
                     .add_filter("YAML", &["yaml", "yml"])
                     .set_file_name(format!("{}.yaml", uploaded.name))
-                    .set_directory(std::env::current_dir().unwrap_or_default())
                     .save_file()
                     .await
                 else { return };
                 let path = handle.path().to_path_buf();
 
-                if let Err(e) = std::fs::write(&path, yaml) {
+                if let Err(e) = host::fs::write(&path, yaml) {
                     show_error_dialog(
                         &ui_weak,
                         "Trajectory download failed".into(),
@@ -723,7 +723,7 @@ pub(crate) fn setup(ui: &AppWindow, cx: &AppContext) {
             let viz_scene_state = viz_scene_state.clone();
             let ui_weak = ui_weak.clone();
 
-            tokio::spawn(async move {
+            host::spawn(async move {
                 let (duration, points) = {
                     let td = trajectory_data.lock().await;
                     match td.get(&original_index) {
@@ -789,7 +789,7 @@ pub(crate) fn setup(ui: &AppWindow, cx: &AppContext) {
                     return;
                 }
                 // Wait for propellers to spin up before taking off
-                tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+                host::sleep(std::time::Duration::from_secs(2)).await;
 
                 // Snapshot position before takeoff and show takeoff line. The supervisor's
                 // "is flying" bit comes along so we can tell a ground start from a unit that
@@ -852,7 +852,7 @@ pub(crate) fn setup(ui: &AppWindow, cx: &AppContext) {
                 if let Err(e) = cf.high_level_commander.take_off(takeoff_z, None, 2.0, None).await {
                     eprintln!("Take-off failed: {:?}", e);
                 }
-                tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
+                host::sleep(std::time::Duration::from_secs(3)).await;
 
                 // Restore real trajectory points and snapshot post-takeoff position as anchor
                 {
@@ -889,7 +889,7 @@ pub(crate) fn setup(ui: &AppWindow, cx: &AppContext) {
                 // Let the trajectory play out, then leave the unit hovering at its final
                 // setpoint (the HLC holds the last position) rather than landing. Use the
                 // Land button to bring it down.
-                tokio::time::sleep(tokio::time::Duration::from_secs_f32(duration + 0.5)).await;
+                host::sleep(std::time::Duration::from_secs_f32(duration + 0.5)).await;
                 eprintln!("Trajectory complete - hovering");
             });
         });
@@ -919,7 +919,7 @@ pub(crate) fn setup(ui: &AppWindow, cx: &AppContext) {
             };
 
             let trajectory_data = trajectory_data.clone();
-            tokio::spawn(async move {
+            host::spawn(async move {
                 let mut td = trajectory_data.lock().await;
                 td.remove(&original_index);
                 eprintln!("Cleared trajectory for unit {}", original_index);

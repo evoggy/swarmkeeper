@@ -10,6 +10,7 @@ use tokio::sync::Mutex;
 use crate::app::AppContext;
 use crate::units::{sort_unit_indices, update_unit};
 use crate::{AppWindow, JournalEntryData};
+use crate::host;
 
 #[derive(Serialize, Deserialize, Clone)]
 pub(crate) struct JournalEntry {
@@ -27,7 +28,7 @@ pub(crate) fn journal_path() -> std::path::PathBuf {
 pub(crate) fn load_journal() -> JournalStore {
     let path = journal_path();
     if path.exists() {
-        let contents = std::fs::read_to_string(&path).unwrap_or_default();
+        let contents = host::fs::read_to_string(&path).unwrap_or_default();
         serde_yaml::from_str(&contents).unwrap_or_default()
     } else {
         HashMap::new()
@@ -37,10 +38,10 @@ pub(crate) fn load_journal() -> JournalStore {
 pub(crate) fn save_journal(store: &JournalStore) {
     let path = journal_path();
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).ok();
+        host::fs::create_dir_all(parent).ok();
     }
     if let Ok(yaml) = serde_yaml::to_string(store) {
-        std::fs::write(&path, yaml).ok();
+        host::fs::write(&path, yaml).ok();
     }
 }
 
@@ -76,7 +77,7 @@ pub(crate) fn setup(ui: &AppWindow, cx: &AppContext) {
             let journal_store = journal_store.clone();
             let ui_weak = ui_weak.clone();
 
-            tokio::spawn(async move {
+            host::spawn(async move {
                 let entries = {
                     let store = journal_store.lock().await;
                     store.get(&serial).cloned().unwrap_or_default()
@@ -136,7 +137,7 @@ pub(crate) fn setup(ui: &AppWindow, cx: &AppContext) {
             let journal_store = journal_store.clone();
             let ui_weak = ui_weak.clone();
 
-            tokio::spawn(async move {
+            host::spawn(async move {
                 let (entries, new_count) = {
                     let mut store = journal_store.lock().await;
                     let timestamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
@@ -206,7 +207,7 @@ pub(crate) fn setup(ui: &AppWindow, cx: &AppContext) {
             let ui_weak = ui_weak.clone();
             let entry_index = entry_index as usize;
 
-            tokio::spawn(async move {
+            host::spawn(async move {
                 let (entries, new_count) = {
                     let mut store = journal_store.lock().await;
                     let Some(unit_entries) = store.get_mut(&serial) else {

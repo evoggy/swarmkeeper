@@ -5,6 +5,7 @@ use slint::ComponentHandle;
 
 use crate::app::AppContext;
 use crate::{AppWindow, ViewSettings};
+use crate::host;
 
 #[derive(Serialize, Deserialize, Default)]
 pub(crate) struct AppSettings {
@@ -197,9 +198,9 @@ view_state! {
 /// Write the current Units/Visualization view state to the settings file,
 /// leaving the rest of the file untouched.
 pub(crate) fn save_view_state(ui: &AppWindow) {
-    let mut settings: AppSettings = confy::load("swarmkeeper", None).unwrap_or_default();
+    let mut settings: AppSettings = host::store::load();
     settings.view = ViewState::capture(&ui.global::<ViewSettings>());
-    if let Err(e) = confy::store("swarmkeeper", None, &settings) {
+    if let Err(e) = host::store::save(&settings) {
         eprintln!("Failed to save view settings: {}", e);
     }
 }

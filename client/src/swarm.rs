@@ -14,10 +14,12 @@ use crate::loco::SharedPositioningData;
 use crate::settings::AppSettings;
 use crate::swarm_file::uri_with_link_timeout;
 use crate::telemetry::start_telemetry;
-use crate::toc_cache::FileTocCache;
+use crate::host::toc_cache::FileTocCache;
 use crate::trajectory::SharedGotoTargets;
 use crate::units::{sort_unit_indices, update_unit};
-use crate::{AppWindow, connection, radios, swarm_connect, UnitState};
+use crate::host::radios::link_uri;
+use crate::{AppWindow, connection, host::radios, host::swarm_connect, UnitState};
+use crate::host;
 
 pub(crate) struct ConnectedUnit {
     /// The unit through the client API: through a connection server, or
@@ -43,11 +45,7 @@ impl ConnectedUnit {
 /// Disconnect a unit, or through a connection server detach from it. Its
 /// telemetry and console streams end either way.
 pub(crate) async fn disconnect_cf(cf: &crazyflie_connection_server::Crazyflie) {
-    let lib = cf.lib();
-    cf.detach();
-    if let Some(lib) = lib {
-        lib.disconnect().await;
-    }
+    swarm_connect::disconnect(cf).await;
 }
 
 pub(crate) type SwarmState = Arc<Mutex<HashMap<usize, ConnectedUnit>>>;
@@ -67,16 +65,6 @@ pub(crate) fn unit_uris(ui: &AppWindow) -> Vec<String> {
     ui.get_units().iter().map(|unit| unit.uri.to_string()).collect()
 }
 
-/// The URI to open a link to a unit with: a `radio:///` URI gets the
-/// Crazyradio the radio plan gives it, and the link timeout is added.
-pub(crate) async fn link_uri(
-    link_context: &crazyflie_link::LinkContext,
-    radio_plan: &radios::SharedRadioPlan,
-    uri: &str,
-) -> String {
-    let uri = radio_plan.lock().await.link_uri(link_context, uri).await;
-    uri_with_link_timeout(&uri)
-}
 
 /// What setting up a freshly connected unit needs.
 #[derive(Clone)]
@@ -99,7 +87,7 @@ pub(crate) struct UnitSetup {
 /// server, the server does that part.
 pub(crate) async fn connect_units(
     units: Vec<(usize, String)>,
-    link_context: Arc<crazyflie_link::LinkContext>,
+    link_context: Arc<radios::LinkContext>,
     radio_plan: radios::SharedRadioPlan,
     toc_cache: FileTocCache,
     setup: UnitSetup,
@@ -121,7 +109,7 @@ pub(crate) async fn connect_units(
         crazyflie_connection_server::normalize_uri(uri).is_ok_and(|uri| served.contains(&uri.key))
     });
     if !served_units.is_empty() {
-        tokio::spawn(attach_units(served_units, client.clone(), setup.clone()));
+        host::spawn(attach_units(served_units, client.clone(), setup.clone()));
     }
 
     let mut targets = Vec::new();
@@ -142,13 +130,10 @@ pub(crate) async fn connect_units(
             Ok(cf) => {
                 eprintln!("Connected to {}", uris[&index]);
                 let (uri, client, setup) = (uris[&index].clone(), client.clone(), setup.clone());
-                tokio::spawn(async move {
-                    // Served to the client API, and to other programs in shared mode.
-                    let lib = Arc::new(cf);
-                    match client.adopt(&uri, lib.clone()).await {
+                host::spawn(async move {
+                    match swarm_connect::adopt(&client, &uri, cf).await {
                         Ok(cf) => setup_connected_unit(index, uri, Arc::new(cf), setup).await,
                         Err(e) => {
-                            lib.disconnect().await;
                             let error_msg = e.to_string();
                             update_unit(&setup.ui_weak, index, move |u| {
                                 u.state = UnitState::Error;
@@ -173,7 +158,7 @@ pub(crate) async fn connect_units(
 /// Attach to these units through a connection server, all at once, and set
 /// each one up as soon as it is attached.
 pub(crate) async fn attach_units(units: Vec<(usize, String)>, client: crazyflie_connection_server::Client, setup: UnitSetup) {
-    let mut join_set = tokio::task::JoinSet::new();
+    let mut join_set = host::JoinSet::new();
     for (index, uri) in units {
         eprintln!("Attaching to {} through {} ...", uri, client.mode());
         let (client, setup) = (client.clone(), setup.clone());
@@ -198,7 +183,7 @@ pub(crate) async fn attach_units(units: Vec<(usize, String)>, client: crazyflie_
 /// when the job gives it back. Ends when the connection closes.
 pub(crate) async fn follow_jobs(
     client: crazyflie_connection_server::Client,
-    link_context: Arc<crazyflie_link::LinkContext>,
+    link_context: Arc<radios::LinkContext>,
     radio_plan: radios::SharedRadioPlan,
     toc_cache: FileTocCache,
     setup: UnitSetup,
@@ -257,7 +242,7 @@ pub(crate) async fn follow_jobs(
                     .collect();
                 eprintln!("{} is available again (connected: {}), attaching", uri, connected);
                 let setup = UnitSetup { unit_count: uris.len(), ..setup.clone() };
-                tokio::spawn(connect_units(units, link_context.clone(), radio_plan.clone(), toc_cache.clone(), setup));
+                host::spawn(connect_units(units, link_context.clone(), radio_plan.clone(), toc_cache.clone(), setup));
             }
         }
     }
@@ -386,7 +371,7 @@ pub(crate) async fn setup(ui: &AppWindow, cx: &AppContext) {
             let link_context = link_context.clone();
             let radio_plan = radio_plan.clone();
             let toc_cache = toc_cache.clone();
-            tokio::spawn(async move {
+            host::spawn(async move {
                 // Spread the swarm over the Crazyradios attached now. Through
                 // a connection server, the server picks the radios.
                 if setup.connection.read().await.drives_radios() {
@@ -415,7 +400,7 @@ pub(crate) async fn setup(ui: &AppWindow, cx: &AppContext) {
         let opened = connection.clone();
         ui.on_connection_opened(move || {
             let (connection, ui_weak) = (opened.clone(), ui_weak.clone());
-            tokio::spawn(async move {
+            host::spawn(async move {
                 let connection = connection.read().await;
                 let others = connection::others(&connection).await;
                 let (label, text, mode) = (connection.label(), connection.description(), connection.mode.clone());
@@ -458,7 +443,7 @@ pub(crate) async fn setup(ui: &AppWindow, cx: &AppContext) {
             let setup = UnitSetup { unit_count: uris.len(), ..setup.clone() };
             let (link_context, radio_plan, toc_cache, ui_weak) =
                 (link_context.clone(), radio_plan.clone(), toc_cache.clone(), ui_weak.clone());
-            tokio::spawn(async move {
+            host::spawn(async move {
                 *setup.positioning_source.lock().await = None;
                 let units: Vec<(usize, ConnectedUnit)> = setup.swarm_state.lock().await.drain().collect();
                 let mut reconnect = Vec::new();
@@ -473,16 +458,16 @@ pub(crate) async fn setup(ui: &AppWindow, cx: &AppContext) {
                     let mut connection = setup.connection.write().await;
                     connection.close().await;
                     *connection = connection::Connection::open(&mode, link_context.clone(), toc_cache.clone()).await;
-                    tokio::spawn(follow_jobs(
+                    host::spawn(follow_jobs(
                         connection.client().clone(),
                         link_context.clone(),
                         radio_plan.clone(),
                         toc_cache.clone(),
                         setup.clone(),
                     ));
-                    let mut settings: AppSettings = confy::load("swarmkeeper", None).unwrap_or_default();
+                    let mut settings: AppSettings = host::store::load();
                     settings.connection = (mode != connection::DEFAULT_MODE).then(|| mode.clone());
-                    if let Err(e) = confy::store("swarmkeeper", None, &settings) {
+                    if let Err(e) = host::store::save(&settings) {
                         eprintln!("Failed to save settings: {}", e);
                     }
                     let (label, text, mode) = (connection.label(), connection.description(), connection.mode.clone());
@@ -517,7 +502,7 @@ pub(crate) async fn setup(ui: &AppWindow, cx: &AppContext) {
             let positioning_source = positioning_source.clone();
             let ui_weak = ui_weak.clone();
 
-            tokio::spawn(async move {
+            host::spawn(async move {
                 // Reset positioning source
                 {
                     let mut ps = positioning_source.lock().await;
@@ -588,7 +573,7 @@ pub(crate) async fn setup(ui: &AppWindow, cx: &AppContext) {
             let setup = UnitSetup { unit_count: units.row_count(), ..setup.clone() };
             // The units still connected keep their Crazyradio, so the plan
             // stays as it is.
-            tokio::spawn(connect_units(disconnected, link_context.clone(), radio_plan.clone(), toc_cache.clone(), setup));
+            host::spawn(connect_units(disconnected, link_context.clone(), radio_plan.clone(), toc_cache.clone(), setup));
         });
     }
 
@@ -615,7 +600,7 @@ pub(crate) async fn setup(ui: &AppWindow, cx: &AppContext) {
             let toc_cache = toc_cache.clone();
             let ui_weak = ui_weak.clone();
 
-            tokio::spawn(async move {
+            host::spawn(async move {
                 let total = uris.len();
                 let mut targets = Vec::new();
                 for (index, uri) in uris.iter().enumerate() {
@@ -630,7 +615,7 @@ pub(crate) async fn setup(ui: &AppWindow, cx: &AppContext) {
                     Arc::new(move |index, result| {
                         let outcome = match result {
                             Ok(cf) => {
-                                tokio::spawn(async move { cf.disconnect().await });
+                                host::spawn(async move { cf.disconnect().await });
                                 "done"
                             }
                             Err(error_msg) => {
@@ -660,7 +645,7 @@ pub(crate) async fn setup(ui: &AppWindow, cx: &AppContext) {
                 swarm_connect::connect_all(link_context, toc_cache, targets, connected, waiting).await;
 
                 // Brief pause so the user sees 100% before closing
-                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                host::sleep(std::time::Duration::from_millis(500)).await;
 
                 let ui_weak_inner = ui_weak.clone();
                 slint::invoke_from_event_loop(move || {
@@ -723,7 +708,7 @@ pub(crate) async fn setup(ui: &AppWindow, cx: &AppContext) {
                 unit_count,
                 connection: connection.clone(),
             };
-            tokio::spawn(connect_units(
+            host::spawn(connect_units(
                 vec![(original_index, uri)],
                 link_context.clone(),
                 radio_plan.clone(),
@@ -761,7 +746,7 @@ pub(crate) async fn setup(ui: &AppWindow, cx: &AppContext) {
             let positioning_source = positioning_source.clone();
             let ui_weak = ui_weak.clone();
 
-            tokio::spawn(async move {
+            host::spawn(async move {
                 let connected = {
                     let mut state = swarm_state.lock().await;
                     state.remove(&original_index)

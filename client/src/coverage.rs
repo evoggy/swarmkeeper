@@ -8,6 +8,7 @@ use std::collections::BTreeMap;
 use std::f32::consts::PI;
 
 use serde::{Deserialize, Serialize};
+use crate::host;
 
 /// Configuration for a single lighthouse base station.
 #[derive(Clone, Debug)]
@@ -213,7 +214,7 @@ pub fn compute_coverage(
 /// Returns the list of base stations sorted by ID.
 pub fn load_geometry_yaml(path: &std::path::Path) -> Result<Vec<BaseStation>, String> {
     let content =
-        std::fs::read_to_string(path).map_err(|e| format!("Failed to read file: {}", e))?;
+        host::fs::read_to_string(path).map_err(|e| format!("Failed to read file: {}", e))?;
     let doc: serde_yaml::Value =
         serde_yaml::from_str(&content).map_err(|e| format!("Failed to parse YAML: {}", e))?;
 
@@ -367,12 +368,12 @@ impl Scene {
 pub fn save_scene(path: &std::path::Path, scene: &Scene) -> Result<(), String> {
     let content =
         serde_yaml::to_string(scene).map_err(|e| format!("Failed to serialize: {}", e))?;
-    std::fs::write(path, content).map_err(|e| format!("Failed to write file: {}", e))
+    host::fs::write(path, content).map_err(|e| format!("Failed to write file: {}", e))
 }
 
 pub fn load_scene(path: &std::path::Path) -> Result<Scene, String> {
     let content =
-        std::fs::read_to_string(path).map_err(|e| format!("Failed to read file: {}", e))?;
+        host::fs::read_to_string(path).map_err(|e| format!("Failed to read file: {}", e))?;
     serde_yaml::from_str(&content).map_err(|e| format!("Failed to parse scene: {}", e))
 }
 
@@ -383,7 +384,7 @@ pub fn load_scene(path: &std::path::Path) -> Result<Scene, String> {
 /// Returns one `Vec<[f32; 3]>` per Crazyflie containing the ordered waypoints.
 pub fn load_trajectories_csv(path: &std::path::Path) -> Result<Vec<Vec<[f32; 3]>>, String> {
     let content =
-        std::fs::read_to_string(path).map_err(|e| format!("Failed to read file: {}", e))?;
+        host::fs::read_to_string(path).map_err(|e| format!("Failed to read file: {}", e))?;
     let mut lines = content.lines();
 
     // Skip header

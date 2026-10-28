@@ -15,10 +15,11 @@ use std::time::Duration;
 
 use slint::{ComponentHandle, ModelRc, VecModel, Weak};
 
-use crate::account::{self, KeyRejected};
-use crate::radios::SharedRadioPlan;
+use crate::host::account::{self, KeyRejected};
+use crate::host::radios::SharedRadioPlan;
 use crate::shared_swarms::{Gone, Listed, Shared, SharedId};
 use crate::{swarm_file::apply_swarm_config, swarm_file::load_swarm_config, swarm_file::uri_with_default_timeout, settings::AppSettings, AppWindow, swarm::ConnectedUnit, loco::PositioningData, loco::SharedPositioningData, SwarmChoice, swarm_file::SwarmConfig, swarm::SwarmState};
+use crate::host;
 
 /// How often the open shared swarm is checked for a newer revision.
 const WATCH_INTERVAL: Duration = Duration::from_secs(60);
@@ -39,7 +40,7 @@ struct Ctx {
     /// The open swarm, when it came from a file or the server.
     current: Arc<std::sync::Mutex<Option<Source>>>,
     /// The sign-in waiting for the browser, and its link.
-    sign_in: Arc<std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>>,
+    sign_in: Arc<std::sync::Mutex<Option<host::JoinHandle<()>>>>,
     sign_in_link: Arc<std::sync::Mutex<String>>,
 }
 
@@ -70,8 +71,8 @@ impl Ctx {
 /// What the info bar says about a swarm file: its path, relative to the data
 /// folder when it is in it.
 pub fn file_source(path: &Path) -> String {
-    let cwd = std::env::current_dir().ok();
-    let shown = cwd.as_deref().and_then(|cwd| path.strip_prefix(cwd).ok()).unwrap_or(path);
+    let cwd = host::env::data_dir();
+    let shown = path.strip_prefix(&cwd).unwrap_or(path);
     shown.display().to_string()
 }
 
@@ -102,7 +103,7 @@ fn radio_uris(config: &SwarmConfig) -> Vec<String> {
 
 /// Remember the open swarm for the next start.
 fn remember(source: &Source) {
-    let mut settings: AppSettings = confy::load("swarmkeeper", None).unwrap_or_default();
+    let mut settings: AppSettings = host::store::load();
     match source {
         Source::File(path) => {
             settings.last_swarm_config = Some(path.to_string_lossy().into_owned());
@@ -113,7 +114,7 @@ fn remember(source: &Source) {
             settings.last_swarm_config = None;
         }
     }
-    if let Err(e) = confy::store("swarmkeeper", None, &settings) {
+    if let Err(e) = host::store::save(&settings) {
         eprintln!("Failed to save settings: {}", e);
     }
 }
@@ -172,7 +173,7 @@ fn follow_renames(ctx: &Ctx, renamed: &[(String, String)]) {
 /// The swarm files in the `swarms` folder of the data folder: ID (the file
 /// name without extension) and path.
 fn local_swarms() -> Vec<(String, PathBuf)> {
-    let Ok(entries) = std::fs::read_dir("swarms") else {
+    let Ok(entries) = host::fs::read_dir("swarms") else {
         return Vec::new();
     };
     let mut swarms: Vec<(String, PathBuf)> = entries
@@ -186,7 +187,7 @@ fn local_swarms() -> Vec<(String, PathBuf)> {
 }
 
 fn absolute(path: &Path) -> PathBuf {
-    std::env::current_dir().map(|cwd| cwd.join(path)).unwrap_or_else(|_| path.to_path_buf())
+    host::env::data_dir().join(path)
 }
 
 fn shared_rows(listed: &[Listed], current: Option<&SharedId>, offline: bool) -> ModelRc<SwarmChoice> {
@@ -253,7 +254,7 @@ fn refresh_account(ctx: &Ctx) {
         });
     }
     let ctx = ctx.clone();
-    tokio::spawn(async move {
+    host::spawn(async move {
         match account::whoami(&credentials).await {
             Ok(user) => {
                 let orgs = if user.orgs.is_empty() {
@@ -321,7 +322,7 @@ fn sign_in(ctx: &Ctx, server: String) {
         ui.set_sign_in_waiting(true);
     });
     let ctx2 = ctx.clone();
-    let task = tokio::spawn(async move {
+    let task = host::spawn(async move {
         let ctx = ctx2;
         let sign_in = match account::start(&server).await {
             Ok(sign_in) => sign_in,
@@ -336,7 +337,7 @@ fn sign_in(ctx: &Ctx, server: String) {
         };
         let link = sign_in.url.to_string();
         *ctx.sign_in_link.lock().unwrap() = link.clone();
-        if let Err(e) = open::that_detached(&link) {
+        if let Err(e) = host::env::open_url(&link) {
             eprintln!("Couldn't open the browser: {}", e);
         }
         ctx.ui(move |ui| ui.set_sign_in_link(link.into()));
@@ -385,7 +386,7 @@ fn fill_open_dialog(ctx: &Ctx, ui: &AppWindow) {
     let local: Vec<SwarmChoice> = local_swarms()
         .into_iter()
         .map(|(id, path)| {
-            let (name, units) = std::fs::read_to_string(&path)
+            let (name, units) = host::fs::read_to_string(&path)
                 .ok()
                 .and_then(|yaml| summary(&yaml))
                 .unwrap_or_else(|| ("(can't read the file)".to_string(), 0));
@@ -432,7 +433,7 @@ fn refresh_shared(ctx: &Ctx) {
         });
     }
     let ctx = ctx.clone();
-    tokio::spawn(async move {
+    host::spawn(async move {
         match shared.list(summary).await {
             Ok(listing) => {
                 follow_renames(&ctx, &listing.renamed);
@@ -494,7 +495,7 @@ fn open_chosen(ctx: &Ctx, id: String, is_shared: bool) {
         ui.set_os_error("".into());
     });
     let ctx = ctx.clone();
-    tokio::spawn(async move {
+    host::spawn(async move {
         let result = if is_shared {
             match SharedId::parse(&id) {
                 Some(id) => open_shared(&ctx, &id).await,
@@ -563,7 +564,7 @@ fn restore_shared(ctx: &Ctx, ui: &AppWindow, id: &str) {
         }
     }
     let ctx = ctx.clone();
-    tokio::spawn(async move {
+    host::spawn(async move {
         // main planned the Crazyradios for the swarm shown before this one.
         if let Some(uris) = uris {
             ctx.radio_plan.lock().await.set_swarm(uris);
@@ -642,9 +643,9 @@ fn offer_update(ctx: &Ctx, revision: i32, host: &str) {
 /// at the next start.
 fn forget_gone(ctx: &Ctx, text: &str) {
     *ctx.current.lock().unwrap() = None;
-    let mut settings: AppSettings = confy::load("swarmkeeper", None).unwrap_or_default();
+    let mut settings: AppSettings = host::store::load();
     settings.last_shared_swarm = None;
-    if let Err(e) = confy::store("swarmkeeper", None, &settings) {
+    if let Err(e) = host::store::save(&settings) {
         eprintln!("Failed to save settings: {}", e);
     }
     let text = text.to_string();
@@ -657,7 +658,7 @@ fn forget_gone(ctx: &Ctx, text: &str) {
 /// Check the open shared swarm for a newer revision now and then. Only
 /// downloads it (into the copy); the user reloads.
 async fn watch(ctx: Ctx) {
-    let mut interval = tokio::time::interval(WATCH_INTERVAL);
+    let mut interval = host::interval(WATCH_INTERVAL);
     interval.tick().await;
     loop {
         interval.tick().await;
@@ -743,8 +744,8 @@ pub fn setup(
         let ctx = ctx.clone();
         ui.on_open_swarm_requested(move || {
             let ctx = ctx.clone();
-            tokio::spawn(async move {
-                let Some(handle) = rfd::AsyncFileDialog::new()
+            host::spawn(async move {
+                let Some(handle) = host::dialog::FileDialog::new()
                     .add_filter("YAML", &["yaml", "yml"])
                     .pick_file()
                     .await
@@ -768,7 +769,7 @@ pub fn setup(
                 return;
             };
             let ctx = ctx.clone();
-            tokio::spawn(async move {
+            host::spawn(async move {
                 if let Err(text) = open_shared(&ctx, &id).await {
                     show_error(&ctx, "Reload Swarm", text);
                 }
@@ -786,7 +787,7 @@ pub fn setup(
         ui.on_sign_in_open_link(move || {
             let link = ctx.sign_in_link.lock().unwrap().clone();
             if !link.is_empty() {
-                if let Err(e) = open::that_detached(&link) {
+                if let Err(e) = host::env::open_url(&link) {
                     eprintln!("Couldn't open the browser: {}", e);
                 }
             }
@@ -805,7 +806,7 @@ pub fn setup(
         let ctx = ctx.clone();
         ui.on_sign_out(move || {
             let ctx = ctx.clone();
-            tokio::spawn(async move {
+            host::spawn(async move {
                 let result = account::sign_out().await;
                 refresh_account(&ctx);
                 refresh_shared(&ctx);
@@ -816,5 +817,5 @@ pub fn setup(
         });
     }
 
-    tokio::spawn(watch(ctx));
+    host::spawn(watch(ctx));
 }

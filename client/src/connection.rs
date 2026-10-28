@@ -13,7 +13,7 @@
 //!   `shared`.
 //!
 //! When Swarmkeeper drives the Crazyradios itself, it connects the swarm with
-//! its own radio plan and TOC sharing ([`crate::swarm_connect`]) and hands
+//! its own radio plan and TOC sharing ([`crate::host::swarm_connect`]) and hands
 //! each connection to the server in this process
 //! ([`crazyflie_connection_server::Client::adopt`]). Every unit is then used through the
 //! client API. The features not ported to it yet use the crazyflie-lib
@@ -21,13 +21,13 @@
 //! work in `shared` and `direct` mode.
 
 use std::sync::Arc;
-use std::time::Duration;
 
-use crazyflie_connection_server::{Client, InProcess, ServerConfig, CONNECTION_ENV};
-use crazyflie_link::LinkContext;
+use crazyflie_connection_server::{Client, CONNECTION_ENV};
 use tokio::sync::RwLock;
 
-use crate::{AppWindow, toc_cache::FileTocCache};
+use crate::host::radios::LinkContext;
+use crate::host::{self, server, toc_cache::FileTocCache};
+use crate::AppWindow;
 
 /// The mode when none is chosen.
 pub const DEFAULT_MODE: &str = "auto";
@@ -48,8 +48,7 @@ pub struct Connection {
 
 /// The mode to use: `CRAZYFLIE_CONNECTION`, else the setting, else [`DEFAULT_MODE`].
 pub fn mode(setting: Option<&str>) -> String {
-    std::env::var(CONNECTION_ENV)
-        .ok()
+    host::env::var(CONNECTION_ENV)
         .filter(|mode| !mode.is_empty())
         .or_else(|| setting.map(str::to_string))
         .unwrap_or_else(|| DEFAULT_MODE.to_string())
@@ -60,25 +59,12 @@ impl Connection {
     /// 7777 taken), fall back to `direct` and keep the reason in `problem`,
     /// so that Swarmkeeper still starts.
     pub async fn open(mode: &str, link_context: Arc<LinkContext>, toc_cache: FileTocCache) -> Connection {
-        let name = format!("Swarmkeeper on {}", gethostname::gethostname().to_string_lossy());
-        let in_process = InProcess {
-            config: ServerConfig {
-                name: name.clone(),
-                linger: Duration::from_secs(10),
-                // Swarmkeeper's own features (sniffer, radio test, flashing)
-                // open Crazyradios too: the server only keeps the ones it uses.
-                hold_radios: false,
-                toc_cache: None,
-                link_context: Some(link_context),
-            }
-            .with_toc_cache(toc_cache),
-            auto_shared: true,
-        };
-        let (client, problem) = match Client::open_with(mode, in_process.clone()).await {
+        let name = format!("Swarmkeeper on {}", host::env::hostname());
+        let (client, problem) = match server::open(mode, &name, link_context.clone(), toc_cache.clone()).await {
             Ok(client) => (client, None),
             Err(e) => {
                 eprintln!("Connection mode '{}': {}. Using this computer's Crazyradios", mode, e);
-                let client = Client::open_with("direct", in_process).await.expect("direct mode needs no server");
+                let client = server::open("direct", &name, link_context, toc_cache).await.expect("direct mode needs no server");
                 (client, Some(e.to_string()))
             }
         };

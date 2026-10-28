@@ -7,9 +7,11 @@ use slint::{ComponentHandle, Model};
 use tokio::sync::Mutex;
 
 use crate::app::AppContext;
-use crate::swarm::{ConnectedUnit, link_uri, SwarmState};
+use crate::host::radios::link_uri;
+use crate::swarm::{ConnectedUnit, SwarmState};
 use crate::units::update_unit;
-use crate::{AppWindow, bootloader_flash, UnitState};
+use crate::{AppWindow, host::bootloader_flash, UnitState};
+use crate::host;
 
 /// Flash the STM32 or nRF51 (`target`, as the connection server names it) of
 /// these units (index, URI) as one job on the connection server: by broadcast
@@ -123,7 +125,7 @@ pub(crate) async fn disconnect_for_flashing(
         }).ok();
     }
     // Give the radio a moment to settle after disconnecting.
-    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    host::sleep(std::time::Duration::from_millis(300)).await;
 }
 
 pub(crate) fn setup(ui: &AppWindow, cx: &AppContext) {
@@ -146,8 +148,8 @@ pub(crate) fn setup(ui: &AppWindow, cx: &AppContext) {
         ui.on_flash_select_binary(move || {
             let flash_binary = flash_binary.clone();
             let ui_weak = ui_weak.clone();
-            tokio::spawn(async move {
-                let Some(handle) = rfd::AsyncFileDialog::new()
+            host::spawn(async move {
+                let Some(handle) = host::dialog::FileDialog::new()
                     .add_filter("Firmware binary", &["bin"])
                     .add_filter("All files", &["*"])
                     .set_title("Select firmware binary")
@@ -217,7 +219,7 @@ pub(crate) fn setup(ui: &AppWindow, cx: &AppContext) {
             let connection = connection.clone();
             let ui_weak = ui_weak.clone();
 
-            tokio::spawn(async move {
+            host::spawn(async move {
                 let finish = |ui_weak: &slint::Weak<AppWindow>, status: String| {
                     let ui_weak = ui_weak.clone();
                     slint::invoke_from_event_loop(move || {
@@ -232,7 +234,7 @@ pub(crate) fn setup(ui: &AppWindow, cx: &AppContext) {
                 // Load the firmware binary from disk.
                 let path = flash_binary.lock().await.clone();
                 let data = match path {
-                    Some(p) => match tokio::fs::read(&p).await {
+                    Some(p) => match host::fs::read(&p) {
                         Ok(d) => d,
                         Err(e) => return finish(&ui_weak, format!("Failed to read binary: {}", e)),
                     },
@@ -351,7 +353,7 @@ pub(crate) fn setup(ui: &AppWindow, cx: &AppContext) {
                             }
 
                             // Give the deck time to restart before the next unit.
-                            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                            host::sleep(std::time::Duration::from_millis(500)).await;
                         }
                         ok_count
                     }

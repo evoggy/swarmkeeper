@@ -4,7 +4,8 @@ use slint::{ComponentHandle, Model};
 
 use crate::app::AppContext;
 use crate::settings::AppSettings;
-use crate::{AppWindow, coverage, LhBaseStationData, PlanBoxVolumeData, planning, PlanObstacleData, PlanPadData, renderer, tdoa3, Tdoa3AnchorData};
+use crate::{AppWindow, coverage, LhBaseStationData, PlanBoxVolumeData, planning, PlanObstacleData, PlanPadData, host::renderer, tdoa3, Tdoa3AnchorData};
+use crate::host;
 
 // Planning shared state
 pub(crate) struct PlanningState {
@@ -65,10 +66,9 @@ pub(crate) fn setup(ui: &AppWindow, cx: &AppContext) {
             let uw2 = ui.as_weak();
             let ps = ps.clone();
             slint::spawn_local(async move {
-                let Some(handle) = rfd::AsyncFileDialog::new()
+                let Some(handle) = host::dialog::FileDialog::new()
                     .set_title("Import LH Scene")
                     .add_filter("YAML", &["yaml", "yml"])
-                    .set_directory(std::env::current_dir().unwrap_or_default())
                     .pick_file().await
                 else { return };
                 let path = handle.path().to_path_buf();
@@ -113,10 +113,9 @@ pub(crate) fn setup(ui: &AppWindow, cx: &AppContext) {
             let uw2 = ui.as_weak();
             let ps = ps.clone();
             slint::spawn_local(async move {
-                let Some(handle) = rfd::AsyncFileDialog::new()
+                let Some(handle) = host::dialog::FileDialog::new()
                     .set_title("Import TDoA3 Scene")
                     .add_filter("YAML", &["yaml", "yml"])
-                    .set_directory(std::env::current_dir().unwrap_or_default())
                     .pick_file().await
                 else { return };
                 let path = handle.path().to_path_buf();
@@ -425,10 +424,9 @@ pub(crate) fn setup(ui: &AppWindow, cx: &AppContext) {
             let ps = ps.clone();
             let viz_scene_state = viz_scene_state_save.clone();
             slint::spawn_local(async move {
-                let Some(handle) = rfd::AsyncFileDialog::new()
+                let Some(handle) = host::dialog::FileDialog::new()
                     .add_filter("YAML", &["yaml", "yml"])
                     .set_file_name("planning.yaml")
-                    .set_directory(std::env::current_dir().unwrap_or_default())
                     .save_file().await
                 else { return };
                 let path = handle.path().to_path_buf();
@@ -472,9 +470,9 @@ pub(crate) fn setup(ui: &AppWindow, cx: &AppContext) {
                 if let Err(e) = planning::save_scene(&path, &scene) {
                     eprintln!("Failed to save planning scene: {}", e);
                 } else {
-                    let mut settings: AppSettings = confy::load("swarmkeeper", None).unwrap_or_default();
+                    let mut settings: AppSettings = host::store::load();
                     settings.last_scene_config = Some(path.to_string_lossy().into_owned());
-                    if let Err(e) = confy::store("swarmkeeper", None, &settings) {
+                    if let Err(e) = host::store::save(&settings) {
                         eprintln!("Failed to persist last_scene_config: {}", e);
                     }
                     // Sync the visualizer overlay so it reflects the saved scene
@@ -497,9 +495,8 @@ pub(crate) fn setup(ui: &AppWindow, cx: &AppContext) {
             let ps = ps.clone();
             let viz_scene_state = viz_scene_state_load.clone();
             slint::spawn_local(async move {
-                let Some(handle) = rfd::AsyncFileDialog::new()
+                let Some(handle) = host::dialog::FileDialog::new()
                     .add_filter("YAML", &["yaml", "yml"])
-                    .set_directory(std::env::current_dir().unwrap_or_default())
                     .pick_file().await
                 else { return };
                 let path = handle.path().to_path_buf();
@@ -529,9 +526,9 @@ pub(crate) fn setup(ui: &AppWindow, cx: &AppContext) {
                         rebuild_obstacle_meshes(&mut ps);
                         ps.undo_stack.clear();
 
-                        let mut settings: AppSettings = confy::load("swarmkeeper", None).unwrap_or_default();
+                        let mut settings: AppSettings = host::store::load();
                         settings.last_scene_config = Some(path.to_string_lossy().into_owned());
-                        if let Err(e) = confy::store("swarmkeeper", None, &settings) {
+                        if let Err(e) = host::store::save(&settings) {
                             eprintln!("Failed to persist last_scene_config: {}", e);
                         }
 
@@ -641,7 +638,7 @@ pub(crate) fn setup(ui: &AppWindow, cx: &AppContext) {
             let uw2 = ui.as_weak();
             let ps = ps.clone();
             slint::spawn_local(async move {
-                let Some(handle) = rfd::AsyncFileDialog::new()
+                let Some(handle) = host::dialog::FileDialog::new()
                     .add_filter("YAML", &["yaml", "yml"])
                     .pick_file().await
                 else { return };
@@ -683,7 +680,7 @@ pub(crate) fn setup(ui: &AppWindow, cx: &AppContext) {
             let uw2 = ui.as_weak();
             let ps = ps.clone();
             slint::spawn_local(async move {
-                let Some(handle) = rfd::AsyncFileDialog::new()
+                let Some(handle) = host::dialog::FileDialog::new()
                     .add_filter("CSV files", &["csv"])
                     .set_title("Load Trajectories CSV")
                     .pick_file().await
@@ -1282,7 +1279,7 @@ pub(crate) fn setup(ui: &AppWindow, cx: &AppContext) {
             let (tx, rx) = std::sync::mpsc::channel();
             *compute_rx.borrow_mut() = Some(rx);
 
-            std::thread::spawn(move || {
+            host::spawn_thread(move || {
                 let lh_result = planning::compute_coverage_with_obstacles(
                     room_x, room_y, room_z, resolution,
                     &base_stations, 160.0, 115.0,

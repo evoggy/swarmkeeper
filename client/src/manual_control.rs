@@ -9,13 +9,14 @@ use tokio::sync::Mutex;
 use crate::AppWindow;
 use crate::app::AppContext;
 use crate::units::sort_unit_indices;
+use crate::host;
 
 pub(crate) struct ManualControlState {
     pub(crate) running: Arc<AtomicBool>,
 }
 
 pub(crate) type SharedManualControl = Arc<Mutex<Option<ManualControlState>>>;
-pub(crate) type SharedGamepadIds = Arc<std::sync::Mutex<Vec<gilrs::GamepadId>>>;
+pub(crate) type SharedGamepadIds = Arc<std::sync::Mutex<Vec<host::gamepad::GamepadId>>>;
 
 pub(crate) fn apply_deadzone(value: f32, deadzone: f32) -> f32 {
     if value.abs() < deadzone { 0.0 } else { value }
@@ -33,8 +34,8 @@ pub(crate) fn map_joystick_axes(lx: f32, ly: f32, rx: f32, ry: f32) -> (f32, f32
 
 pub(crate) async fn run_manual_control(
     cf: Arc<crazyflie_connection_server::Crazyflie>,
-    gilrs: Arc<std::sync::Mutex<gilrs::Gilrs>>,
-    gamepad_id: gilrs::GamepadId,
+    gilrs: Arc<std::sync::Mutex<host::gamepad::Gilrs>>,
+    gamepad_id: host::gamepad::GamepadId,
     running: Arc<AtomicBool>,
     ui_weak: slint::Weak<AppWindow>,
 ) {
@@ -51,10 +52,10 @@ pub(crate) async fn run_manual_control(
             while g.next_event().is_some() {}
             let gp = g.gamepad(gamepad_id);
             (
-                gp.value(gilrs::Axis::LeftStickX),
-                gp.value(gilrs::Axis::LeftStickY),
-                gp.value(gilrs::Axis::RightStickX),
-                gp.value(gilrs::Axis::RightStickY),
+                gp.value(host::gamepad::Axis::LeftStickX),
+                gp.value(host::gamepad::Axis::LeftStickY),
+                gp.value(host::gamepad::Axis::RightStickX),
+                gp.value(host::gamepad::Axis::RightStickY),
             )
         };
 
@@ -76,7 +77,7 @@ pub(crate) async fn run_manual_control(
             break;
         }
 
-        tokio::time::sleep(tokio::time::Duration::from_millis(20)).await;
+        host::sleep(std::time::Duration::from_millis(20)).await;
     }
 
     // Cleanup: zero thrust then notify stop for HL commander handoff
@@ -102,7 +103,7 @@ pub(crate) async fn stop_manual_control_loop(manual_control: &SharedManualContro
         prev.running.store(false, Ordering::Relaxed);
         drop(mc);
         // Brief delay to let the loop exit and send cleanup packets
-        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+        host::sleep(std::time::Duration::from_millis(50)).await;
     }
 }
 
@@ -177,7 +178,7 @@ pub(crate) fn setup(ui: &AppWindow, cx: &AppContext) {
                 let gilrs = gilrs.clone();
                 let ui_weak = ui_weak.clone();
 
-                tokio::spawn(async move {
+                host::spawn(async move {
                     stop_manual_control_loop(&manual_control).await;
 
                     let cf = {
@@ -250,7 +251,7 @@ pub(crate) fn setup(ui: &AppWindow, cx: &AppContext) {
             let gilrs = gilrs.clone();
             let ui_weak = ui_weak.clone();
 
-            tokio::spawn(async move {
+            host::spawn(async move {
                 stop_manual_control_loop(&manual_control).await;
 
                 let cf = {
@@ -305,7 +306,7 @@ pub(crate) fn setup(ui: &AppWindow, cx: &AppContext) {
                 None
             };
 
-            tokio::spawn(async move {
+            host::spawn(async move {
                 // Stop the control loop
                 let mut mc = manual_control.lock().await;
                 if let Some(state) = mc.take() {

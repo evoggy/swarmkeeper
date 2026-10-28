@@ -8,6 +8,7 @@ use tokio::sync::Mutex;
 
 use crate::app::AppContext;
 use crate::{AppWindow, LocoAnchorStatus};
+use crate::host;
 
 /// Human-readable name for a `loco.mode` log value.
 pub(crate) fn loco_mode_text(mode: u8) -> &'static str {
@@ -183,7 +184,7 @@ pub(crate) fn setup(ui: &AppWindow, cx: &AppContext) {
         let positioning_source = positioning_source.clone();
         ui.on_positioning_source_changed(move |index| {
             let positioning_source = positioning_source.clone();
-            tokio::spawn(async move {
+            host::spawn(async move {
                 let mut ps = positioning_source.lock().await;
                 *ps = Some(index as usize);
                 eprintln!("Positioning source changed to unit {}", index);
@@ -198,9 +199,9 @@ pub(crate) fn setup(ui: &AppWindow, cx: &AppContext) {
         let positioning_source = positioning_source.clone();
         let ui_weak = ui.as_weak();
 
-        tokio::spawn(async move {
+        host::spawn(async move {
             loop {
-                tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+                host::sleep(std::time::Duration::from_secs(2)).await;
 
                 let source_index = {
                     let ps = positioning_source.lock().await;
@@ -307,15 +308,15 @@ pub(crate) fn setup(ui: &AppWindow, cx: &AppContext) {
         ui.on_load_anchor_positions(move || {
             let positioning_data = positioning_data.clone();
             let ui_weak = ui_weak.clone();
-            tokio::spawn(async move {
-                let Some(handle) = rfd::AsyncFileDialog::new()
+            host::spawn(async move {
+                let Some(handle) = host::dialog::FileDialog::new()
                     .add_filter("YAML", &["yaml", "yml"])
                     .pick_file()
                     .await
                 else { return };
                 let path = handle.path().to_path_buf();
 
-                let contents = match std::fs::read_to_string(&path) {
+                let contents = match host::fs::read_to_string(&path) {
                     Ok(c) => c,
                     Err(e) => {
                         eprintln!("Failed to read anchor positions file: {}", e);
@@ -364,7 +365,7 @@ pub(crate) fn setup(ui: &AppWindow, cx: &AppContext) {
         ui.on_stop_anchor_upload(move || {
             let positioning_data = positioning_data.clone();
             let ui_weak = ui_weak.clone();
-            tokio::spawn(async move {
+            host::spawn(async move {
                 let mut pd = positioning_data.lock().await;
                 pd.loco_upload_active = false;
                 update_loco_anchors(&ui_weak, &pd);

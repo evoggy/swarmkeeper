@@ -5,6 +5,7 @@ use slint::{ComponentHandle, Model, StandardListViewItem};
 use crate::app::AppContext;
 use crate::swarm::SwarmState;
 use crate::{AppWindow, UnitData, UnitState};
+use crate::host;
 
 pub(crate) fn state_symbol(state: UnitState) -> &'static str {
     match state {
@@ -225,7 +226,7 @@ pub(crate) fn fetch_unit_details(ui_weak: slint::Weak<AppWindow>, swarm_state: S
         return;
     }
 
-    tokio::spawn(async move {
+    host::spawn(async move {
         let cf = {
             let state = swarm_state.lock().await;
             match state.get(&original_index) {

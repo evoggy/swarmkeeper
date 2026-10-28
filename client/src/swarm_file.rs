@@ -4,6 +4,7 @@ use serde::Deserialize;
 
 use crate::units::rebuild_table_rows;
 use crate::{AppWindow, UnitData, UnitState};
+use crate::host;
 
 /// Receive timeout of the radio link, in milliseconds. The crazyflie-link
 /// default is 1000 ms, which is too tight when a whole swarm shares one radio:
@@ -38,7 +39,7 @@ pub(crate) struct UnitConfigYaml {
 }
 
 pub(crate) fn load_swarm_config(path: &std::path::Path) -> Result<SwarmConfig, String> {
-    let contents = std::fs::read_to_string(path)
+    let contents = host::fs::read_to_string(path)
         .map_err(|e| format!("Failed to read swarm config {:?}: {}", path, e))?;
     serde_yaml::from_str(&contents)
         .map_err(|e| format!("Failed to parse swarm config {:?}: {}", path, e))
@@ -61,7 +62,7 @@ pub(crate) struct PersistentParamState {
 /// Load a persistent parameter file and return the list of `(name, value)` pairs
 /// that have a stored value to upload.
 pub(crate) fn load_persistent_params(path: &std::path::Path) -> Result<Vec<(String, f64)>, String> {
-    let contents = std::fs::read_to_string(path)
+    let contents = host::fs::read_to_string(path)
         .map_err(|e| format!("Failed to read params file {:?}: {}", path, e))?;
     let state: PersistentParamState = serde_yaml::from_str(&contents)
         .map_err(|e| format!("Failed to parse params file {:?}: {}", path, e))?;

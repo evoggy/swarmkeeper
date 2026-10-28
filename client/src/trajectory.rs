@@ -244,6 +244,9 @@ pub(crate) fn generate_primitive(shape: &str, size: f32, size_y: f32) -> Option<
     }
 }
 
+/// The high-level commander's type for a compressed trajectory.
+const TRAJECTORY_TYPE_POLY4D_COMPRESSED: u8 = 1;
+
 /// Bytes one uncompressed Poly4D segment occupies in the Crazyflie trajectory memory.
 pub(crate) const POLY4D_SEGMENT_BYTES: usize = 132;
 
@@ -608,7 +611,6 @@ pub(crate) async fn upload_compressed_trajectory_to_unit(
     swarm_state: SwarmState,
     trajectory_data: SharedTrajectoryData,
 ) -> Result<(), String> {
-    use crazyflie_lib::subsystems::high_level_commander::TRAJECTORY_TYPE_POLY4D_COMPRESSED;
     use crazyflie_connection_server::memory::{MemoryType, TrajectoryMemory};
 
     // The sentinel does not count as a flight piece; report the real leg count.

@@ -7,11 +7,13 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use slint::{ComponentHandle, Model};
 
 use crate::app::AppContext;
-use crate::radios;
-use crate::swarm::{client_units, ConnectedUnit, link_uri};
+use crate::host::radios::link_uri;
+use crate::host::radios;
+use crate::swarm::{client_units, ConnectedUnit};
 use crate::swarm_file::uri_with_link_timeout;
 use crate::units::{sort_unit_indices, update_unit};
 use crate::{AppWindow, UnitState};
+use crate::host;
 
 /// What a unit's nRF51 is asked to do
 #[derive(Clone, Copy, Debug)]
@@ -83,7 +85,7 @@ pub(crate) fn setup(ui: &AppWindow, cx: &AppContext) {
             let link_context = link_context.clone();
             let radio_plan = radio_plan.clone();
 
-            tokio::spawn(async move {
+            host::spawn(async move {
                 // Collect unique (radio_nth, channel) pairs from all unit URIs
                 let mut radio_channels: Vec<(usize, u8)> = Vec::new();
                 for uri in &uris {
@@ -120,21 +122,10 @@ pub(crate) fn setup(ui: &AppWindow, cx: &AppContext) {
                     ];
 
                     for &(radio_nth, ch) in &radio_channels {
-                        let channel = match crazyradio::Channel::from_number(ch) {
-                            Ok(c) => c,
-                            Err(_) => continue,
-                        };
-                        match link_context.get_radio(radio_nth).await {
-                            Ok(mut radio) => {
-                                if let Err(e) = radio.send_packet_no_ack_async(channel, BROADCAST_ADDR, packet.clone()).await {
-                                    eprintln!("Broadcast on channel {} failed: {:?}", ch, e);
-                                }
-                            }
-                            Err(e) => eprintln!("Failed to get radio {}: {:?}", radio_nth, e),
-                        }
+                        if let Err(e) = radios::broadcast(&link_context, radio_nth, ch, BROADCAST_ADDR, packet.clone()).await {                            eprintln!("Broadcast on channel {} failed: {}", ch, e);                        }
                     }
 
-                    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                    host::sleep(std::time::Duration::from_millis(20)).await;
                 }
                 eprintln!("Sync blink broadcast done");
             });
@@ -156,7 +147,7 @@ pub(crate) fn setup(ui: &AppWindow, cx: &AppContext) {
             let link_context = link_context.clone();
             let radio_plan = radio_plan.clone();
 
-            tokio::spawn(async move {
+            host::spawn(async move {
                 let mut radio_channels: Vec<(usize, u8)> = Vec::new();
                 for uri in &uris {
                     let link_uri = link_uri(&link_context, &radio_plan, uri).await;
@@ -179,7 +170,7 @@ pub(crate) fn setup(ui: &AppWindow, cx: &AppContext) {
 
                 eprintln!("Broadcasting delayed sync blink (5s) on {} channel(s)...", radio_channels.len());
 
-                let start = std::time::Instant::now();
+                let start = host::Instant::now();
                 loop {
                     let elapsed_ms = start.elapsed().as_millis() as u16;
                     let remaining_ms = TOTAL_DELAY_MS.saturating_sub(elapsed_ms);
@@ -197,21 +188,10 @@ pub(crate) fn setup(ui: &AppWindow, cx: &AppContext) {
                     ];
 
                     for &(radio_nth, ch) in &radio_channels {
-                        let channel = match crazyradio::Channel::from_number(ch) {
-                            Ok(c) => c,
-                            Err(_) => continue,
-                        };
-                        match link_context.get_radio(radio_nth).await {
-                            Ok(mut radio) => {
-                                if let Err(e) = radio.send_packet_no_ack_async(channel, BROADCAST_ADDR, packet.clone()).await {
-                                    eprintln!("Broadcast on channel {} failed: {:?}", ch, e);
-                                }
-                            }
-                            Err(e) => eprintln!("Failed to get radio {}: {:?}", radio_nth, e),
-                        }
+                        if let Err(e) = radios::broadcast(&link_context, radio_nth, ch, BROADCAST_ADDR, packet.clone()).await {                            eprintln!("Broadcast on channel {} failed: {}", ch, e);                        }
                     }
 
-                    tokio::time::sleep(std::time::Duration::from_millis(BROADCAST_INTERVAL_MS)).await;
+                    host::sleep(std::time::Duration::from_millis(BROADCAST_INTERVAL_MS)).await;
                 }
                 eprintln!("Delayed sync blink broadcast done");
             });
@@ -231,7 +211,7 @@ pub(crate) fn setup(ui: &AppWindow, cx: &AppContext) {
 
             let connection = connection.clone();
 
-            tokio::spawn(async move {
+            host::spawn(async move {
                 let client = connection.read().await.client().clone();
                 let futs: Vec<_> = uris.iter().map(|uri| {
                     let client = client.clone();
@@ -268,7 +248,7 @@ pub(crate) fn setup(ui: &AppWindow, cx: &AppContext) {
             let positioning_source = positioning_source.clone();
             let ui_weak = ui_weak.clone();
 
-            tokio::spawn(async move {
+            host::spawn(async move {
                 let client = connection.read().await.client().clone();
                 let futs: Vec<_> = uris.iter().map(|uri| {
                     let client = client.clone();
@@ -325,7 +305,7 @@ pub(crate) fn setup(ui: &AppWindow, cx: &AppContext) {
 
             let connection = connection.clone();
 
-            tokio::spawn(async move {
+            host::spawn(async move {
                 let client = connection.read().await.client().clone();
                 let futs: Vec<_> = uris.iter().map(|uri| {
                     let client = client.clone();
@@ -355,7 +335,7 @@ pub(crate) fn setup(ui: &AppWindow, cx: &AppContext) {
 
             let connection = connection.clone();
 
-            tokio::spawn(async move {
+            host::spawn(async move {
                 let client = connection.read().await.client().clone();
                 let futs: Vec<_> = uris.iter().map(|uri| {
                     let client = client.clone();
@@ -401,7 +381,7 @@ pub(crate) fn setup(ui: &AppWindow, cx: &AppContext) {
             let swarm_state = swarm_state.clone();
             let ui_weak = ui_weak.clone();
 
-            tokio::spawn(async move {
+            host::spawn(async move {
                 let (cf, stop_flag) = {
                     let mut state = swarm_state.lock().await;
                     let Some(cu) = state.get_mut(&original_index) else {
@@ -438,11 +418,11 @@ pub(crate) fn setup(ui: &AppWindow, cx: &AppContext) {
                     if has_led_bottom { let _ = cf.param.set_lossy("colorLedBot.wrgb8888", f64::from(color)).await; }
 
                     let _ = cf.param.set_lossy("motorPowerSet.m1", 5000.0).await;
-                    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+                    host::sleep(std::time::Duration::from_millis(100)).await;
                     let _ = cf.param.set_lossy("motorPowerSet.m1", 0.0).await;
 
                     if stop_flag.load(Ordering::Relaxed) { break; }
-                    tokio::time::sleep(tokio::time::Duration::from_millis(400)).await;
+                    host::sleep(std::time::Duration::from_millis(400)).await;
                 }
 
                 // Reset LEDs and motors
@@ -484,7 +464,7 @@ pub(crate) fn setup(ui: &AppWindow, cx: &AppContext) {
 
             let connection = connection.clone();
 
-            tokio::spawn(async move {
+            host::spawn(async move {
                 let client = connection.read().await.client().clone();
                 eprintln!("Rebooting unit {} ({}) ...", original_index, uri);
                 if let Err(e) = send_platform(&client, &uri, PlatformAction::Reboot).await {
@@ -519,7 +499,7 @@ pub(crate) fn setup(ui: &AppWindow, cx: &AppContext) {
             let swarm_state = swarm_state.clone();
             let ui_weak = ui_weak.clone();
 
-            tokio::spawn(async move {
+            host::spawn(async move {
                 let client = connection.read().await.client().clone();
                 // Reuse the existing connection if the unit is connected, else
                 // connect temporarily for the duration of the operation.
@@ -533,7 +513,7 @@ pub(crate) fn setup(ui: &AppWindow, cx: &AppContext) {
                     (cf, false)
                 } else {
                     eprintln!("Clear TLV {}: connecting to {}...", name, uri);
-                    match tokio::time::timeout(
+                    match host::timeout(
                         std::time::Duration::from_secs(30),
                         client.attach(&uri_with_link_timeout(&uri)),
                     ).await {
@@ -602,7 +582,7 @@ pub(crate) fn setup(ui: &AppWindow, cx: &AppContext) {
             let swarm_state = swarm_state.clone();
             let ui_weak = ui_weak.clone();
 
-            tokio::spawn(async move {
+            host::spawn(async move {
                 let client = connection.read().await.client().clone();
                 eprintln!("Powering off unit {} ({}) ...", original_index, uri);
                 if let Err(e) = send_platform(&client, &uri, PlatformAction::PowerOff).await {
@@ -651,7 +631,7 @@ pub(crate) fn setup(ui: &AppWindow, cx: &AppContext) {
 
             let connection = connection.clone();
 
-            tokio::spawn(async move {
+            host::spawn(async move {
                 let client = connection.read().await.client().clone();
                 eprintln!("Sending sysoff (sleep) to unit {} ({}) ...", original_index, uri);
                 if let Err(e) = send_platform(&client, &uri, PlatformAction::Sleep).await {
@@ -683,7 +663,7 @@ pub(crate) fn setup(ui: &AppWindow, cx: &AppContext) {
 
             let connection = connection.clone();
 
-            tokio::spawn(async move {
+            host::spawn(async move {
                 let client = connection.read().await.client().clone();
                 eprintln!("Sending syson (wake) to {} ...", uri);
                 if let Err(e) = send_platform(&client, &uri, PlatformAction::Wakeup).await {
@@ -714,7 +694,7 @@ pub(crate) fn setup(ui: &AppWindow, cx: &AppContext) {
             let connection = connection.clone();
             let ui_weak = ui_weak.clone();
 
-            tokio::spawn(async move {
+            host::spawn(async move {
                 let total = unit_info.len();
                 if total == 0 {
                     eprintln!("No units configured for clear TLV");
@@ -743,7 +723,7 @@ pub(crate) fn setup(ui: &AppWindow, cx: &AppContext) {
 
                 let completed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
 
-                let mut join_set = tokio::task::JoinSet::new();
+                let mut join_set = host::JoinSet::new();
                 for (idx, uri, name) in unit_info.into_iter() {
                     let ui_weak = ui_weak.clone();
                     let completed = completed.clone();
@@ -756,7 +736,7 @@ pub(crate) fn setup(ui: &AppWindow, cx: &AppContext) {
                         let (cf, temp_connection) = if let Some(cf) = existing_cf {
                             (cf, false)
                         } else {
-                            match tokio::time::timeout(
+                            match host::timeout(
                                 std::time::Duration::from_secs(30),
                                 client.attach(&uri_with_link_timeout(&uri)),
                             ).await {
@@ -827,7 +807,7 @@ pub(crate) fn setup(ui: &AppWindow, cx: &AppContext) {
                         ui.set_progress_dialog_status("Done — power-cycle units to apply".into());
                     }
                 }).ok();
-                tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+                host::sleep(std::time::Duration::from_millis(1500)).await;
 
                 let ui_weak_inner = ui_weak.clone();
                 slint::invoke_from_event_loop(move || {
