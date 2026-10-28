@@ -136,7 +136,7 @@ pub fn color_for(index: usize) -> [u8; 3] {
     PLOT_COLORS[index % PLOT_COLORS.len()]
 }
 
-type Shared = Arc<Mutex<PlotState>>;
+pub(crate) type Shared = Arc<Mutex<PlotState>>;
 
 /// Wire up all PlotBridge callbacks and start the redraw timer. Returns the
 /// shared state so the caller (main) can hand it to the streaming code later.
@@ -1064,7 +1064,7 @@ pub fn refresh_config_list(ui: &AppWindow) {
 fn resolve_and_start(
     ui: &AppWindow,
     state: &Shared,
-    swarm_state: &crate::SwarmState,
+    swarm_state: &crate::swarm::SwarmState,
     selected: &SelectedIndex,
     log_task: &LogTask,
 ) {
@@ -1110,7 +1110,7 @@ fn resolve_and_start(
 pub fn wire_logging(
     ui: &AppWindow,
     state: &Shared,
-    swarm_state: crate::SwarmState,
+    swarm_state: crate::swarm::SwarmState,
     selected: SelectedIndex,
     log_task: LogTask,
 ) {

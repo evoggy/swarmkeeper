@@ -18,10 +18,7 @@ use slint::{ComponentHandle, ModelRc, VecModel, Weak};
 use crate::account::{self, KeyRejected};
 use crate::radios::SharedRadioPlan;
 use crate::shared_swarms::{Gone, Listed, Shared, SharedId};
-use crate::{
-    apply_swarm_config, load_swarm_config, uri_with_default_timeout, AppSettings, AppWindow, ConnectedUnit,
-    PositioningData, SharedPositioningData, SwarmChoice, SwarmConfig, SwarmState,
-};
+use crate::{swarm_file::apply_swarm_config, swarm_file::load_swarm_config, swarm_file::uri_with_default_timeout, settings::AppSettings, AppWindow, swarm::ConnectedUnit, loco::PositioningData, loco::SharedPositioningData, SwarmChoice, swarm_file::SwarmConfig, swarm::SwarmState};
 
 /// How often the open shared swarm is checked for a newer revision.
 const WATCH_INTERVAL: Duration = Duration::from_secs(60);

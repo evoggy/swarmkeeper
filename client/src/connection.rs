@@ -27,7 +27,7 @@ use crazyflie_connection_server::{Client, InProcess, ServerConfig, CONNECTION_EN
 use crazyflie_link::LinkContext;
 use tokio::sync::RwLock;
 
-use crate::{AppWindow, FileTocCache};
+use crate::{AppWindow, toc_cache::FileTocCache};
 
 /// The mode when none is chosen.
 pub const DEFAULT_MODE: &str = "auto";
