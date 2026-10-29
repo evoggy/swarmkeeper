@@ -76,11 +76,19 @@ where
     match target {
         "deckctrl-fw" => flash_deck_ctrl(link_context, uri, toc_cache, false, data, progress).await,
         "deckctrl-cfg" => flash_deck_ctrl(link_context, uri, toc_cache, true, data, progress).await,
-        section if bootloader_target(section).is_none() => {
-            flash_deck_section(link_context, uri, toc_cache, section, data, progress).await
+        deck if bootloader_target(deck).is_none() => {
+            flash_deck_section(link_context, uri, toc_cache, deck_section(deck), data, progress).await
         }
         other => bail!("{} is flashed through the connection server", other),
     }
+}
+
+/// The deck memory section a deck target is flashed into, as in cfcli:
+/// `bcColorLedBot:col-fw` is the firmware (`fw`) of section
+/// `bcColorLedBot:col`, and a target without a type (`bcCam:qcc`) is the
+/// section itself.
+fn deck_section(target: &str) -> &str {
+    target.split('-').next().unwrap_or(target)
 }
 
 /// Reboot the Crazyflie from bootloader/deck-bootloader back into firmware.
@@ -286,4 +294,17 @@ async fn read_deck_ctrl_dfu_header(raw: &RawMemory) -> Result<DeckCtrlDfuHeader>
         deck_ctrl_count: header[1],
         status: header[2],
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn deck_targets_name_their_section() {
+        assert_eq!(deck_section("bcColorLedBot:col-fw"), "bcColorLedBot:col");
+        assert_eq!(deck_section("bcAI:esp-fw"), "bcAI:esp");
+        assert_eq!(deck_section("bcLighthouse4-fw"), "bcLighthouse4");
+        assert_eq!(deck_section("bcCam:qcc"), "bcCam:qcc");
+    }
 }
