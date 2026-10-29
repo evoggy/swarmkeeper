@@ -5,7 +5,8 @@
 //! # also SWARMKEEPER_SIZE=1280x800, SWARMKEEPER_SELECT=<row>, SWARMKEEPER_FILTER=<chip>,
 //! # SWARMKEEPER_HOVER=<row> (3D view), SWARMKEEPER_SCENE=flying,
 //! # SWARMKEEPER_CLICK="x,y;x,y" (clicks first, to open a menu),
-//! # SWARMKEEPER_PLAN=<scene.yaml> (Planning; default the arena scene in plans/)
+//! # SWARMKEEPER_PLAN=<scene.yaml> (Planning; default the arena scene in plans/),
+//! # SWARMKEEPER_PLOT=1 (the plot dock with a made-up log)
 //! ```
 //!
 //! Shows the demo swarm (`crate::demo`) and draws one frame with Slint's
@@ -87,6 +88,11 @@ pub fn take(path: &Path) {
         ui.set_unit_filter(filter);
         crate::units::rebuild_table_rows(&ui);
     }
+    let plot = std::env::var_os("SWARMKEEPER_PLOT").map(|_| {
+        let plot = crate::plot::setup(&ui);
+        crate::plot::seed_screenshot(&ui, &plot);
+        plot
+    });
     ui.show().expect("show");
 
     slint::platform::update_timers_and_animations();
@@ -107,6 +113,17 @@ pub fn take(path: &Path) {
     let size = window.size();
     let (width, height) = (size.width as usize, size.height as usize);
     let mut pixels = vec![PremultipliedRgbaColor::default(); width * height];
+    // The plot learns its size from a timer after it is laid out, then draws
+    if plot.is_some() {
+        window.request_redraw();
+        window.draw_if_needed(|renderer| {
+            renderer.render(&mut pixels, width);
+        });
+        for _ in 0..3 {
+            std::thread::sleep(std::time::Duration::from_millis(250));
+            slint::platform::update_timers_and_animations();
+        }
+    }
     window.request_redraw();
     window.draw_if_needed(|renderer| {
         renderer.render(&mut pixels, width);

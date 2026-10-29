@@ -233,6 +233,8 @@ export component VisualizationContent inherits Rectangle {
     // It lives in the ViewSettings global so selecting a unit here also selects
     // it in the Units tab table, and vice versa.
     in property <[UnitData]> sorted-units;
+    // This screen is shown: the plot dock measures itself only then
+    in property <bool> plot-shown: true;
     // Status of each unit, in sorted-units order (units.rs).
     in property <[UnitRow]> unit-rows;
     // The selected unit as a card over the view, or docked as the full panel.
@@ -1149,7 +1151,10 @@ export component VisualizationContent inherits Rectangle {
 
         }
 
-        if PlotBridge.dock-visible: PlotPanel {}
+        if PlotBridge.dock-visible: PlotPanel {
+            shown: root.plot-shown;
+            unit-name: root.has-unit ? root.sorted-units[root.selected-unit].name : "";
+        }
     }
 
     // Sidebar action popups (shared component with the Units tab).

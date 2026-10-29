@@ -9,7 +9,8 @@ import { Tdoa3AnchorData } from "tdoa3-coverage.slint";
 import { LhWizardContent, WizardSampleData, WizardBsData } from "lh-wizard.slint";
 import { PlanningContent, PlanObstacleData, PlanPadData, PlanBoxVolumeData, PlanCoverage } from "planning.slint";
 import { SnifferContent, SnifferAnchorRow, SnifferFeedRow, SnifferMatrixRow, SnifferSurveyRow } from "sniffer.slint";
-import { PlotBridge, PlotLine, AxisTick, LegendEntry, PlotNewConfigDialog } from "plot.slint";
+import { PlotBridge, PlotLine, AxisTick, LegendEntry, ChartData, PlotUnit, LogVarRow, PlotNewConfigDialog } from "plot.slint";
+import { PlotScreen } from "plot-screen.slint";
 import { ViewSettings } from "view-settings.slint";
 import { RechannelDialog, RechannelRow, RcRowState } from "rechannel.slint";
 import { OpenSwarmDialog, SignInDialog, SwarmChoice } from "open-swarm.slint";
@@ -23,7 +24,7 @@ import { StatusScreen, StatusData, HealthTile, GridCell, HistBar, Fact, Attentio
 
 // Re-export the plot globals/structs from the root so the Rust side can reach
 // PlotBridge via `ui.global::<PlotBridge>()` and the generated data structs.
-export { PlotBridge, PlotLine, AxisTick, LegendEntry, ViewSettings, Theme, Features, SettingsBridge, UnitRow, SwarmSummary, FilterCounts, Health, StatusData, HealthTile, GridCell, HistBar, Fact, AttentionRow, RadioRow, TrafficSeries, ServerRow, ActivityRow }
+export { PlotBridge, PlotLine, AxisTick, LegendEntry, ChartData, PlotUnit, LogVarRow, ViewSettings, Theme, Features, SettingsBridge, UnitRow, SwarmSummary, FilterCounts, Health, StatusData, HealthTile, GridCell, HistBar, Fact, AttentionRow, RadioRow, TrafficSeries, ServerRow, ActivityRow }
 export { RechannelRow, RcRowState }
 export { SwarmChoice }
 
@@ -652,6 +653,7 @@ export component AppWindow inherits Window {
                 { id: "status", label: "Status", icon: Icons.status, shown: true },
                 { id: "units", label: "Units", icon: Icons.units, shown: true },
                 { id: "view3d", label: "3D view", icon: Icons.view3d, shown: true },
+                { id: "plot", label: "Plot", icon: Icons.plot, shown: true },
                 { id: "planning", label: "Planning", icon: Icons.planning, shown: Features.planning },
                 { id: "lighthouse", label: "Lighthouse", icon: Icons.lighthouse, shown: Features.lighthouse },
                 { id: "loco", label: "Loco", icon: Icons.loco, shown: Features.loco },
@@ -778,6 +780,10 @@ export component AppWindow inherits Window {
                     flash => { root.flash-dialog-visible = true; }
                 }
 
+                PlotScreen {
+                    visible: root.screen == "plot";
+                }
+
                 SettingsScreen {
                     visible: root.screen == "settings";
                     section <=> root.settings-section;
@@ -815,6 +821,7 @@ export component AppWindow inherits Window {
                     }
 
                     units-content := UnitsContent {
+                        plot-shown: root.screen == "units";
                         vertical-stretch: 1;
                         unit-rows: root.unit-rows;
                         visible-count: root.unit-visible-count;
@@ -875,6 +882,7 @@ export component AppWindow inherits Window {
                 Rectangle {
                     visible: root.screen == "view3d";
                     viz-content := VisualizationContent {
+                        plot-shown: root.screen == "view3d";
                         texture <=> root.viz-texture;
                         unit-labels: root.unit-labels;
                         tip: root.viz-tip;

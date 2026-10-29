@@ -134,18 +134,10 @@ async fn main() {
     let radio_plan: host::radios::SharedRadioPlan = Arc::new(Mutex::new(host::radios::RadioPlan::default()));
     radio_plan.lock().await.set_swarm(unit_uris(&ui));
 
-    // Plot dock log streaming: the unit selected for logging (unsorted original
-    // index) and the supervising task handle (aborted on switch/stop to free the
-    // firmware log blocks). Wired to the PlotBridge callbacks here.
+    // Logging for the Plot screen and the dock: the unit selected (unsorted
+    // original index) is the one the dock's Start logs.
     let plot_selected_index: plot::SelectedIndex = Arc::new(std::sync::Mutex::new(None));
-    let plot_log_task: plot::LogTask = Arc::new(Mutex::new(None));
-    plot::wire_logging(
-        &ui,
-        &plot_state,
-        swarm_state.clone(),
-        plot_selected_index.clone(),
-        plot_log_task.clone(),
-    );
+    plot::wire_logging(&ui, &plot_state, swarm_state.clone(), plot_selected_index.clone());
     // Firmware binary selected in the Flash Firmware dialog (path on disk).
     let flash_binary: Arc<Mutex<Option<std::path::PathBuf>>> = Arc::new(Mutex::new(None));
     let positioning_source: Arc<Mutex<Option<usize>>> = Arc::new(Mutex::new(None));

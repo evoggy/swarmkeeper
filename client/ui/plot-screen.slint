@@ -1,0 +1,399 @@
+// The Plot screen: one log of the same variables from one or more units.
+// On the left the log configuration and the units to log, Start and the
+// CSV; on the right the charts (plot.slint, plot.rs).
+
+import { ScrollView } from "std-widgets.slint";
+import { Theme, Icons, Icon, Card, KButton, ButtonKind, IconButton, Segmented, Check, Dot, ScreenTitle } from "kit.slint";
+import { PlotBridge, Plot, ConfigMenu } from "plot.slint";
+import { Health, HealthColors } from "units-table.slint";
+
+component SectionLabel inherits Text {
+    font-size: Theme.font-tiny;
+    font-weight: 600;
+    color: Theme.text3;
+    vertical-alignment: center;
+}
+
+export component PlotScreen inherits Rectangle {
+    property <bool> has-config: PlotBridge.config-index >= 0 && PlotBridge.config-index < PlotBridge.config-names.length;
+    property <string> config-name: root.has-config ? PlotBridge.config-names[PlotBridge.config-index] : "";
+    property <bool> logging: PlotBridge.logging-active;
+
+    VerticalLayout {
+        padding-left: 24px;
+        padding-right: 24px;
+        padding-top: 20px;
+        padding-bottom: 24px;
+        spacing: 16px;
+
+        ScreenTitle {
+            text: "Plot";
+            note: root.logging ? "Logging " + root.config-name + " from " + PlotBridge.logging-unit : "One log from one or more units";
+        }
+
+        HorizontalLayout {
+            vertical-stretch: 1;
+            spacing: 16px;
+
+            // What is logged, from which units
+            Card {
+                width: 308px;
+                VerticalLayout {
+                    // The log configuration
+                    VerticalLayout {
+                        padding: 16px;
+                        spacing: 10px;
+                        SectionLabel { text: "LOG CONFIGURATION"; }
+                        picker := Rectangle {
+                            height: 36px;
+                            border-radius: Theme.radius-control;
+                            border-width: 1px;
+                            border-color: Theme.border2;
+                            background: picker-touch.has-hover && !root.logging ? Theme.hover : Theme.surface;
+                            opacity: root.logging ? 0.6 : 1.0;
+                            HorizontalLayout {
+                                padding-left: 10px;
+                                padding-right: 10px;
+                                spacing: 8px;
+                                Icon {
+                                    y: (parent.height - self.height) / 2;
+                                    source: Icons.list;
+                                    width: 16px;
+                                    height: 16px;
+                                }
+                                Text {
+                                    horizontal-stretch: 1;
+                                    text: root.has-config ? root.config-name : "Choose a configuration";
+                                    font-size: 13px;
+                                    font-weight: root.has-config ? 600 : 400;
+                                    color: root.has-config ? Theme.text : Theme.text3;
+                                    vertical-alignment: center;
+                                    overflow: elide;
+                                }
+                                Icon {
+                                    y: (parent.height - self.height) / 2;
+                                    source: Icons.chevron-down;
+                                    width: 16px;
+                                    height: 16px;
+                                }
+                            }
+                            picker-touch := TouchArea {
+                                // Another configuration starts a new log: not while logging
+                                enabled: !root.logging;
+                                mouse-cursor: pointer;
+                                clicked => { config-menu.show(); }
+                            }
+                        }
+                        for v in PlotBridge.config-variables: Text {
+                            text: v;
+                            font-family: Theme.font-mono;
+                            font-size: 12.5px;
+                            color: Theme.text;
+                            overflow: elide;
+                        }
+                        if root.has-config: Text {
+                            text: "Every " + PlotBridge.config-period + " ms";
+                            font-size: Theme.font-small;
+                            color: Theme.text3;
+                        }
+                        if PlotBridge.config-names.length == 0: Text {
+                            text: "None yet. New log configuration picks the variables from a connected unit.";
+                            font-size: Theme.font-small;
+                            color: Theme.text3;
+                            wrap: word-wrap;
+                        }
+                    }
+                    Rectangle {
+                        height: 1px;
+                        background: Theme.border;
+                    }
+
+                    // The units: ticked ones log, also when ticked while
+                    // logging. The eye hides a unit's lines, not its logging.
+                    VerticalLayout {
+                        vertical-stretch: 1;
+                        padding: 16px;
+                        padding-bottom: 6px;
+                        spacing: 10px;
+                        HorizontalLayout {
+                            SectionLabel {
+                                horizontal-stretch: 1;
+                                text: "UNITS";
+                            }
+                            Text {
+                                text: PlotBridge.chosen-count + " of " + PlotBridge.connected-count + " connected";
+                                font-size: Theme.font-small;
+                                color: Theme.text3;
+                            }
+                        }
+                        HorizontalLayout {
+                            spacing: 8px;
+                            alignment: start;
+                            KButton {
+                                small: true;
+                                text: "All connected";
+                                clicked => { PlotBridge.choose-all(); }
+                            }
+                            KButton {
+                                small: true;
+                                kind: ButtonKind.ghost;
+                                text: "None";
+                                clicked => { PlotBridge.choose-none(); }
+                            }
+                        }
+                        ScrollView {
+                            vertical-stretch: 1;
+                            VerticalLayout {
+                                alignment: start;
+                                for u in PlotBridge.unit-choices: unit-row := Rectangle {
+                                    property <bool> can-tick: u.connected || u.chosen;
+                                    height: 34px;
+                                    border-radius: 7px;
+                                    background: row-touch.has-hover && unit-row.can-tick ? Theme.hover : transparent;
+                                    row-touch := TouchArea {
+                                        enabled: unit-row.can-tick;
+                                        mouse-cursor: pointer;
+                                        clicked => { PlotBridge.toggle-unit(u.name); }
+                                    }
+                                    HorizontalLayout {
+                                        padding-left: 8px;
+                                        padding-right: 2px;
+                                        spacing: 9px;
+                                        Rectangle {
+                                            y: (parent.height - self.height) / 2;
+                                            width: 16px;
+                                            height: 16px;
+                                            border-radius: 4px;
+                                            border-width: u.chosen ? 0px : 1.5px;
+                                            border-color: Theme.border2;
+                                            background: u.chosen ? Theme.accent-button : Theme.surface;
+                                            opacity: unit-row.can-tick ? 1.0 : 0.45;
+                                            if u.chosen: Icon {
+                                                source: Icons.check;
+                                                width: 12px;
+                                                height: 12px;
+                                                color: #ffffff;
+                                            }
+                                        }
+                                        Rectangle {
+                                            y: (parent.height - self.height) / 2;
+                                            width: 10px;
+                                            height: 10px;
+                                            border-radius: 3px;
+                                            background: u.color-index >= 0 ? Theme.series[mod(u.color-index, 8)] : transparent;
+                                            opacity: u.shown ? 1.0 : 0.35;
+                                        }
+                                        Text {
+                                            width: 52px;
+                                            text: u.name;
+                                            font-size: 13px;
+                                            font-weight: 500;
+                                            color: u.connected ? Theme.text : Theme.text3;
+                                            vertical-alignment: center;
+                                        }
+                                        HorizontalLayout {
+                                            horizontal-stretch: 1;
+                                            min-width: 0px;
+                                            spacing: 6px;
+                                            alignment: end;
+                                            if u.logging: Rectangle {
+                                                y: (parent.height - self.height) / 2;
+                                                width: 6px;
+                                                height: 6px;
+                                                border-radius: 3px;
+                                                background: Theme.crit;
+                                            }
+                                            if !u.logging: Dot {
+                                                y: (parent.height - self.height) / 2;
+                                                tint: HealthColors.dot(u.health);
+                                                hollow: u.health == Health.off;
+                                            }
+                                            Text {
+                                                text: u.logging ? "Logging" : u.status;
+                                                font-size: Theme.font-small;
+                                                color: u.logging ? Theme.text : Theme.text2;
+                                                vertical-alignment: center;
+                                                overflow: elide;
+                                            }
+                                        }
+                                        Rectangle {
+                                            width: 28px;
+                                            if u.in-log || u.chosen: IconButton {
+                                                y: (parent.height - self.height) / 2;
+                                                size: 28px;
+                                                icon-size: 15px;
+                                                icon: u.shown ? Icons.eye : Icons.eye-off;
+                                                on: !u.shown;
+                                                clicked => { PlotBridge.toggle-unit-shown(u.name); }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Rectangle {
+                        height: 1px;
+                        background: Theme.border;
+                    }
+
+                    // Start, and the log
+                    VerticalLayout {
+                        padding: 16px;
+                        spacing: 10px;
+                        KButton {
+                            icon: root.logging ? Icons.stop : Icons.play;
+                            text: root.logging ? "Stop"
+                                : PlotBridge.chosen-count == 1 ? "Start logging 1 unit"
+                                : PlotBridge.chosen-count > 1 ? "Start logging " + PlotBridge.chosen-count + " units"
+                                : "Start";
+                            kind: root.logging ? ButtonKind.normal : ButtonKind.primary;
+                            enabled: root.logging || (root.has-config && PlotBridge.chosen-count > 0);
+                            clicked => {
+                                if (root.logging) {
+                                    PlotBridge.stop-logging();
+                                } else {
+                                    PlotBridge.start-chosen();
+                                }
+                            }
+                        }
+                        Text {
+                            text: PlotBridge.log-summary != "" ? PlotBridge.log-summary
+                                : !root.has-config ? "Choose a log configuration, then tick the units."
+                                : "Tick the units to log. Each logs the same variables into this one log.";
+                            font-size: Theme.font-small;
+                            color: Theme.text3;
+                            wrap: word-wrap;
+                        }
+                        if PlotBridge.status-text != "": Text {
+                            text: PlotBridge.status-text;
+                            font-size: Theme.font-small;
+                            color: Theme.text2;
+                            wrap: word-wrap;
+                        }
+                        HorizontalLayout {
+                            spacing: 8px;
+                            KButton {
+                                horizontal-stretch: 1;
+                                preferred-width: 100px;
+                                small: true;
+                                icon: Icons.download;
+                                text: "Save as CSV…";
+                                enabled: PlotBridge.has-data;
+                                clicked => { PlotBridge.save-csv(); }
+                            }
+                            KButton {
+                                horizontal-stretch: 1;
+                                preferred-width: 100px;
+                                small: true;
+                                icon: Icons.trash;
+                                text: "Clear";
+                                enabled: PlotBridge.has-data && !root.logging;
+                                clicked => { PlotBridge.clear-log(); }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // The log, live
+            Card {
+                horizontal-stretch: 1;
+                VerticalLayout {
+                    HorizontalLayout {
+                        padding-left: 16px;
+                        padding-right: 12px;
+                        padding-top: 10px;
+                        padding-bottom: 10px;
+                        spacing: 10px;
+                        VerticalLayout {
+                            horizontal-stretch: 1;
+                            min-width: 0px;
+                            alignment: center;
+                            spacing: 2px;
+                            Text {
+                                text: !root.has-config ? "No log configuration"
+                                    : PlotBridge.logging-unit == "" ? root.config-name
+                                    : root.config-name + " · " + PlotBridge.logging-unit;
+                                font-size: 14px;
+                                font-weight: 600;
+                                color: Theme.text;
+                                overflow: elide;
+                            }
+                            HorizontalLayout {
+                                spacing: 6px;
+                                alignment: start;
+                                Rectangle {
+                                    y: (parent.height - self.height) / 2;
+                                    width: 8px;
+                                    height: 8px;
+                                    border-radius: root.logging ? 4px : 2px;
+                                    background: root.logging ? Theme.crit : Theme.off;
+                                }
+                                Text {
+                                    text: root.logging ? "Logging every " + PlotBridge.config-period + " ms"
+                                        : PlotBridge.has-data ? "Stopped" : "Not started";
+                                    font-size: Theme.font-small;
+                                    color: Theme.text2;
+                                }
+                            }
+                        }
+                        Segmented {
+                            y: (parent.height - self.height) / 2;
+                            height: 32px;
+                            items: [{ label: "10 s" }, { label: "30 s" }, { label: "1 min" }, { label: "All" }];
+                            current <=> PlotBridge.window;
+                            selected => { PlotBridge.reset(); }
+                        }
+                        Segmented {
+                            y: (parent.height - self.height) / 2;
+                            height: 32px;
+                            items: [{ label: "Per variable" }, { label: "One chart" }];
+                            current: PlotBridge.split ? 0 : 1;
+                            selected(i) => {
+                                PlotBridge.split = i == 0;
+                                PlotBridge.reset();
+                            }
+                        }
+                        if !PlotBridge.split: Check {
+                            y: (parent.height - self.height) / 2;
+                            text: "Own scales";
+                            checked <=> PlotBridge.normalized;
+                            toggled => { PlotBridge.reset(); }
+                        }
+                        KButton {
+                            y: (parent.height - self.height) / 2;
+                            small: true;
+                            kind: ButtonKind.ghost;
+                            icon: Icons.fit;
+                            text: "Follow";
+                            tooltip: "Back to the newest samples (or double-click the plot)";
+                            enabled: PlotBridge.has-view;
+                            clicked => { PlotBridge.reset(); }
+                        }
+                    }
+                    Rectangle {
+                        height: 1px;
+                        background: Theme.border;
+                    }
+                    Rectangle { height: 12px; }
+                    Plot {
+                        vertical-stretch: 1;
+                        shown: root.visible;
+                        empty-text: root.logging ? "Waiting for the first samples…"
+                            : !root.has-config ? "Choose a log configuration on the left, or make one: New log configuration."
+                            : PlotBridge.chosen-count == 0 ? "Tick the units to log on the left, then Start."
+                            : "Start logs " + root.config-name + " from the ticked units.";
+                    }
+                }
+            }
+        }
+    }
+
+    config-menu := ConfigMenu {
+        x: picker.absolute-position.x - root.absolute-position.x;
+        y: picker.absolute-position.y - root.absolute-position.y + picker.height + 4px;
+        width: picker.width;
+        can-delete: true;
+    }
+}

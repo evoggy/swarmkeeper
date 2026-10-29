@@ -152,9 +152,18 @@ fn short_address(uri: &str) -> String {
 
 /// The health of each unit, in `units` model order (for the 3D view).
 pub(crate) fn health_by_unit(ui: &AppWindow) -> Vec<Health> {
+    status_by_unit(ui).into_iter().map(|(health, _)| health).collect()
+}
+
+/// The health and status of each unit, in `units` model order (the 3D view,
+/// the Plot screen's unit list).
+pub(crate) fn status_by_unit(ui: &AppWindow) -> Vec<(Health, String)> {
     let units = ui.get_units();
     let firmware = ui.get_swarm_summary().firmware.to_string();
-    units.iter().map(|u| classify(&u, &firmware).0).collect()
+    units.iter().map(|u| {
+        let (health, status, _, _) = classify(&u, &firmware);
+        (health, status)
+    }).collect()
 }
 
 /// Whether a row passes the filter chip (`filter`) and the search text.

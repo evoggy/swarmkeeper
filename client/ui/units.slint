@@ -1430,6 +1430,8 @@ export component UnitsContent inherits Rectangle {
     in property <[UnitData]> sorted-units;
     in property <[UnitRow]> unit-rows;
     in property <int> visible-count;
+    // This screen is shown: the plot dock measures itself only then
+    in property <bool> plot-shown: true;
     in property <SwarmSummary> summary;
     in property <FilterCounts> counts;
     in-out property <int> filter;
@@ -1636,9 +1638,16 @@ export component UnitsContent inherits Rectangle {
         }
         }
 
+        // The plot keeps its height; the table and the panel above give way
         if PlotBridge.dock-visible: Card {
-            height: plot-panel.preferred-height;
-            plot-panel := PlotPanel {}
+            min-height: PlotBridge.dock-height;
+            max-height: PlotBridge.dock-height;
+            PlotPanel {
+                width: 100%;
+                height: 100%;
+                shown: root.plot-shown;
+                unit-name: root.sidebar-open ? root.sorted-units[root.selected-row].name : "";
+            }
         }
     }
 

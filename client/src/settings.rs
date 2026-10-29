@@ -29,6 +29,9 @@ pub(crate) struct AppSettings {
     pub(crate) appearance: i32,
     #[serde(default)]
     pub(crate) features: FeatureSettings,
+    /// The Plot screen's log configurations
+    #[serde(default)]
+    pub(crate) log_configs: Vec<crate::plot::LogConfig>,
     // Keep last: serialized as a [view] table, which TOML requires after the
     // plain values above.
     #[serde(default)]
@@ -250,6 +253,26 @@ mod settings_tests {
         assert_eq!(legacy.view.takeoff_height, ViewState::default().takeoff_height);
         assert_eq!(legacy.view.sort_column, -1);
 
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// The log configurations are TOML tables between [features] and [view].
+    #[test]
+    fn log_configs_round_trip() {
+        let path = std::env::temp_dir().join("swarmkeeper-log-configs-test.toml");
+        let mut settings = AppSettings::default();
+        settings.connection = Some("lab-pc:7777".into());
+        settings.log_configs.push(crate::plot::LogConfig {
+            name: "Position".into(),
+            description: None,
+            variables: vec!["stateEstimate.x".into(), "stateEstimate.z".into()],
+            period_ms: 20,
+        });
+        settings.view.sort_column = 2;
+        confy::store_path(&path, &settings).expect("store");
+        let loaded: AppSettings = confy::load_path(&path).expect("load");
+        assert_eq!(loaded.log_configs, settings.log_configs);
+        assert_eq!(loaded.view.sort_column, 2);
         std::fs::remove_file(&path).ok();
     }
 }

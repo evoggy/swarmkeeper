@@ -1,11 +1,13 @@
-import { Button, ComboBox, LineEdit, CheckBox, ListView, Palette } from "std-widgets.slint";
+import { ListView } from "std-widgets.slint";
+import { Theme, Icons, Icon, KButton, ButtonKind, IconButton, Segmented, TextField, SearchField, Dialog, MenuPanel, MenuRow, MenuSeparator } from "kit.slint";
+import { Health } from "units-table.slint";
 
-// Data-transfer structs pushed from Rust (plot.rs). Ported from swarmfinity's
-// Explore plot — the data lines are pre-built SVG path command strings in
-// pixel coordinates, rendered by Slint's native `Path`.
+// Data pushed from Rust (plot.rs). The lines are SVG path commands in the
+// plot area's pixels, drawn by Slint's `Path`.
 export struct PlotLine {
     commands: string,
-    color: color,
+    // Into Theme.series
+    color-index: int,
 }
 
 export struct AxisTick {
@@ -16,59 +18,104 @@ export struct AxisTick {
 
 export struct LegendEntry {
     label: string,
-    color: color,
-    // "3.65 .. 4.10" — series' overall value range.
-    range: string,
-    // Value at the hover cursor, formatted; empty when not hovering.
+    color-index: int,
+    // The line's pattern: solid, dashed, dotted, dash-dot (plot.rs: DASHES)
+    dash: int,
+    // The newest value, formatted.
+    latest: string,
+    // Value under the pointer, formatted; empty when not hovering.
     hover-value: string,
-    // Index into the Rust slot vec; click toggles visibility.
+    // The series, for toggle-series; -1 on a unit's heading
     slot-index: int,
-    // False when the series is toggled off (shown muted, line hidden).
+    // False when the series is hidden (it keeps logging).
     enabled: bool,
+    // A unit's name over its variables, in one chart of several units
+    head: bool,
 }
 
-// One row in the "New config" TOC variable picker.
+// One chart: a variable with a line per unit, or every line.
+export struct ChartData {
+    title: string,
+    lines: [PlotLine],
+    y-ticks: [AxisTick],
+    legend: [LegendEntry],
+    // The pixel size the lines were built for
+    w-px: float,
+    h-px: float,
+}
+
+// One row in the "New log configuration" variable picker.
 export struct LogVarRow {
     name: string,
     checked: bool,
 }
 
-// Single source of truth for the plot. Both the Units-tab and Visualization-tab
-// PlotPanel instances read/write this one global, so the dock is one logical
-// panel viewed from two places — no per-tab state and a single Rust target.
+// A unit in the Plot screen's list.
+export struct PlotUnit {
+    name: string,
+    status: string,
+    health: Health,
+    connected: bool,
+    // Ticked: it logs while logging is on
+    chosen: bool,
+    // It has samples in the log
+    in-log: bool,
+    logging: bool,
+    // Its lines are drawn; hiding them doesn't stop the logging
+    shown: bool,
+    // Into Theme.series, -1 before it has a colour
+    color-index: int,
+}
+
+// The log and its plots. The Plot screen, and the dock under the Units table
+// and the 3D view, read and write this one global, so they show one log.
 export global PlotBridge {
-    // ----- Data (pushed from Rust) -----
-    in property <[PlotLine]> plot-lines;
+    // ----- The charts (pushed from Rust) -----
+    in property <[ChartData]> charts;
     in property <[AxisTick]> x-ticks;
-    in property <[AxisTick]> y-ticks;
-    in property <[LegendEntry]> legend;
-    in property <string> x-label: "—";
-    in property <string> summary;
-    in property <string> y-axis-label: "(normalized)";
     in property <bool> has-view;
     in property <bool> hover-active;
-    in property <float> hover-x;        // 0..1 within plot area
-    in property <string> hover-text;
+    in property <float> hover-x;        // 0..1 within the plot area
+    in property <string> hover-time;
     in property <float> nav-min-frac;
     in property <float> nav-max-frac: 1.0;
 
-    // ----- Shared dock state -----
+    // ----- How it is shown -----
     in-out property <bool> dock-visible: false;
-    in-out property <length> dock-height: 280px;
-    // Last polled plot-area pixel size — the `Path` viewbox binds to these so
-    // FitStyle::Min scales the pixel-space commands 1:1.
+    in-out property <length> dock-height: 320px;
+    // Last polled size: the plot area's width, the charts' height
     in-out property <float> area-w-px;
     in-out property <float> area-h-px;
+    // The time shown while following the newest samples: 10 s, 30 s, 1 min
+    // or the whole log (plot.rs: WINDOWS_MS).
+    in-out property <int> window: 1;
+    // A chart per variable, else one chart with every line
+    in-out property <bool> split: true;
+    // In one chart: each line on its own scale
+    in-out property <bool> normalized: false;
 
-    // ----- Streaming controls (set from Rust) -----
+    // ----- The log (set from Rust) -----
     in property <bool> logging-active;
-    in property <string> status-text: "No log configured";
+    // The units in the log, or chosen for it
+    in property <string> logging-unit;
+    in property <string> status-text;
+    in property <string> log-summary;
+    in property <bool> has-data;
+    in property <[PlotUnit]> unit-choices;
+    in property <int> connected-count;
+    // Ticked and connected
+    in property <int> chosen-count;
+
+    // ----- Configurations -----
     in property <[string]> config-names;
     in-out property <int> config-index: -1;
+    in property <[string]> config-variables;
+    in property <int> config-period;
     in-out property <bool> show-new-config: false;
-    // New-config TOC variable picker.
+    // The variable picker: the TOC of `toc-unit`
     in property <[LogVarRow]> toc-rows;
     in property <string> toc-status: "";
+    in property <string> toc-unit;
     in-out property <string> toc-filter: "";
 
     // ----- Callbacks out to Rust -----
@@ -81,190 +128,166 @@ export global PlotBridge {
     callback nav-press(float);
     callback nav-drag(float);
     callback toggle-series(int);
-    // Streaming lifecycle — wired in a later phase, declared now so the UI is
-    // stable. start-logging applies the currently selected config to the
-    // selected unit; stop-logging tears the active log block down.
+    // The dock's Start: the selected unit
     callback start-logging();
+    // The Plot screen's Start: the ticked units
+    callback start-chosen();
     callback stop-logging();
+    callback toggle-unit(string);
+    callback toggle-unit-shown(string);
+    callback choose-all();
+    callback choose-none();
     callback select-config(int);
-    // New-config dialog: prepare loads the selected unit's TOC into the picker.
+    callback delete-config(int);
+    callback save-csv();
+    callback clear-log();
+    // New-config dialog: prepare loads a unit's TOC into the picker.
     callback prepare-new-config();
     callback toggle-toc-var(string);
     callback toc-filter-changed(string);
-    // Save the picked variables as a new config (name, period ms).
+    // Save the ticked variables as a configuration (name, period ms).
     callback save-new-config(string, float);
 }
 
-// The graph itself: Y-axis column | plot area + X axis + navigator | legend.
-// Reads everything from PlotBridge. Faithful port of swarmfinity's plot block.
+// The charts, stacked on one time axis: Y ticks | plot area | legend, then
+// the X ticks and the navigator. Reads everything from PlotBridge.
 export component Plot inherits Rectangle {
-    background: Palette.background;
+    // What to say while there is nothing to draw
+    in property <string> empty-text;
+    // On screen: only then it measures itself for plot.rs
+    in property <bool> shown: true;
+    in property <length> legend-width: 210px;
 
-    // Poll the plot-area pixel size and push it to Rust when it changes. Done
-    // from a Timer (not `changed width`) because changed callbacks on
-    // layout-driven dimensions recurse during item-geometry lookups. Gated on
-    // dock-visible so the hidden tab's instance does not also poll; only pushes
-    // a sane non-zero size, so the two instances converge instead of fighting.
+    // Poll the size the lines are built for and push it to Rust when it
+    // changes. From a Timer (not `changed width`): changed callbacks on
+    // layout-driven sizes recurse during item-geometry lookups.
     Timer {
         interval: 200ms;
-        running: PlotBridge.dock-visible;
+        running: root.shown;
         triggered => {
-            if (plot-area.width > 1px
-                && (plot-area.width / 1px != PlotBridge.area-w-px
-                    || plot-area.height / 1px != PlotBridge.area-h-px)) {
-                PlotBridge.area-w-px = plot-area.width / 1px;
-                PlotBridge.area-h-px = plot-area.height / 1px;
-                PlotBridge.size-changed(plot-area.width / 1px, plot-area.height / 1px);
+            if (probe.width > 1px && stack.height > 1px
+                && (probe.width / 1px != PlotBridge.area-w-px || stack.height / 1px != PlotBridge.area-h-px)) {
+                PlotBridge.area-w-px = probe.width / 1px;
+                PlotBridge.area-h-px = stack.height / 1px;
+                PlotBridge.size-changed(probe.width / 1px, stack.height / 1px);
             }
         }
     }
 
     VerticalLayout {
-        spacing: 4px;
-        padding: 6px;
+        padding-left: 6px;
+        padding-right: 14px;
+        padding-bottom: 10px;
 
-        // Header: summary + Reset-view button.
+        // The plot area's width
         HorizontalLayout {
-            spacing: 6px;
-            Text {
-                text: PlotBridge.summary == ""
-                    ? "Plot — start a log to graph variables"
-                    : PlotBridge.summary;
-                color: Palette.foreground;
-                font-size: 12px;
-                font-weight: 600;
-                vertical-alignment: center;
-                horizontal-stretch: 1;
-            }
-            Rectangle {
-                width: 92px;
-                height: 22px;
-                background: reset-ta.has-hover && PlotBridge.has-view
-                    ? Palette.accent-background.transparentize(0.7)
-                    : transparent;
-                border-color: PlotBridge.has-view ? Palette.accent-background : Palette.border;
-                border-width: 1px;
-                border-radius: 3px;
-                Text {
-                    text: "Reset view";
-                    color: PlotBridge.has-view ? Palette.accent-background : Palette.foreground.transparentize(0.5);
-                    font-size: 11px;
-                    horizontal-alignment: center;
-                    vertical-alignment: center;
-                }
-                reset-ta := TouchArea {
-                    enabled: PlotBridge.has-view;
-                    mouse-cursor: pointer;
-                    clicked => { PlotBridge.reset(); }
-                }
-            }
+            height: 0px;
+            Rectangle { width: 58px; }
+            probe := Rectangle { }
+            Rectangle { width: root.legend-width; }
         }
 
-        // Body: y-axis column | plot + x-axis | legend.
-        HorizontalLayout {
-            spacing: 0;
+        stack := VerticalLayout {
             vertical-stretch: 1;
+            spacing: 12px;
 
-            // ----- Y axis column -----
-            Rectangle {
-                width: 56px;
-                VerticalLayout {
-                    spacing: 0;
+            for chart[ci] in PlotBridge.charts: VerticalLayout {
+                // Equal shares, whatever the legends hold (plot.rs: chart_h)
+                vertical-stretch: 1;
+                min-height: 0px;
+                preferred-height: 0px;
+                if chart.title != "": HorizontalLayout {
+                    height: 20px;
+                    padding-left: 58px;
+                    Text {
+                        text: chart.title;
+                        font-family: Theme.font-mono;
+                        font-size: 12px;
+                        font-weight: 600;
+                        color: Theme.text;
+                        vertical-alignment: center;
+                    }
+                }
+                HorizontalLayout {
+                    vertical-stretch: 1;
+                    min-height: 0px;
+
+                    // Y ticks
                     Rectangle {
-                        vertical-stretch: 1;
-                        for t in PlotBridge.y-ticks: Text {
-                            text: t.label;
-                            color: Palette.foreground.transparentize(0.4);
-                            font-size: 9px;
-                            horizontal-alignment: right;
-                            width: parent.width - 4px;
+                        width: 58px;
+                        min-height: 0px;
+                        for t in chart.y-ticks: Text {
                             x: 0;
-                            y: t.pos * parent.height - self.font-size / 2;
+                            y: t.pos * parent.height - self.height / 2;
+                            width: parent.width - 8px;
+                            text: t.label;
+                            font-family: Theme.font-mono;
+                            font-size: 10.5px;
+                            color: Theme.text3;
+                            horizontal-alignment: right;
                         }
                     }
-                    // Spacers matching the x-axis tick + label rows.
-                    Rectangle { height: 16px; }
-                    Rectangle { height: 14px; }
-                }
-            }
 
-            // ----- Plot area + X axis below -----
-            Rectangle {
-                horizontal-stretch: 1;
-                VerticalLayout {
-                    spacing: 0;
-                    plot-area := Rectangle {
-                        vertical-stretch: 1;
-                        background: Palette.background.darker(0.15);
-                        border-color: Palette.border;
+                    // The plot area
+                    Rectangle {
+                        min-height: 0px;
+                        background: Theme.surface;
+                        border-color: Theme.border;
                         border-width: 1px;
-                        border-radius: 3px;
+                        border-radius: 8px;
                         clip: true;
 
-                        // Vertical grid (X ticks).
                         for t in PlotBridge.x-ticks: Rectangle {
-                            width: 1px;
-                            height: parent.height;
-                            background: Palette.border.transparentize(0.4);
                             x: t.pos * parent.width;
                             y: 0;
+                            width: 1px;
+                            height: parent.height;
+                            background: Theme.border;
                         }
-                        // Horizontal grid (Y ticks).
-                        for t in PlotBridge.y-ticks: Rectangle {
-                            width: parent.width;
-                            height: 1px;
-                            background: Palette.border.transparentize(0.4);
+                        for t in chart.y-ticks: Rectangle {
                             x: 0;
                             y: t.pos * parent.height;
+                            width: parent.width;
+                            height: 1px;
+                            background: Theme.border;
                         }
-                        // Data lines. The viewbox uses the polled pixel size so
-                        // the pixel-space commands span the full widget and
-                        // FitStyle::Min scales 1:1.
-                        for ln in PlotBridge.plot-lines: Path {
+                        for ln in chart.lines: Path {
                             width: parent.width;
                             height: parent.height;
                             viewbox-x: 0;
                             viewbox-y: 0;
-                            viewbox-width: PlotBridge.area-w-px;
-                            viewbox-height: PlotBridge.area-h-px;
-                            stroke: ln.color;
-                            stroke-width: 1.5px;
+                            viewbox-width: chart.w-px;
+                            viewbox-height: chart.h-px;
+                            stroke: Theme.series[mod(ln.color-index, 8)];
+                            stroke-width: 1.75px;
                             commands: ln.commands;
                         }
-                        // Hover crosshair.
                         if PlotBridge.hover-active: Rectangle {
-                            width: 1px;
-                            height: parent.height;
-                            background: Palette.foreground.transparentize(0.3);
                             x: PlotBridge.hover-x * parent.width;
                             y: 0;
+                            width: 1px;
+                            height: parent.height;
+                            background: Theme.text3;
                         }
-                        // Hover tooltip — flips left near the right edge.
-                        if PlotBridge.hover-active && PlotBridge.hover-text != "": Rectangle {
-                            background: Palette.background;
-                            border-color: Palette.border;
-                            border-width: 1px;
-                            border-radius: 3px;
-                            width: tooltip-text.preferred-width + 12px;
-                            height: tooltip-text.preferred-height + 8px;
-                            x: PlotBridge.hover-x * parent.width > parent.width - self.width - 16px
-                                ? PlotBridge.hover-x * parent.width - self.width - 10px
-                                : PlotBridge.hover-x * parent.width + 10px;
+                        if PlotBridge.hover-active && ci == 0: MenuPanel {
+                            x: max(0px, min(parent.width - self.width, PlotBridge.hover-x * parent.width - self.width / 2));
                             y: 6px;
-                            tooltip-text := Text {
-                                text: PlotBridge.hover-text;
-                                color: Palette.foreground;
-                                font-size: 10px;
-                                x: 6px;
-                                y: 4px;
+                            width: hover-label.preferred-width + 14px;
+                            height: 22px;
+                            drop-shadow-blur: 8px;
+                            drop-shadow-offset-y: 2px;
+                            hover-label := Text {
+                                text: PlotBridge.hover-time;
+                                font-family: Theme.font-mono;
+                                font-size: 11px;
+                                color: Theme.text;
                             }
                         }
-                        // Pan / zoom / hover.
-                        plot-ta := TouchArea {
+                        // Drag to pan, scroll to zoom, double-click to follow again
+                        TouchArea {
                             mouse-cursor: self.pressed ? grabbing : crosshair;
                             pointer-event(e) => {
-                                if (e.kind == PointerEventKind.down
-                                    && e.button == PointerEventButton.left) {
+                                if (e.kind == PointerEventKind.down && e.button == PointerEventButton.left) {
                                     PlotBridge.pan-start();
                                 }
                             }
@@ -292,61 +315,80 @@ export component Plot inherits Rectangle {
                             double-clicked => { PlotBridge.reset(); }
                         }
                     }
-                    // X axis tick row.
+
+                    // The legend: the newest value, or the one under the
+                    // pointer. A click hides a line; it keeps logging.
                     Rectangle {
-                        height: 16px;
-                        for t in PlotBridge.x-ticks: Text {
-                            text: t.label;
-                            color: Palette.foreground.transparentize(0.4);
-                            font-size: 9px;
-                            horizontal-alignment: center;
-                            x: t.pos * parent.width - self.preferred-width / 2;
-                            y: 2px;
-                        }
-                    }
-                    // X axis title.
-                    Text {
-                        text: PlotBridge.x-label;
-                        color: Palette.foreground.transparentize(0.4);
-                        font-size: 10px;
-                        horizontal-alignment: center;
-                        height: 14px;
-                    }
-                    // Navigator — where the current view sits in the full range.
-                    Rectangle {
-                        height: 12px;
-                        Rectangle {
-                            x: 0;
-                            y: 3px;
-                            width: parent.width;
-                            height: 6px;
-                            background: Palette.border.transparentize(0.3);
-                            border-color: Palette.border;
-                            border-width: 1px;
-                            border-radius: 3px;
-                        }
-                        Rectangle {
-                            x: PlotBridge.nav-min-frac * parent.width;
-                            y: 1px;
-                            width: max(6px, (PlotBridge.nav-max-frac - PlotBridge.nav-min-frac) * parent.width);
-                            height: 10px;
-                            background: nav-ta.has-hover || nav-ta.pressed
-                                ? Palette.accent-background
-                                : Palette.accent-background.transparentize(0.3);
-                            border-color: Palette.accent-background;
-                            border-width: 1px;
-                            border-radius: 3px;
-                        }
-                        nav-ta := TouchArea {
-                            mouse-cursor: self.pressed ? grabbing : pointer;
-                            pointer-event(e) => {
-                                if (e.kind == PointerEventKind.down) {
-                                    PlotBridge.nav-press((self.mouse-x / 1px) / (self.width / 1px));
-                                }
-                            }
-                            moved => {
-                                if (self.pressed) {
-                                    PlotBridge.nav-drag((self.mouse-x / 1px) / (self.width / 1px));
+                        width: root.legend-width;
+                        min-height: 0px;
+                        Flickable {
+                            viewport-height: legend-layout.preferred-height;
+                            legend-layout := VerticalLayout {
+                                padding-left: 12px;
+                                alignment: start;
+                                for e in chart.legend: Rectangle {
+                                    height: e.head ? 24px : 26px;
+                                    border-radius: 6px;
+                                    background: !e.head && legend-touch.has-hover ? Theme.hover : transparent;
+                                    legend-touch := TouchArea {
+                                        enabled: !e.head;
+                                        mouse-cursor: pointer;
+                                        clicked => { PlotBridge.toggle-series(e.slot-index); }
+                                    }
+                                    if e.head: HorizontalLayout {
+                                        padding-left: 6px;
+                                        spacing: 8px;
+                                        Rectangle {
+                                            y: (parent.height - self.height) / 2;
+                                            width: 10px;
+                                            height: 10px;
+                                            border-radius: 3px;
+                                            background: Theme.series[mod(e.color-index, 8)];
+                                            opacity: e.enabled ? 1.0 : 0.4;
+                                        }
+                                        Text {
+                                            text: e.label;
+                                            font-size: 11.5px;
+                                            font-weight: 600;
+                                            color: e.enabled ? Theme.text2 : Theme.text3;
+                                            vertical-alignment: center;
+                                        }
+                                    }
+                                    if !e.head: HorizontalLayout {
+                                        padding-left: 6px;
+                                        padding-right: 6px;
+                                        spacing: 8px;
+                                        Path {
+                                            y: (parent.height - self.height) / 2;
+                                            width: 18px;
+                                            height: 10px;
+                                            viewbox-width: 18;
+                                            viewbox-height: 10;
+                                            stroke: Theme.series[mod(e.color-index, 8)];
+                                            stroke-width: 2px;
+                                            opacity: e.enabled ? 1.0 : 0.35;
+                                            commands: e.dash == 1 ? "M 0 5 L 7 5 M 11 5 L 18 5"
+                                                : e.dash == 2 ? "M 0 5 L 2 5 M 5 5 L 7 5 M 10 5 L 12 5 M 15 5 L 17 5"
+                                                : e.dash == 3 ? "M 0 5 L 9 5 M 12 5 L 14 5"
+                                                : "M 0 5 L 18 5";
+                                        }
+                                        Text {
+                                            horizontal-stretch: 1;
+                                            text: e.label;
+                                            font-size: 12.5px;
+                                            color: e.enabled ? Theme.text : Theme.text3;
+                                            vertical-alignment: center;
+                                            overflow: elide;
+                                        }
+                                        Text {
+                                            text: !e.enabled ? "hidden" : e.hover-value != "" ? e.hover-value : e.latest;
+                                            font-family: Theme.font-mono;
+                                            font-size: 12.5px;
+                                            font-weight: e.enabled ? 600 : 400;
+                                            color: !e.enabled ? Theme.text3 : e.hover-value != "" ? Theme.accent-text : Theme.text;
+                                            vertical-alignment: center;
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -354,308 +396,373 @@ export component Plot inherits Rectangle {
                 }
             }
 
-            // ----- Legend -----
-            Rectangle {
-                width: 196px;
-                VerticalLayout {
-                    padding-left: 8px;
-                    padding-right: 4px;
-                    padding-top: 2px;
-                    spacing: 4px;
-                    alignment: start;
-                    HorizontalLayout {
-                        spacing: 4px;
-                        Text {
-                            text: "Y axis";
-                            color: Palette.foreground.transparentize(0.5);
-                            font-size: 9px;
-                            vertical-alignment: center;
-                        }
-                        Text {
-                            text: PlotBridge.y-axis-label;
-                            color: Palette.foreground;
-                            font-size: 10px;
-                            vertical-alignment: center;
-                            overflow: elide;
-                            horizontal-stretch: 1;
-                        }
-                    }
-                    Rectangle {
-                        height: 1px;
-                        background: Palette.border.transparentize(0.4);
-                    }
+            // Nothing logged yet
+            if PlotBridge.charts.length == 0: HorizontalLayout {
+                vertical-stretch: 1;
+                Rectangle { width: 58px; }
+                Rectangle {
+                    background: Theme.surface;
+                    border-color: Theme.border;
+                    border-width: 1px;
+                    border-radius: 8px;
                     Text {
-                        text: PlotBridge.legend.length == 0
-                            ? "Legend — variables appear here"
-                            : "Legend (" + PlotBridge.legend.length + ")";
-                        color: Palette.foreground;
-                        font-size: 11px;
-                        font-weight: 600;
+                        width: parent.width - 48px;
+                        text: root.empty-text;
+                        font-size: 13px;
+                        color: Theme.text3;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                        wrap: word-wrap;
                     }
-                    for e in PlotBridge.legend: Rectangle {
-                        background: legend-ta.has-hover ? Palette.accent-background.transparentize(0.85) : transparent;
-                        border-radius: 2px;
-                        height: 30px;
-                        HorizontalLayout {
-                            spacing: 6px;
-                            padding-left: 2px;
-                            padding-right: 2px;
-                            // Filled when enabled, hollow outline when disabled.
-                            Rectangle {
-                                width: 10px;
-                                height: 10px;
-                                y: (parent.height - 10px) / 2;
-                                background: e.enabled ? e.color : transparent;
-                                border-color: e.color;
-                                border-width: e.enabled ? 0px : 1.5px;
-                                border-radius: 2px;
-                            }
-                            VerticalLayout {
-                                spacing: 0;
-                                horizontal-stretch: 1;
-                                Text {
-                                    text: e.enabled ? e.label : e.label + "  (off)";
-                                    color: e.enabled ? Palette.foreground : Palette.foreground.transparentize(0.55);
-                                    font-size: 10px;
-                                    font-weight: 600;
-                                    overflow: elide;
-                                }
-                                Text {
-                                    text: e.hover-value != "" ? e.hover-value : e.range;
-                                    color: !e.enabled ? Palette.foreground.transparentize(0.65)
-                                        : e.hover-value != "" ? Palette.accent-background
-                                        : Palette.foreground.transparentize(0.4);
-                                    font-size: 9px;
-                                    overflow: elide;
-                                }
-                            }
+                }
+                Rectangle { width: root.legend-width; }
+            }
+        }
+
+        // Seconds since the log started
+        HorizontalLayout {
+            height: 20px;
+            Rectangle { width: 58px; }
+            Rectangle {
+                for t in PlotBridge.x-ticks: Text {
+                    x: t.pos * parent.width - self.preferred-width / 2;
+                    y: 4px;
+                    text: t.label;
+                    font-family: Theme.font-mono;
+                    font-size: 10.5px;
+                    color: Theme.text3;
+                }
+            }
+            Rectangle { width: root.legend-width; }
+        }
+        // Where the view is in the whole log
+        HorizontalLayout {
+            height: 14px;
+            Rectangle { width: 58px; }
+            Rectangle {
+                Rectangle {
+                    y: 5px;
+                    height: 4px;
+                    border-radius: 2px;
+                    background: Theme.border;
+                }
+                Rectangle {
+                    x: PlotBridge.nav-min-frac * parent.width;
+                    y: 3px;
+                    width: max(8px, (PlotBridge.nav-max-frac - PlotBridge.nav-min-frac) * parent.width);
+                    height: 8px;
+                    border-radius: 4px;
+                    background: nav-touch.has-hover || nav-touch.pressed ? Theme.accent : Theme.border2;
+                }
+                nav-touch := TouchArea {
+                    mouse-cursor: self.pressed ? grabbing : pointer;
+                    pointer-event(e) => {
+                        if (e.kind == PointerEventKind.down) {
+                            PlotBridge.nav-press((self.mouse-x / 1px) / (self.width / 1px));
                         }
-                        legend-ta := TouchArea {
-                            mouse-cursor: pointer;
-                            clicked => { PlotBridge.toggle-series(e.slot-index); }
+                    }
+                    moved => {
+                        if (self.pressed) {
+                            PlotBridge.nav-drag((self.mouse-x / 1px) / (self.width / 1px));
                         }
                     }
                 }
+            }
+            Rectangle { width: root.legend-width; }
+        }
+    }
+}
+
+// The configurations to pick from, a new one, and deleting the picked one.
+export component ConfigMenu inherits PopupWindow {
+    in property <bool> can-delete;
+    width: 280px;
+    MenuPanel {
+        width: root.width;
+        height: config-list.preferred-height;
+        config-list := VerticalLayout {
+            padding: 6px;
+            for name[i] in PlotBridge.config-names: MenuRow {
+                text: name;
+                checked: i == PlotBridge.config-index;
+                clicked => {
+                    PlotBridge.config-index = i;
+                    PlotBridge.select-config(i);
+                }
+            }
+            if PlotBridge.config-names.length > 0: MenuSeparator {}
+            MenuRow {
+                text: "New log configuration…";
+                icon: Icons.plus;
+                clicked => {
+                    PlotBridge.show-new-config = true;
+                    PlotBridge.prepare-new-config();
+                }
+            }
+            if root.can-delete && PlotBridge.config-index >= 0 && PlotBridge.config-index < PlotBridge.config-names.length: MenuRow {
+                text: "Delete " + PlotBridge.config-names[PlotBridge.config-index];
+                icon: Icons.trash;
+                danger: true;
+                clicked => { PlotBridge.delete-config(PlotBridge.config-index); }
             }
         }
     }
 }
 
-// The dock: a draggable height handle, a control strip and the plot. Embedded
-// in both the Units and Visualization tab bodies; both share PlotBridge so it
-// behaves as one panel. Minimises duplication — the wrapping tab only adds this
-// one element.
+// The dock under the Units table and the 3D view: the log, small. Its Start
+// logs the selected unit.
 export component PlotPanel inherits Rectangle {
+    // The selected unit, which Start logs; empty when none is
+    in property <string> unit-name;
+    // On screen: the Plot measures itself only then
+    in property <bool> shown: true;
+
+    property <bool> has-config: PlotBridge.config-index >= 0 && PlotBridge.config-index < PlotBridge.config-names.length;
+    property <string> config-name: root.has-config ? PlotBridge.config-names[PlotBridge.config-index] : "";
+    // Who is plotted: the log's units, else the one Start would log
+    property <string> plotted: PlotBridge.logging-active || PlotBridge.has-data ? PlotBridge.logging-unit : root.unit-name;
+
     height: PlotBridge.dock-height;
-    background: Palette.background;
-    border-color: Palette.border;
-    border-width: 1px;
+    background: Theme.surface;
 
     VerticalLayout {
         spacing: 0px;
 
-        // Height drag handle (drag up to grow the dock).
+        // Drag the top edge to make the dock taller
         Rectangle {
-            height: 6px;
-            background: hdrag.has-hover || hdrag.pressed
-                ? Palette.accent-background
-                : Palette.border.transparentize(0.2);
-            hdrag := TouchArea {
+            height: 10px;
+            Rectangle {
+                width: 40px;
+                height: 4px;
+                border-radius: 2px;
+                background: height-drag.has-hover || height-drag.pressed ? Theme.accent : Theme.border2;
+            }
+            height-drag := TouchArea {
                 mouse-cursor: ns-resize;
                 moved => {
-                    PlotBridge.dock-height = clamp(PlotBridge.dock-height - self.mouse-y, 140px, 700px);
+                    PlotBridge.dock-height = clamp(PlotBridge.dock-height - (self.mouse-y - self.pressed-y), 220px, 720px);
                 }
             }
         }
 
-        // Control strip.
-        Rectangle {
-            height: 34px;
-            background: Palette.background;
-            HorizontalLayout {
-                padding-left: 8px;
-                padding-right: 6px;
-                spacing: 6px;
+        // What is logged from which unit, and how it is shown
+        HorizontalLayout {
+            padding-left: 16px;
+            padding-right: 10px;
+            spacing: 8px;
 
-                Text {
-                    text: "Logging";
-                    font-size: 12px;
-                    font-weight: 600;
-                    color: Palette.foreground;
-                    vertical-alignment: center;
-                }
-                ComboBox {
-                    width: 200px;
-                    model: PlotBridge.config-names;
-                    current-index <=> PlotBridge.config-index;
-                    enabled: PlotBridge.config-names.length > 0;
-                    selected(value) => { PlotBridge.select-config(self.current-index); }
-                }
-                Button {
-                    text: "New…";
-                    clicked => {
-                        PlotBridge.show-new-config = true;
-                        PlotBridge.prepare-new-config();
-                    }
-                }
-                Button {
-                    text: PlotBridge.logging-active ? "Stop" : "Start";
-                    primary: !PlotBridge.logging-active;
-                    clicked => {
-                        if (PlotBridge.logging-active) {
-                            PlotBridge.stop-logging();
-                        } else {
-                            PlotBridge.start-logging();
-                        }
-                    }
-                }
-                Text {
-                    text: PlotBridge.status-text;
-                    font-size: 10px;
-                    color: Palette.foreground.transparentize(0.4);
-                    vertical-alignment: center;
-                    horizontal-stretch: 1;
-                    overflow: elide;
-                }
-                Rectangle {
-                    width: 22px;
-                    height: 22px;
-                    background: close-ta.has-hover ? Palette.border : transparent;
-                    border-radius: 3px;
-                    Text {
-                        text: "✕";
-                        font-size: 13px;
-                        color: Palette.foreground.transparentize(0.3);
-                        horizontal-alignment: center;
-                        vertical-alignment: center;
-                    }
-                    close-ta := TouchArea {
-                        mouse-cursor: pointer;
-                        clicked => { PlotBridge.dock-visible = false; }
+            Text {
+                text: "Plot";
+                font-size: 15px;
+                font-weight: 600;
+                color: Theme.text;
+                vertical-alignment: center;
+            }
+            Text {
+                max-width: 220px;
+                text: root.plotted != "" ? root.plotted : "No unit selected";
+                font-size: 13px;
+                font-weight: root.plotted != "" ? 600 : 400;
+                color: root.plotted != "" ? Theme.accent-text : Theme.text3;
+                vertical-alignment: center;
+                overflow: elide;
+            }
+            Rectangle { width: 4px; }
+            config-button := KButton {
+                y: (parent.height - self.height) / 2;
+                small: true;
+                icon: Icons.list;
+                text: root.has-config ? root.config-name : "Choose variables";
+                enabled: !PlotBridge.logging-active;
+                clicked => { config-menu.show(); }
+            }
+            KButton {
+                y: (parent.height - self.height) / 2;
+                small: true;
+                icon: PlotBridge.logging-active ? Icons.stop : Icons.play;
+                text: PlotBridge.logging-active ? "Stop" : "Start";
+                kind: PlotBridge.logging-active ? ButtonKind.normal : ButtonKind.primary;
+                enabled: PlotBridge.logging-active || (root.has-config && root.unit-name != "");
+                clicked => {
+                    if (PlotBridge.logging-active) {
+                        PlotBridge.stop-logging();
+                    } else {
+                        PlotBridge.start-logging();
                     }
                 }
             }
+            Text {
+                horizontal-stretch: 1;
+                min-width: 0px;
+                text: PlotBridge.status-text;
+                font-size: Theme.font-small;
+                color: Theme.text2;
+                vertical-alignment: center;
+                overflow: elide;
+            }
+            Segmented {
+                y: (parent.height - self.height) / 2;
+                height: 32px;
+                items: [{ label: "10 s" }, { label: "30 s" }, { label: "1 min" }, { label: "All" }];
+                current <=> PlotBridge.window;
+                selected => { PlotBridge.reset(); }
+            }
+            Segmented {
+                y: (parent.height - self.height) / 2;
+                height: 32px;
+                items: [{ label: "Per variable" }, { label: "One chart" }];
+                current: PlotBridge.split ? 0 : 1;
+                selected(i) => {
+                    PlotBridge.split = i == 0;
+                    PlotBridge.reset();
+                }
+            }
+            KButton {
+                y: (parent.height - self.height) / 2;
+                small: true;
+                kind: ButtonKind.ghost;
+                icon: Icons.fit;
+                text: "Follow";
+                tooltip: "Back to the newest samples (or double-click the plot)";
+                enabled: PlotBridge.has-view;
+                clicked => { PlotBridge.reset(); }
+            }
+            IconButton {
+                y: (parent.height - self.height) / 2;
+                icon: Icons.close;
+                clicked => { PlotBridge.dock-visible = false; }
+            }
         }
+        Rectangle { height: 10px; }
 
         Plot {
             vertical-stretch: 1;
+            shown: root.shown;
+            empty-text: PlotBridge.logging-active ? "Waiting for the first samples from " + PlotBridge.logging-unit + "…"
+                : root.unit-name == "" ? "Select a unit to plot its log variables."
+                : PlotBridge.config-names.length == 0 ? "Choose variables › New log configuration picks what to log from " + root.unit-name + "'s log TOC."
+                : !root.has-config ? "Choose the variables to log, then Start."
+                : "Start logs " + root.config-name + " from " + root.unit-name + ".";
         }
+    }
+
+    config-menu := ConfigMenu {
+        x: config-button.absolute-position.x - root.absolute-position.x;
+        y: config-button.absolute-position.y - root.absolute-position.y + config-button.height + 4px;
     }
 }
 
-// Modal dialog to create + save a new log configuration. Instantiated once at
-// the AppWindow root, gated by `PlotBridge.show-new-config`.
-export component PlotNewConfigDialog inherits Rectangle {
-    width: 100%;
-    height: 100%;
-    background: #000000.transparentize(0.55);
+// Create a log configuration from a unit's log TOC and keep it in the
+// settings. At the AppWindow root, gated by `PlotBridge.show-new-config`.
+export component PlotNewConfigDialog inherits Dialog {
+    title: "New log configuration";
+    note: PlotBridge.toc-unit != ""
+        ? "The variables come from " + PlotBridge.toc-unit + "'s log TOC; a unit that lacks one logs the others. Kept in the settings, for every swarm."
+        : "The variables come from a connected unit's log TOC. Kept in the settings, for every swarm.";
+    panel-width: 560px;
+    panel-height: 620px;
+    close => { PlotBridge.show-new-config = false; }
 
-    // Absorb clicks on the backdrop so they don't reach the view underneath.
-    TouchArea {}
+    HorizontalLayout {
+        vertical-stretch: 0;
+        spacing: 10px;
+        VerticalLayout {
+            horizontal-stretch: 1;
+            spacing: 4px;
+            Text {
+                text: "Name";
+                font-size: Theme.font-small;
+                color: Theme.text2;
+            }
+            name-field := TextField {
+                placeholder: "e.g. Attitude";
+            }
+        }
+        VerticalLayout {
+            width: 110px;
+            spacing: 4px;
+            Text {
+                text: "Period (ms)";
+                font-size: Theme.font-small;
+                color: Theme.text2;
+            }
+            period-field := TextField {
+                text: "100";
+            }
+        }
+    }
+
+    SearchField {
+        placeholder: "Filter, e.g. stateEstimate";
+        text <=> PlotBridge.toc-filter;
+        edited(t) => { PlotBridge.toc-filter-changed(t); }
+    }
 
     Rectangle {
-        width: 520px;
-        height: 540px;
-        x: (parent.width - self.width) / 2;
-        y: (parent.height - self.height) / 2;
-        background: Palette.background;
-        border-color: Palette.border;
+        vertical-stretch: 1;
+        border-radius: Theme.radius-control + 2px;
         border-width: 1px;
-        border-radius: 6px;
-
-        VerticalLayout {
-            padding: 16px;
-            spacing: 10px;
-
-            Text {
-                text: "New log configuration";
-                font-size: 15px;
-                font-weight: 700;
-                color: Palette.foreground;
-            }
-            HorizontalLayout {
-                spacing: 10px;
-                VerticalLayout {
-                    spacing: 2px;
-                    horizontal-stretch: 1;
-                    Text {
-                        text: "Name";
-                        font-size: 11px;
-                        color: Palette.foreground.transparentize(0.4);
-                    }
-                    name-edit := LineEdit {
-                        placeholder-text: "e.g. Attitude";
-                    }
+        border-color: Theme.border;
+        background: Theme.surface;
+        clip: true;
+        ListView {
+            for row in PlotBridge.toc-rows: Rectangle {
+                height: 30px;
+                background: row-touch.has-hover ? Theme.hover : transparent;
+                row-touch := TouchArea {
+                    mouse-cursor: pointer;
+                    clicked => { PlotBridge.toggle-toc-var(row.name); }
                 }
-                VerticalLayout {
-                    spacing: 2px;
-                    Text {
-                        text: "Period (ms)";
-                        font-size: 11px;
-                        color: Palette.foreground.transparentize(0.4);
-                    }
-                    period-edit := LineEdit {
-                        text: "100";
-                        width: 80px;
-                    }
-                }
-            }
-
-            Text {
-                text: "Variables — checked from the selected unit's log TOC";
-                font-size: 11px;
-                color: Palette.foreground.transparentize(0.4);
-            }
-            // Search filter.
-            LineEdit {
-                placeholder-text: "Filter… (e.g. stateEstimate)";
-                text <=> PlotBridge.toc-filter;
-                edited(t) => { PlotBridge.toc-filter-changed(t); }
-            }
-            // Variable checkbox list (virtualized).
-            Rectangle {
-                vertical-stretch: 1;
-                background: Palette.background.darker(0.1);
-                border-color: Palette.border;
-                border-width: 1px;
-                border-radius: 3px;
-                ListView {
-                    for row in PlotBridge.toc-rows: Rectangle {
-                        height: 26px;
-                        CheckBox {
-                            x: 6px;
-                            width: parent.width - 12px;
-                            text: row.name;
-                            checked: row.checked;
-                            toggled => { PlotBridge.toggle-toc-var(row.name); }
+                HorizontalLayout {
+                    padding-left: 12px;
+                    spacing: 8px;
+                    Rectangle {
+                        y: (parent.height - self.height) / 2;
+                        width: 16px;
+                        height: 16px;
+                        border-radius: 4px;
+                        border-width: row.checked ? 0px : 1.5px;
+                        border-color: Theme.border2;
+                        background: row.checked ? Theme.accent-button : Theme.surface;
+                        if row.checked: Icon {
+                            source: Icons.check;
+                            width: 12px;
+                            height: 12px;
+                            color: #ffffff;
                         }
                     }
-                }
-            }
-            Text {
-                text: PlotBridge.toc-status;
-                font-size: 10px;
-                color: Palette.foreground.transparentize(0.3);
-            }
-
-            HorizontalLayout {
-                spacing: 8px;
-                Rectangle { horizontal-stretch: 1; }
-                Button {
-                    text: "Cancel";
-                    clicked => { PlotBridge.show-new-config = false; }
-                }
-                Button {
-                    text: "Save";
-                    primary: true;
-                    enabled: name-edit.text != "";
-                    // Rust validates + closes on success (keeps open w/ a status
-                    // message if no variables are selected).
-                    clicked => {
-                        PlotBridge.save-new-config(name-edit.text, period-edit.text.to-float());
+                    Text {
+                        text: row.name;
+                        font-family: Theme.font-mono;
+                        font-size: 12.5px;
+                        color: Theme.text;
+                        vertical-alignment: center;
                     }
                 }
             }
+        }
+    }
+
+    if PlotBridge.toc-status != "": Text {
+        text: PlotBridge.toc-status;
+        font-size: Theme.font-small;
+        color: Theme.text2;
+    }
+
+    HorizontalLayout {
+        spacing: 8px;
+        alignment: end;
+        KButton {
+            text: "Cancel";
+            clicked => { PlotBridge.show-new-config = false; }
+        }
+        KButton {
+            text: "Save";
+            kind: ButtonKind.primary;
+            enabled: name-field.text != "";
+            // Rust checks and closes it (keeps it open with a message when
+            // nothing is ticked).
+            clicked => { PlotBridge.save-new-config(name-field.text, period-field.text.to-float()); }
         }
     }
 }
