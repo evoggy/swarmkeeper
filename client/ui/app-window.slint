@@ -114,8 +114,16 @@ component MenuBar inherits Rectangle {
     callback flash-firmware-clicked();
     callback sign-in-clicked();
     callback sign-out-clicked();
+    // How the Crazyflies are reached (left of the account): `auto`,
+    // `shared`, `direct`, `local` or a server address.
+    callback connection-chosen(string);
+    callback connection-opened();
 
     in property <bool> connected;
+    in property <bool> drives-radios: true;
+    in property <string> connection-label;
+    in property <string> connection-text;
+    in property <string> connection-mode;
     // The account on the server that shares swarms (right end of the bar).
     in property <string> account-label;
     in property <string> account-text;
@@ -137,7 +145,28 @@ component MenuBar inherits Rectangle {
         MenuTitle { width: 92px; text: "Diagnostics"; clicked => { diagnostics-popup.show(); } }
     }
 
-    Rectangle {
+    connection-button := Rectangle {
+        x: account-button.x - self.width - 8px;
+        width: connection-label-text.preferred-width + 24px;
+        height: root.height;
+
+        connection-label-text := Text {
+            text: root.connection-label;
+            font-size: 13px;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+
+        TouchArea {
+            clicked => {
+                root.connection-opened();
+                connection-popup.show();
+            }
+            mouse-cursor: pointer;
+        }
+    }
+
+    account-button := Rectangle {
         x: root.width - self.width - 8px;
         width: account-label-text.preferred-width + 24px;
         height: root.height;
@@ -153,6 +182,80 @@ component MenuBar inherits Rectangle {
         TouchArea {
             clicked => { account-popup.show(); }
             mouse-cursor: pointer;
+        }
+    }
+
+    connection-popup := PopupWindow {
+        x: max(0px, connection-button.x + connection-button.width - 440px);
+        y: root.height;
+        width: 440px;
+        // The server address field takes clicks.
+        close-policy: PopupClosePolicy.close-on-click-outside;
+
+        property <bool> remote: root.connection-mode != "auto" && root.connection-mode != "shared"
+            && root.connection-mode != "direct" && root.connection-mode != "local";
+
+        Rectangle {
+            width: 440px;
+            height: connection-menu.preferred-height;
+            background: Palette.background;
+            border-width: 1px;
+            border-color: Palette.border;
+
+            connection-menu := VerticalLayout {
+                padding-bottom: 4px;
+
+                VerticalLayout {
+                    padding: 12px;
+                    padding-left: 16px;
+                    Text {
+                        text: root.connection-text;
+                        font-size: 12px;
+                        color: Palette.foreground.transparentize(0.2);
+                        wrap: word-wrap;
+                    }
+                }
+                MenuSeparator {}
+                MenuItem {
+                    text: (root.connection-mode == "auto" ? "✓ " : "    ") + "Automatic: a server on this computer if one runs, else shared";
+                    clicked => { root.connection-chosen("auto"); connection-popup.close(); }
+                }
+                MenuItem {
+                    text: (root.connection-mode == "shared" ? "✓ " : "    ") + "This computer's Crazyradios, shared with other programs";
+                    clicked => { root.connection-chosen("shared"); connection-popup.close(); }
+                }
+                MenuItem {
+                    text: (root.connection-mode == "direct" ? "✓ " : "    ") + "This computer's Crazyradios, Swarmkeeper only";
+                    clicked => { root.connection-chosen("direct"); connection-popup.close(); }
+                }
+                MenuItem {
+                    text: (root.connection-mode == "local" ? "✓ " : "    ") + "Server on this computer (cfcli server run)";
+                    clicked => { root.connection-chosen("local"); connection-popup.close(); }
+                }
+                HorizontalLayout {
+                    padding-left: 16px;
+                    padding-right: 12px;
+                    padding-top: 4px;
+                    padding-bottom: 4px;
+                    spacing: 8px;
+
+                    Text {
+                        text: (connection-popup.remote ? "✓ " : "    ") + "Server at";
+                        font-size: 13px;
+                        vertical-alignment: center;
+                    }
+                    remote-address := LineEdit {
+                        placeholder-text: "host or host:port";
+                        text: connection-popup.remote ? root.connection-mode : "";
+                        accepted(address) => { root.connection-chosen(address); connection-popup.close(); }
+                    }
+                    Button {
+                        text: "Use";
+                        enabled: remote-address.text != "";
+                        clicked => { root.connection-chosen(remote-address.text); connection-popup.close(); }
+                    }
+                }
+            }
         }
     }
 
@@ -289,13 +392,13 @@ component MenuBar inherits Rectangle {
                 }
                 MenuSeparator {}
                 MenuItem {
-                    text: "Sync Blink";
-                    enabled: root.connected;
+                    text: root.drives-radios ? "Sync Blink" : "Sync Blink (this computer's Crazyradios only)";
+                    enabled: root.connected && root.drives-radios;
                     clicked => { flight-popup.close(); sync-blink-clicked(); }
                 }
                 MenuItem {
-                    text: "Delayed Sync Blink";
-                    enabled: root.connected;
+                    text: root.drives-radios ? "Delayed Sync Blink" : "Delayed Sync Blink (this computer's Crazyradios only)";
+                    enabled: root.connected && root.drives-radios;
                     clicked => { flight-popup.close(); delayed-sync-blink-clicked(); }
                 }
                 MenuSeparator {}
@@ -841,6 +944,16 @@ export component AppWindow inherits Window {
     in-out property <string> swarm-update;
     callback reload-swarm();
 
+    // How the Crazyflies are reached, see MenuBar
+    in-out property <string> connection-label;
+    in-out property <string> connection-text;
+    in-out property <string> connection-mode: "auto";
+    // Swarmkeeper drives this computer's Crazyradios (shared or direct mode):
+    // the features that send raw radio packets need it
+    in-out property <bool> drives-radios: true;
+    callback connection-chosen(string);
+    callback connection-opened();
+
     // The account on the server that shares swarms
     in-out property <string> account-label: "Sign in";
     in-out property <string> account-text;
@@ -1178,6 +1291,12 @@ export component AppWindow inherits Window {
                 os-dialog-visible = true;
                 os-show();
             }
+            drives-radios: root.drives-radios;
+            connection-label: root.connection-label;
+            connection-text: root.connection-text;
+            connection-mode: root.connection-mode;
+            connection-chosen(mode) => { root.connection-chosen(mode); }
+            connection-opened => { root.connection-opened(); }
             account-label: root.account-label;
             account-text: root.account-text;
             signed-in: root.signed-in;
@@ -1312,6 +1431,7 @@ export component AppWindow inherits Window {
                     selected-unit <=> root.radio-test-selected-unit;
                     running: root.radio-test-running;
                     swarm-connected: root.swarm-connected;
+                    drives-radios: root.drives-radios;
                     progress: root.radio-test-progress;
                     status-text: root.radio-test-status;
                     results: root.radio-test-results;
@@ -1962,7 +2082,7 @@ export component AppWindow inherits Window {
                 }
 
                 Text {
-                    text: "Select a target and a binary, then flash every unit in the swarm one at a time. Flashing stm32-fw / nrf51-fw disconnects the swarm and uses the radio exclusively.";
+                    text: "Select a target and a binary, then flash every unit in the swarm. stm32-fw / nrf51-fw go to all units at once where their bootloaders take broadcast, else one at a time, and each unit is connected again after. Deck targets are flashed one unit at a time, disconnect the swarm, and only work when Swarmkeeper drives the Crazyradios.";
                     font-size: 12px;
                     color: Palette.foreground.transparentize(0.3);
                     wrap: word-wrap;

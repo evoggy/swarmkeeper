@@ -24,3 +24,6 @@ recordings/
 
 # Copies of swarms shared on the server
 client/synced/
+
+# Written by the app at run time
+client/journals/

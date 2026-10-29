@@ -13,7 +13,6 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use futures::{stream, StreamExt};
 use serde::{Deserialize, Serialize};
 use slint::{ComponentHandle, Model, ModelRc, SharedString, VecModel};
 
@@ -897,47 +896,6 @@ pub fn list_log_configs() -> Vec<LogConfig> {
     out
 }
 
-fn value_to_f64(v: crazyflie_lib::Value) -> f64 {
-    use crazyflie_lib::Value::*;
-    match v {
-        U8(x) => x as f64,
-        U16(x) => x as f64,
-        U32(x) => x as f64,
-        U64(x) => x as f64,
-        I8(x) => x as f64,
-        I16(x) => x as f64,
-        I32(x) => x as f64,
-        I64(x) => x as f64,
-        F16(x) => f32::from(x) as f64,
-        F32(x) => x as f64,
-        F64(x) => x,
-    }
-}
-
-/// Split `names` into log blocks that each fit `budget` bytes of payload.
-/// Mirrors tdoa_doctor's chunker — the firmware caps a log packet's payload.
-fn chunk_by_bytes(cf: &crazyflie_lib::Crazyflie, names: &[String], budget: usize) -> Vec<Vec<String>> {
-    let mut chunks = Vec::new();
-    let mut cur: Vec<String> = Vec::new();
-    let mut used = 0usize;
-    for n in names {
-        let sz = cf.log.get_type(n).map(|t| t.byte_length()).unwrap_or(4);
-        if !cur.is_empty() && used + sz > budget {
-            chunks.push(std::mem::take(&mut cur));
-            used = 0;
-        }
-        cur.push(n.clone());
-        used += sz;
-    }
-    if !cur.is_empty() {
-        chunks.push(cur);
-    }
-    chunks
-}
-
-/// Conservative per-block payload budget (bytes), matching tdoa_doctor.
-const BLOCK_BUDGET_BYTES: usize = 24;
-
 fn set_status(weak: &slint::Weak<AppWindow>, text: &str) {
     let weak = weak.clone();
     let text = text.to_string();
@@ -960,10 +918,11 @@ fn set_logging_active(weak: &slint::Weak<AppWindow>, active: bool) {
 /// Stream a config's variables from one Crazyflie into the plot's ring buffers
 /// until aborted (config switch / stop) or the link drops.
 ///
-/// Aborting this task drops every `LogStream`, which deletes the firmware log
-/// blocks — the intended teardown when switching configs.
+/// Aborting this task drops the `LogStream`, which stops the firmware log
+/// blocks — the intended teardown when switching configs. The server spreads
+/// the variables over as many log blocks as they need.
 pub async fn run_plot_log(
-    cf: Arc<crazyflie_lib::Crazyflie>,
+    cf: Arc<crazyflie_connection_server::Crazyflie>,
     state: Shared,
     weak: slint::Weak<AppWindow>,
     cfg: LogConfig,
@@ -1018,43 +977,15 @@ pub async fn run_plot_log(
     }
 
     let period_ms = cfg.period_ms.clamp(10, 2550);
-    let chunks = chunk_by_bytes(&cf, &names, BLOCK_BUDGET_BYTES);
-
-    let mut streams = Vec::new();
-    for chunk in &chunks {
-        // LogPeriod is consumed by start(), so build one per block.
-        let period = match crazyflie_lib::subsystems::log::LogPeriod::from_millis(period_ms) {
-            Ok(p) => p,
-            Err(_) => {
-                set_status(&weak, "Invalid log period (10..=2550 ms).");
-                set_logging_active(&weak, false);
-                return;
-            }
-        };
-        let mut block = match cf.log.create_block().await {
-            Ok(b) => b,
-            Err(e) => {
-                set_status(&weak, &format!("create_block failed: {e}"));
-                set_logging_active(&weak, false);
-                return;
-            }
-        };
-        for n in chunk {
-            if let Err(e) = block.add_variable(n).await {
-                eprintln!("plot-log: add_variable {n} failed: {e:?}");
-            }
+    let vars: Vec<&str> = names.iter().map(String::as_str).collect();
+    let mut stream = match cf.log.subscribe(&vars, Duration::from_millis(period_ms)).await {
+        Ok(stream) => stream,
+        Err(e) => {
+            set_status(&weak, &format!("Starting the log failed: {e}"));
+            set_logging_active(&weak, false);
+            return;
         }
-        match block.start(period).await {
-            Ok(s) => streams.push(s),
-            Err(e) => eprintln!("plot-log: block.start failed: {e:?}"),
-        }
-    }
-
-    if streams.is_empty() {
-        set_status(&weak, "Failed to start any log blocks.");
-        set_logging_active(&weak, false);
-        return;
-    }
+    };
 
     set_logging_active(&weak, true);
     let status = if missing == 0 {
@@ -1064,25 +995,12 @@ pub async fn run_plot_log(
     };
     set_status(&weak, &status);
 
-    // Merge every block's stream; each `unfold` owns its LogStream so dropping
-    // `merged` (on abort) deletes the firmware blocks.
-    let mut merged = stream::select_all(streams.into_iter().map(|s| {
-        stream::unfold(s, |s| async move {
-            match s.next().await {
-                Ok(d) => Some((d, s)),
-                Err(_) => None,
-            }
-        })
-        .boxed()
-    }));
-
-    while let Some(data) = merged.next().await {
+    while let Ok(data) = stream.next().await {
         let ts = data.timestamp as i64;
         let mut s = state.lock().unwrap();
         for (name, value) in &data.data {
-            let v = value_to_f64(*value);
             if let Some(slot) = s.slots.iter_mut().find(|sl| &sl.name == name) {
-                slot.push(ts, v);
+                slot.push(ts, *value);
             }
         }
         s.dirty = true;
