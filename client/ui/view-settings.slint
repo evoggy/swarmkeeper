@@ -137,27 +137,32 @@ export global ViewSettings {
     changed col-leddn-w => { save(); }
 
     // --- Visualization tab: camera ---
-    in-out property <float> cam-yaw: 0.8;
-    in-out property <float> cam-pitch: 0.6;
-    in-out property <float> cam-distance: 6.0;
+    in-out property <float> cam-yaw: -2.05;
+    in-out property <float> cam-pitch: 0.58;
+    in-out property <float> cam-distance: 8.6;
     in-out property <float> cam-pan-x: 0;
     in-out property <float> cam-pan-y: 0;
+    // Perspective, Top, Front, Side; -1 after orbiting
+    in-out property <int> view-preset: 0;
 
     changed cam-yaw => { save(); }
     changed cam-pitch => { save(); }
     changed cam-distance => { save(); }
     changed cam-pan-x => { save(); }
     changed cam-pan-y => { save(); }
+    changed view-preset => { save(); }
 
     // --- Visualization tab: overlays ---
-    in-out property <bool> show-cf-labels: false;
-    in-out property <bool> show-lh-labels: false;
-    in-out property <bool> show-loco-labels: false;
-    in-out property <bool> show-axis-labels: false;
-    in-out property <bool> show-grid-labels: false;
+    // Unit names: 0 the ones with a problem, 1 all, 2 only the selected one
+    // (and the one under the pointer)
+    in-out property <int> label-mode: 0;
+    in-out property <bool> show-lh-labels: true;
+    in-out property <bool> show-loco-labels: true;
+    in-out property <bool> show-axis-labels: true;
+    in-out property <bool> show-grid-labels: true;
     in-out property <bool> show-scene-overlay: true;
 
-    changed show-cf-labels => { save(); }
+    changed label-mode => { save(); }
     changed show-lh-labels => { save(); }
     changed show-loco-labels => { save(); }
     changed show-axis-labels => { save(); }

@@ -1,35 +1,11 @@
-import { VerticalBox, HorizontalBox, Button, LineEdit, ScrollView, Palette, CheckBox, Slider, ComboBox } from "std-widgets.slint";
-import { VizLabel } from "visualization.slint";
+// Planning: the scene's objects on the left, the room in 3D in the middle,
+// and the selected object or the coverage on the right.
+
+import { ComboBox, ScrollView, Slider } from "std-widgets.slint";
+import { VizLabel, UnitLabel } from "visualization.slint";
 import { LhBaseStationData } from "lh-coverage.slint";
 import { Tdoa3AnchorData } from "tdoa3-coverage.slint";
-import { SectionHeader } from "widgets.slint";
-
-// Minimal numeric input without the clear ("X") button
-component NumericInput inherits Rectangle {
-    in-out property <string> text <=> input.text;
-    callback edited(string);
-    callback accepted(string);
-
-    height: 28px;
-    border-radius: 4px;
-    background: Palette.background;
-    border-width: 1px;
-    border-color: input.has-focus ? Palette.accent-background : Palette.border;
-
-    forward-focus: input;
-
-    input := TextInput {
-        x: 4px;
-        width: parent.width - 8px;
-        vertical-alignment: center;
-        font-size: 12px;
-        color: Palette.foreground;
-        selection-background-color: Palette.accent-background;
-        selection-foreground-color: Palette.accent-foreground;
-        edited => { root.edited(self.text); }
-        accepted => { root.accepted(self.text); }
-    }
-}
+import { Theme, Icons, Icon, KButton, ButtonKind, IconButton, Segmented, Switch, MenuPanel, MenuRow, MenuSeparator, Meter } from "kit.slint";
 
 export struct PlanObstacleData {
     kind: string,
@@ -65,118 +41,355 @@ export struct PlanBoxVolumeData {
     max-z: string,
 }
 
-// Simple color swatch picker
-component ColorPicker inherits Rectangle {
-    in-out property <float> picked-r: 0.45;
-    in-out property <float> picked-g: 0.45;
-    in-out property <float> picked-b: 0.50;
-    callback changed(float, float, float);
+// The last Lighthouse coverage computation, counted in the first flight
+// area (or the room without one). Set from Rust (planning_ui.rs).
+export struct PlanCoverage {
+    computed: bool,
+    // "Flight area 1 · 4.00 × 4.00 × 2.20 m"
+    area: string,
+    // Seen by 2 or more base stations: "93.4 %"
+    good: string,
+    // Share of the points seen by 0, 1, 2, 3, 4 or more base stations
+    levels: [float],
+    // Share of the points each base station sees
+    per-bs: [float],
+    meta: string,
+    // When it was computed: "14:02"
+    at: string,
+}
 
-    height: 20px;
+// What is selected, and what the tree and the inspector draw for it
+enum PlanKind { none, base-station, anchor, obstacle, flight-area, waypoint-area, room, pad, trajectory }
 
-    HorizontalLayout {
-        spacing: 2px;
+// The small symbol of an object kind, as in the view
+component Glyph inherits Rectangle {
+    in property <PlanKind> kind;
+    in property <length> size: 12px;
+    width: root.size;
+    height: root.size;
+    property <color> room-color: Theme.room;
+    property <color> wp-color: Theme.waypoint-area;
+    if root.kind == PlanKind.room || root.kind == PlanKind.flight-area || root.kind == PlanKind.waypoint-area: Rectangle {
+        border-radius: 2px;
+        border-width: 1.5px;
+        border-color: root.kind == PlanKind.room ? room-color : root.kind == PlanKind.flight-area ? Theme.area : wp-color;
+    }
+    if root.kind == PlanKind.base-station: Rectangle {
+        border-radius: root.size / 4;
+        border-width: 2px;
+        border-color: Theme.base-station;
+    }
+    if root.kind == PlanKind.anchor: Path {
+        width: root.size;
+        height: root.size;
+        viewbox-width: 12;
+        viewbox-height: 12;
+        stroke: Theme.flying;
+        stroke-width: 2px;
+        MoveTo { x: 6; y: 1; }
+        LineTo { x: 11; y: 6; }
+        LineTo { x: 6; y: 11; }
+        LineTo { x: 1; y: 6; }
+        Close { }
+    }
+    if root.kind == PlanKind.obstacle: Rectangle {
+        border-radius: 2px;
+        background: room-color;
+    }
+    if root.kind == PlanKind.pad: Rectangle {
+        border-radius: root.size / 2;
+        border-width: 1.5px;
+        border-color: Theme.pad;
+    }
+    if root.kind == PlanKind.trajectory: Rectangle {
+        y: (parent.height - 2px) / 2;
+        height: 2px;
+        border-radius: 1px;
+        background: Theme.accent;
+    }
+}
 
-        // Preset swatches
-        for preset in [
-            { r: 0.45, g: 0.45, b: 0.50 }, // gray (default)
-            { r: 0.85, g: 0.30, b: 0.25 }, // red
-            { r: 0.20, g: 0.65, b: 0.30 }, // green
-            { r: 0.25, g: 0.50, b: 0.85 }, // blue
-            { r: 0.85, g: 0.70, b: 0.20 }, // yellow
-            { r: 0.70, g: 0.35, b: 0.75 }, // purple
-            { r: 0.20, g: 0.75, b: 0.80 }, // cyan
-            { r: 0.85, g: 0.55, b: 0.25 }, // orange
-            { r: 0.60, g: 0.40, b: 0.25 }, // brown
-            { r: 0.15, g: 0.15, b: 0.15 }, // dark
-        ]: Rectangle {
-            width: 18px;
-            height: 18px;
-            border-radius: 3px;
-            background: Colors.rgb(round(preset.r * 255), round(preset.g * 255), round(preset.b * 255));
-            border-width: (root.picked-r - preset.r) * (root.picked-r - preset.r) < 0.01
-                       && (root.picked-g - preset.g) * (root.picked-g - preset.g) < 0.01
-                       && (root.picked-b - preset.b) * (root.picked-b - preset.b) < 0.01
-                       ? 2px : 0px;
-            border-color: white;
+// A section title: SIZE, POSITION, MODEL
+component Title inherits Text {
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.5px;
+    color: Theme.text3;
+}
 
-            TouchArea {
-                clicked => {
-                    root.picked-r = preset.r;
-                    root.picked-g = preset.g;
-                    root.picked-b = preset.b;
-                    root.changed(preset.r, preset.g, preset.b);
+component Note inherits Text {
+    font-size: Theme.font-small;
+    color: Theme.text3;
+    wrap: word-wrap;
+}
+
+// A number: a label over an input. `changed` on Enter or when leaving it.
+component Field inherits VerticalLayout {
+    in property <string> label;
+    in property <string> value;
+    in property <bool> enabled: true;
+    callback changed(string);
+    spacing: 4px;
+    horizontal-stretch: 1;
+    changed value => { input.text = root.value; }
+    Text {
+        text: root.label;
+        font-size: 11.5px;
+        font-weight: 500;
+        color: Theme.text3;
+        overflow: elide;
+    }
+    Rectangle {
+        height: 32px;
+        border-radius: 7px;
+        border-width: 1px;
+        border-color: input.has-focus ? Theme.accent : Theme.border2;
+        background: root.enabled ? Theme.surface : Theme.surface2;
+        input := TextInput {
+            x: 8px;
+            width: parent.width - 16px;
+            text: root.value;
+            enabled: root.enabled;
+            single-line: true;
+            font-family: Theme.font-mono;
+            font-size: 12.5px;
+            color: root.enabled ? Theme.text : Theme.text3;
+            vertical-alignment: center;
+            accepted => { root.changed(self.text); }
+            changed has-focus => {
+                if (!self.has-focus && self.text != root.value) {
+                    root.changed(self.text);
                 }
-                mouse-cursor: pointer;
             }
         }
     }
 }
 
-// One editable row for a flight area or waypoint area box volume.
-component BoxVolumeRow inherits Rectangle {
-    in property <PlanBoxVolumeData> data;
-    in property <int> index;
-    in property <string> title-prefix;
-    in property <bool> selected;
-    callback edited(PlanBoxVolumeData);
-    callback removed();
-    callback select-clicked();
-
-    border-radius: 4px;
-    border-width: 1px;
-    border-color: Palette.border;
-    background: root.selected ? Palette.accent-background : Palette.background;
-
-    function current() -> PlanBoxVolumeData {
-        return {
-            label: label-in.text,
-            min-x: min-x.text, min-y: min-y.text, min-z: min-z.text,
-            max-x: max-x.text, max-y: max-y.text, max-z: max-z.text,
-        };
-    }
-
+// A switch with a title and a line of explanation
+component SwitchRow inherits HorizontalLayout {
+    in property <string> text;
+    in property <string> note;
+    in property <bool> enabled: true;
+    in-out property <bool> checked;
+    callback toggled();
+    min-height: 34px;
+    spacing: 10px;
     VerticalLayout {
-        padding: 8px;
-        spacing: 4px;
+        horizontal-stretch: 1;
+        alignment: center;
+        Text {
+            text: root.text;
+            font-size: 12.5px;
+            color: root.enabled ? Theme.text : Theme.text3;
+            wrap: word-wrap;
+        }
+        if root.note != "": Text {
+            text: root.note;
+            font-size: 11.5px;
+            color: Theme.text3;
+            wrap: word-wrap;
+        }
+    }
+    Switch {
+        y: (parent.height - self.height) / 2;
+        checked <=> root.checked;
+        enabled: root.enabled;
+        toggled => { root.toggled(); }
+    }
+}
 
+// A group's heading in the tree, with its count and an add button
+component GroupHeader inherits HorizontalLayout {
+    in property <string> title;
+    in property <int> count;
+    in property <bool> addable;
+    in property <string> add-label;
+    in-out property <bool> open: true;
+    callback add();
+    height: 32px;
+    spacing: 2px;
+    Rectangle {
+        horizontal-stretch: 1;
+        border-radius: 7px;
+        background: head-touch.has-hover ? Theme.hover : transparent;
         HorizontalLayout {
-            spacing: 4px;
+            padding-left: 6px;
+            padding-right: 6px;
+            spacing: 6px;
+            Icon {
+                y: (parent.height - self.height) / 2;
+                source: root.open ? Icons.chevron-down : Icons.chevron-right;
+                width: 14px;
+                height: 14px;
+            }
             Text {
-                text: root.title-prefix + " \{root.index + 1}";
-                font-size: 12px;
+                text: root.title;
+                font-size: 12.5px;
                 font-weight: 600;
+                color: Theme.text;
                 vertical-alignment: center;
             }
-            label-in := NumericInput {
-                text: root.data.label;
-                width: 70px;
-                edited(val) => { root.edited(root.current()); }
-            }
-            Rectangle { horizontal-stretch: 1; }
-            Button {
-                text: root.selected ? "Editing" : "Edit";
-                clicked => { root.select-clicked(); }
-            }
-            Button {
-                text: "Remove";
-                clicked => { root.removed(); }
+            Text {
+                horizontal-stretch: 1;
+                text: root.count;
+                font-size: 12.5px;
+                font-weight: 500;
+                color: Theme.text3;
+                vertical-alignment: center;
             }
         }
+        head-touch := TouchArea {
+            mouse-cursor: pointer;
+            clicked => { root.open = !root.open; }
+        }
+    }
+    if root.addable: IconButton {
+        y: (parent.height - self.height) / 2;
+        icon: Icons.plus;
+        size: 28px;
+        icon-size: 14px;
+        clicked => { root.add(); }
+    }
+}
 
-        HorizontalLayout {
-            spacing: 2px;
-            Text { text: "Min"; font-size: 11px; vertical-alignment: center; width: 28px; }
-            min-x := NumericInput { text: root.data.min-x; width: 50px; edited(val) => { root.edited(root.current()); } }
-            min-y := NumericInput { text: root.data.min-y; width: 50px; edited(val) => { root.edited(root.current()); } }
-            min-z := NumericInput { text: root.data.min-z; width: 50px; edited(val) => { root.edited(root.current()); } }
+// An object in the tree
+component TreeItem inherits Rectangle {
+    in property <PlanKind> kind;
+    in property <string> text;
+    in property <string> sub;
+    in property <bool> on;
+    in property <bool> warn;
+    in property <length> indent: 26px;
+    callback clicked();
+    height: 34px;
+    border-radius: 7px;
+    background: root.on ? Theme.accent-tint : item-touch.has-hover ? Theme.hover : transparent;
+    HorizontalLayout {
+        padding-left: root.indent;
+        padding-right: 8px;
+        spacing: 8px;
+        Glyph {
+            y: (parent.height - self.height) / 2;
+            kind: root.kind;
         }
-        HorizontalLayout {
-            spacing: 2px;
-            Text { text: "Max"; font-size: 11px; vertical-alignment: center; width: 28px; }
-            max-x := NumericInput { text: root.data.max-x; width: 50px; edited(val) => { root.edited(root.current()); } }
-            max-y := NumericInput { text: root.data.max-y; width: 50px; edited(val) => { root.edited(root.current()); } }
-            max-z := NumericInput { text: root.data.max-z; width: 50px; edited(val) => { root.edited(root.current()); } }
+        Text {
+            text: root.text;
+            font-size: 12.5px;
+            font-weight: root.on ? 500 : 400;
+            color: root.on ? Theme.accent-text : Theme.text;
+            vertical-alignment: center;
+        }
+        if root.warn: Icon {
+            y: (parent.height - self.height) / 2;
+            source: Icons.warning;
+            width: 14px;
+            height: 14px;
+            color: Theme.warn;
+        }
+        Text {
+            horizontal-stretch: 1;
+            text: root.sub;
+            font-family: Theme.font-mono;
+            font-size: 11px;
+            color: root.on ? Theme.accent-text : Theme.text3;
+            horizontal-alignment: right;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+    }
+    item-touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+}
+
+// A floating card over the view
+component Float inherits Rectangle {
+    background: Theme.surface;
+    border-radius: 12px;
+    drop-shadow-blur: 16px;
+    drop-shadow-color: Theme.shadow;
+    drop-shadow-offset-y: 4px;
+}
+
+// A button on the view: Fit, Undo
+component ViewButton inherits Float {
+    in property <string> text;
+    in property <image> icon;
+    in property <bool> enabled: true;
+    callback clicked();
+    height: 38px;
+    width: view-btn.preferred-width;
+    border-radius: 10px;
+    background: view-touch.has-hover && root.enabled ? Theme.hover : Theme.surface;
+    view-btn := HorizontalLayout {
+        padding-left: 12px;
+        padding-right: 12px;
+        spacing: 7px;
+        Icon {
+            y: (parent.height - self.height) / 2;
+            source: root.icon;
+            width: 16px;
+            height: 16px;
+            color: root.enabled ? Theme.text : Theme.text3;
+        }
+        Text {
+            text: root.text;
+            font-size: 12.5px;
+            font-weight: 500;
+            color: root.enabled ? Theme.text : Theme.text3;
+            vertical-alignment: center;
+        }
+    }
+    view-touch := TouchArea {
+        mouse-cursor: root.enabled ? pointer : default;
+        clicked => {
+            if (root.enabled) { root.clicked(); }
+        }
+    }
+}
+
+// A bordered card in the inspector
+component InfoCard inherits Rectangle {
+    border-width: 1px;
+    border-color: Theme.border;
+    border-radius: 10px;
+    height: info-layout.preferred-height;
+    info-layout := VerticalLayout {
+        padding: 12px;
+        spacing: 10px;
+        @children
+    }
+}
+
+// A warning in the inspector
+component Alert inherits Rectangle {
+    in property <string> text;
+    border-radius: 10px;
+    background: Theme.warn-tint;
+    height: alert-layout.preferred-height;
+    alert-layout := HorizontalLayout {
+        padding-left: 12px;
+        padding-right: 12px;
+        padding-top: 10px;
+        padding-bottom: 10px;
+        spacing: 10px;
+        Icon {
+            source: Icons.warning;
+            width: 17px;
+            height: 17px;
+            color: Theme.warn-text;
+        }
+        VerticalLayout {
+            horizontal-stretch: 1;
+            spacing: 8px;
+            Text {
+                text: root.text;
+                font-size: 12.5px;
+                color: Theme.warn-text;
+                wrap: word-wrap;
+            }
+            @children
         }
     }
 }
@@ -186,23 +399,14 @@ export component PlanningContent inherits Rectangle {
     out property <float> viewport-width: view-area.width / 1px;
     out property <float> viewport-height: view-area.height / 1px;
 
-    // Section expand state
-    property <bool> bs-expanded: true;
-    property <bool> anchors-expanded: true;
-    property <bool> obs-expanded: true;
-    property <bool> flight-area-expanded: true;
-    property <bool> waypoint-area-expanded: true;
-    property <bool> pads-expanded: false;
-    property <bool> traj-expanded: false;
-
-    // Camera state
-    in-out property <float> cam-yaw: 0.8;
-    in-out property <float> cam-pitch: 0.6;
+    // Camera
+    in-out property <float> cam-yaw: -2.05;
+    in-out property <float> cam-pitch: 0.58;
     in-out property <float> cam-distance: 12.0;
     in-out property <float> cam-pan-x: 0;
     in-out property <float> cam-pan-y: 0;
 
-    // Room parameters
+    // Room
     in-out property <string> room-x: "8.0";
     in-out property <string> room-y: "8.0";
     in-out property <string> room-z: "3.0";
@@ -212,77 +416,109 @@ export component PlanningContent inherits Rectangle {
     in-out property <string> room-offset-y: "0.0";
     in-out property <string> room-offset-z: "0.0";
 
-    // Base station list
+    // The scene's objects
     in-out property <[LhBaseStationData]> base-stations;
-    // Anchor list
     in-out property <[Tdoa3AnchorData]> anchors;
-    // Obstacle list
     in-out property <[PlanObstacleData]> obstacles;
+    in-out property <[PlanBoxVolumeData]> flight-areas;
+    in-out property <[PlanBoxVolumeData]> waypoint-areas;
+    in-out property <[PlanPadData]> takeoff-pads;
 
-    // LH coverage settings
+    // The scene file
+    in-out property <string> scene-name;
+    in-out property <bool> scene-dirty;
+    in-out property <int> undo-count;
+
+    // Lighthouse coverage model and results
     in-out property <bool> receiver-fov-enabled: true;
     in-out property <string> max-bs-distance: "5.0";
+    in-out property <bool> tilt-compensation-enabled: true;
+    in-out property <string> max-tilt-angle: "10";
+    in-out property <PlanCoverage> coverage;
+    in-out property <bool> coverage-stale;
+    // Which counts the slice shows: 0, 1, 2, 3, 4 or more base stations
     in-out property <bool> show-coverage-0: true;
     in-out property <bool> show-coverage-1: true;
     in-out property <bool> show-coverage-2: true;
     in-out property <bool> show-coverage-3: true;
     in-out property <bool> show-coverage-4: true;
+    // The slice of the coverage drawn in the view, and its height
+    in-out property <bool> show-slice: true;
+    in-out property <float> slice-z: 1.0;
+    // Coverage of 0 Lighthouse or 1 Loco (TDoA3)
+    in-out property <int> coverage-source: 0;
 
-    // Flight areas (geofence) and waypoint areas (random-waypoint volumes)
-    in-out property <[PlanBoxVolumeData]> flight-areas;
-    in-out property <[PlanBoxVolumeData]> waypoint-areas;
-
-    // Takeoff pads (read-only display)
-    in-out property <[PlanPadData]> takeoff-pads;
-
-    // TDoA3 settings
+    // TDoA3
     in-out property <string> max-range: "15.0";
     in-out property <float> tdoa3-scale-min: 0.0;
     in-out property <float> tdoa3-scale-max: 5.0;
     in-out property <float> tdoa3-scale-limit: 10.0;
     in-out property <string> measurement-noise: "0.15";
     in-out property <bool> show-tdoa3-voxels: true;
-    in-out property <bool> computing: false;
     in-out property <[string]> error-metric-names: ["GDOP", "HDOP", "VDOP", "XDOP", "YDOP", "Anchor Pairs", "Pair Sensitivity", "X Error (m)", "Y Error (m)", "Z Error (m)", "XY Error (m)", "Global Error (m)", "X Sensitivity", "Y Sensitivity", "Z Sensitivity", "Min XYZ Sensitivity", "Min XY Sensitivity"];
     in-out property <int> error-metric-index: 0;
     callback error-metric-changed(int);
-    // Pair sensitivity selector + convex hull toggle (ported from TDoA3 Coverage)
     in-out property <string> pair-a: "0";
     in-out property <string> pair-b: "1";
     in-out property <bool> show-outside-hull: true;
-    // LH tilt compensation + trajectory overlay (ported from LH Coverage)
-    in-out property <bool> tilt-compensation-enabled: true;
-    in-out property <string> max-tilt-angle: "10";
+    in property <string> stats-text-1: "";
+    in property <string> stats-text-2: "";
+    in property <string> stats-text-3: "";
+
+    // Trajectories loaded from CSV, drawn in the room
     in-out property <bool> show-trajectories: true;
-    in-out property <string> trajectories-status: "";
+    in property <string> trajectories-status: "";
     in-out property <string> traj-offset-x: "0.0";
     in-out property <string> traj-offset-y: "0.0";
     in-out property <string> traj-offset-z: "0.0";
-    callback load-geometry();
-    callback load-trajectories();
 
-    // Stats
-    in-out property <string> stats-text-1: "";
-    in-out property <string> stats-text-2: "";
-    in-out property <string> stats-text-3: "";
+    in property <bool> computing: false;
 
-    // Grid labels
+    // Labels over the view
     in-out property <[VizLabel]> grid-labels;
+    in property <[UnitLabel]> marks;
 
-    // Selection / gizmo state
-    in-out property <int> selected-type: 0;   // 0=none, 1=BS, 2=anchor, 3=obstacle
+    // Selection. Base stations, anchors and obstacles in selected-type
+    // (1, 2, 3) and selected-index; areas in selected-area-kind (1 flight,
+    // 2 waypoint) and selected-area-index, both set by Rust; the room and
+    // pads only here.
+    in-out property <int> selected-type: 0;
     in-out property <int> selected-index: -1;
-    in-out property <bool> handle-active: false;
-    in-out property <int> active-handle: 0;
-    // Area selected for handle editing: 0=none, 1=flight, 2=waypoint
     in-out property <int> selected-area-kind: 0;
     in-out property <int> selected-area-index: -1;
+    in-out property <bool> handle-active: false;
+    in-out property <int> active-handle: 0;
+    property <PlanKind> other-kind: PlanKind.none;
+    property <int> other-index: -1;
+    property <PlanKind> sel-kind: root.selected-type == 1 && root.selected-index >= 0 ? PlanKind.base-station
+        : root.selected-type == 2 && root.selected-index >= 0 ? PlanKind.anchor
+        : root.selected-type == 3 && root.selected-index >= 0 ? PlanKind.obstacle
+        : root.selected-area-kind == 1 && root.selected-area-index >= 0 ? PlanKind.flight-area
+        : root.selected-area-kind == 2 && root.selected-area-index >= 0 ? PlanKind.waypoint-area
+        : root.other-kind;
+    property <int> sel-index: root.selected-type > 0 ? root.selected-index
+        : root.selected-area-kind > 0 ? root.selected-area-index : root.other-index;
+    // Another scene: the whole room in view
+    changed scene-name => { root.view-from(root.view-preset < 0 ? 0 : root.view-preset); }
+    init => { root.fit(); }
+    // A click in the view picked something: show it
+    changed selected-type => {
+        if (root.selected-type > 0) {
+            root.other-kind = PlanKind.none;
+            root.tab = 0;
+        }
+    }
 
-    // Callbacks
+    // Scene file
     callback save-scene();
+    callback save-scene-as();
     callback load-scene();
     callback load-lh-scene();
     callback load-tdoa3-scene();
+    callback load-geometry();
+    callback load-trajectories();
+    // Objects
+    callback select(/* 0 none, 1 base station, 2 anchor, 3 obstacle, 4 flight area, 5 waypoint area */ int, int);
     callback add-base-station();
     callback remove-base-station(int);
     callback duplicate-base-station(int);
@@ -306,824 +542,320 @@ export component PlanningContent inherits Rectangle {
     callback select-waypoint-area(int);
     callback undo();
     callback recompute();
+    // The view
     callback view-mouse-pressed(/* x */ float, /* y */ float);
     callback view-mouse-moved(/* x */ float, /* y */ float);
     callback view-mouse-released();
     callback view-pan(/* dx_px */ float, /* dy_px */ float);
 
+    // The room's extent, for "outside the room"
+    property <float> room-w: root.room-x.to-float();
+    property <float> room-d: root.room-y.to-float();
+    property <float> room-h: root.room-z.to-float();
+    property <float> room-x0: (root.center-origin ? -root.room-w / 2 : 0) + root.room-offset-x.to-float();
+    property <float> room-y0: (root.center-origin ? -root.room-d / 2 : 0) + root.room-offset-y.to-float();
+    property <float> room-z0: root.room-offset-z.to-float();
+    pure function inside(x: float, y: float, z: float) -> bool {
+        return root.within(x, y, z, 0.001);
+    }
+    // Base stations and anchors hang on the walls and the ceiling: a little
+    // outside is still in the room
+    pure function on-walls(x: float, y: float, z: float) -> bool {
+        return root.within(x, y, z, 0.3);
+    }
+    pure function within(x: float, y: float, z: float, margin: float) -> bool {
+        return x >= root.room-x0 - margin && x <= root.room-x0 + root.room-w + margin
+            && y >= root.room-y0 - margin && y <= root.room-y0 + root.room-d + margin
+            && z >= root.room-z0 - margin && z <= root.room-z0 + root.room-h + margin;
+    }
+    pure function size-text(a: PlanBoxVolumeData) -> string {
+        return (a.max-x.to-float() - a.min-x.to-float()).to-fixed(2) + " × "
+            + (a.max-y.to-float() - a.min-y.to-float()).to-fixed(2) + " × "
+            + (a.max-z.to-float() - a.min-z.to-float()).to-fixed(2);
+    }
+
+    // The inspector tab: 0 the selection, 1 the coverage
+    property <int> tab: 0;
+    function pick(kind: PlanKind, index: int) {
+        if (kind == PlanKind.base-station) { root.select(1, index); }
+        else if (kind == PlanKind.anchor) { root.select(2, index); }
+        else if (kind == PlanKind.obstacle) { root.select(3, index); }
+        else if (kind == PlanKind.flight-area) { root.select(4, index); }
+        else if (kind == PlanKind.waypoint-area) { root.select(5, index); }
+        else { root.select(0, -1); }
+        root.other-kind = kind == PlanKind.room || kind == PlanKind.pad || kind == PlanKind.trajectory ? kind : PlanKind.none;
+        root.other-index = index;
+        root.tab = 0;
+    }
+
+    // Perspective, Top, Front, Side: the angle, then Fit
+    property <int> view-preset: 0;
+    function view-from(preset: int) {
+        root.view-preset = preset;
+        if (preset == 0) { root.cam-yaw = -2.05; root.cam-pitch = 0.58; }
+        if (preset == 1) { root.cam-yaw = -1.5708; root.cam-pitch = 1.55; }
+        if (preset == 2) { root.cam-yaw = -1.5708; root.cam-pitch = 0.1; }
+        if (preset == 3) { root.cam-yaw = 0; root.cam-pitch = 0.1; }
+        root.fit();
+    }
+    // The whole room in view, from the angle the camera has
+    function fit() {
+        root.cam-pan-x = root.room-x0 + root.room-w / 2;
+        root.cam-pan-y = root.room-y0 + root.room-d / 2;
+        root.cam-distance = clamp(Math.sqrt(root.room-w * root.room-w + root.room-d * root.room-d + root.room-h * root.room-h) / 2
+            / Math.sin(22.5deg) * 1.1, 2.5, 100);
+    }
+
+    property <[color]> level-colors: Theme.coverage;
+    property <[string]> level-names: ["No base station", "1 base station", "2 base stations", "3 base stations", "4 or more"];
+
+    // Room for the coverage slice
+    property <bool> slice-shown: root.show-slice && root.coverage.computed;
+
+    background: Theme.ground;
+
     HorizontalLayout {
-        spacing: 0px;
-
-        // Left panel: configuration
+        // ---- The scene's objects ----
         Rectangle {
-            width: 320px;
-            border-width: 0px;
-            background: Palette.alternate-background;
-
+            width: 280px;
+            background: Theme.surface;
+            Rectangle {
+                x: parent.width - 1px;
+                width: 1px;
+                background: Theme.border;
+            }
             VerticalLayout {
-                padding: 12px;
-                spacing: 10px;
-
-                HorizontalLayout {
-                    spacing: 4px;
-                    Text {
-                        text: "Planning";
-                        font-size: 16px;
-                        font-weight: 600;
-                        vertical-alignment: center;
+                // The scene file
+                VerticalLayout {
+                    padding-left: 14px;
+                    padding-right: 14px;
+                    padding-top: 14px;
+                    padding-bottom: 12px;
+                    spacing: 10px;
+                    VerticalLayout {
+                        Text { text: "Scene"; font-size: Theme.font-small; color: Theme.text3; }
+                        Text {
+                            text: root.scene-name == "" ? "Untitled scene" : root.scene-name;
+                            font-size: 13.5px;
+                            font-weight: 600;
+                            color: Theme.text;
+                            overflow: elide;
+                        }
                     }
-                    Rectangle { horizontal-stretch: 1; }
-                    Button {
-                        text: "Save";
-                        clicked => { root.save-scene(); }
+                    HorizontalLayout {
+                        spacing: 8px;
+                        if root.scene-dirty: Rectangle {
+                            y: (parent.height - self.height) / 2;
+                            width: 7px;
+                            height: 7px;
+                            border-radius: 3.5px;
+                            background: Theme.warn;
+                        }
+                        Text {
+                            horizontal-stretch: 1;
+                            text: root.scene-dirty ? "Unsaved changes" : "All changes saved";
+                            font-size: Theme.font-small;
+                            color: Theme.text3;
+                            vertical-alignment: center;
+                        }
+                        KButton {
+                            small: true;
+                            text: "Save";
+                            enabled: root.scene-dirty || root.scene-name == "";
+                            clicked => { root.save-scene(); }
+                        }
+                        IconButton {
+                            icon: Icons.more;
+                            size: 30px;
+                            icon-size: 16px;
+                            clicked => { scene-menu.show(); }
+                        }
                     }
-                    Button {
-                        text: "Open";
-                        clicked => { root.load-scene(); }
-                    }
                 }
-
-                HorizontalLayout {
-                    spacing: 4px;
-                    Text {
-                        text: "Import:";
-                        font-size: 11px;
-                        vertical-alignment: center;
-                        color: Palette.foreground.transparentize(0.4);
-                    }
-                    Rectangle { horizontal-stretch: 1; }
-                    Button {
-                        text: "LH Scene";
-                        clicked => { root.load-lh-scene(); }
-                    }
-                    Button {
-                        text: "TDoA3 Scene";
-                        clicked => { root.load-tdoa3-scene(); }
-                    }
-                }
-
-                // Room dimensions
-                Text {
-                    text: "Room (m)";
-                    font-size: 12px;
-                    font-weight: 600;
-                    color: Palette.foreground.transparentize(0.3);
-                }
-
-                HorizontalLayout {
-                    spacing: 4px;
-                    Text { text: "X:"; font-size: 12px; vertical-alignment: center; width: 16px; }
-                    LineEdit { text <=> root.room-x; width: 110px; }
-                    Text { text: "Y:"; font-size: 12px; vertical-alignment: center; width: 16px; }
-                    LineEdit { text <=> root.room-y; width: 110px; }
-                }
-
-                HorizontalLayout {
-                    spacing: 4px;
-                    Text { text: "Z:"; font-size: 12px; vertical-alignment: center; width: 16px; }
-                    LineEdit { text <=> root.room-z; width: 110px; }
-                    Text { text: "Res:"; font-size: 12px; vertical-alignment: center; width: 28px; }
-                    LineEdit { text <=> root.resolution; width: 110px; }
-                }
-
-                CheckBox {
-                    text: "Center room at origin";
-                    checked <=> root.center-origin;
-                }
-
-                HorizontalLayout {
-                    spacing: 4px;
-                    Text { text: "Offset:"; font-size: 12px; vertical-alignment: center; }
-                    Text { text: "X"; font-size: 11px; vertical-alignment: center; }
-                    LineEdit { text <=> root.room-offset-x; width: 55px; }
-                    Text { text: "Y"; font-size: 11px; vertical-alignment: center; }
-                    LineEdit { text <=> root.room-offset-y; width: 55px; }
-                    Text { text: "Z"; font-size: 11px; vertical-alignment: center; }
-                    LineEdit { text <=> root.room-offset-z; width: 55px; }
-                }
-
-                Rectangle { height: 1px; background: Palette.border; }
+                Rectangle { height: 1px; background: Theme.border; }
 
                 ScrollView {
                     vertical-stretch: 1;
-
                     VerticalLayout {
-                        width: 296px;
-                        spacing: 8px;
+                        padding: 8px;
+                        alignment: start;
+                        TreeItem {
+                            kind: PlanKind.room;
+                            indent: 8px;
+                            text: "Room";
+                            sub: root.room-w.to-fixed(1) + " × " + root.room-d.to-fixed(1) + " × " + root.room-h.to-fixed(1) + " m";
+                            on: root.sel-kind == PlanKind.room;
+                            clicked => { root.pick(PlanKind.room, 0); }
+                        }
 
-                        // --- Base Stations ---
-                        HorizontalLayout {
-                            SectionHeader {
-                                title: "Base Stations";
-                                count: root.base-stations.length;
-                                expanded <=> bs-expanded;
-                                horizontal-stretch: 1;
+                        bs-head := GroupHeader {
+                            title: "Base stations";
+                            count: root.base-stations.length;
+                            addable: true;
+                            add => {
+                                root.add-base-station();
+                                root.pick(PlanKind.base-station, root.base-stations.length - 1);
                             }
-                            Button {
-                                text: "Load";
-                                clicked => { root.load-geometry(); }
-                            }
-                            Button {
-                                text: "Add";
-                                clicked => { root.add-base-station(); }
+                        }
+                        if bs-head.open && root.base-stations.length == 0: HorizontalLayout { padding-left: 26px; padding-bottom: 6px; Note { text: "None yet"; } }
+                        if bs-head.open: VerticalLayout {
+                            for bs[i] in root.base-stations: TreeItem {
+                                kind: PlanKind.base-station;
+                                text: "BS " + (i + 1);
+                                sub: bs.x + ", " + bs.y + ", " + bs.z;
+                                warn: !root.on-walls(bs.x.to-float(), bs.y.to-float(), bs.z.to-float());
+                                on: root.sel-kind == PlanKind.base-station && root.sel-index == i;
+                                clicked => { root.pick(PlanKind.base-station, i); }
                             }
                         }
 
-                        if bs-expanded: VerticalLayout {
-                            spacing: 8px;
-
-                            for bs[idx] in root.base-stations: Rectangle {
-                                border-radius: 4px;
-                                background: root.selected-type == 1 && root.selected-index == idx
-                                    ? Palette.accent-background
-                                    : Palette.background;
-                                border-width: 1px;
-                                border-color: Palette.border;
-
-                                VerticalLayout {
-                                    padding: 8px;
-                                    spacing: 4px;
-
-                                    HorizontalLayout {
-                                        Text {
-                                            text: "BS \{idx + 1}";
-                                            font-size: 12px;
-                                            font-weight: 600;
-                                            vertical-alignment: center;
-                                        }
-                                        Rectangle { horizontal-stretch: 1; }
-                                        Button {
-                                            text: "Dup";
-                                            clicked => { root.duplicate-base-station(idx); }
-                                        }
-                                        Button {
-                                            text: "Remove";
-                                            clicked => { root.remove-base-station(idx); }
-                                        }
-                                    }
-
-                                    HorizontalLayout {
-                                        spacing: 2px;
-                                        Text { text: "X"; font-size: 11px; vertical-alignment: center; width: 14px; }
-                                        bs-x := NumericInput {
-                                            text: bs.x;
-                                            width: 75px;
-                                            edited(val) => {
-                                                root.update-base-station(idx, {
-                                                    x: val, y: bs-y.text, z: bs-z.text,
-                                                    azimuth: bs-az.text, elevation: bs-el.text,
-                                                });
-                                            }
-                                        }
-                                        Text { text: "Y"; font-size: 11px; vertical-alignment: center; width: 14px; }
-                                        bs-y := NumericInput {
-                                            text: bs.y;
-                                            width: 75px;
-                                            edited(val) => {
-                                                root.update-base-station(idx, {
-                                                    x: bs-x.text, y: val, z: bs-z.text,
-                                                    azimuth: bs-az.text, elevation: bs-el.text,
-                                                });
-                                            }
-                                        }
-                                        Text { text: "Z"; font-size: 11px; vertical-alignment: center; width: 14px; }
-                                        bs-z := NumericInput {
-                                            text: bs.z;
-                                            width: 75px;
-                                            edited(val) => {
-                                                root.update-base-station(idx, {
-                                                    x: bs-x.text, y: bs-y.text, z: val,
-                                                    azimuth: bs-az.text, elevation: bs-el.text,
-                                                });
-                                            }
-                                        }
-                                    }
-
-                                    HorizontalLayout {
-                                        spacing: 2px;
-                                        Text { text: "Az"; font-size: 11px; vertical-alignment: center; width: 18px; }
-                                        bs-az := NumericInput {
-                                            text: bs.azimuth;
-                                            width: 85px;
-                                            edited(val) => {
-                                                root.update-base-station(idx, {
-                                                    x: bs-x.text, y: bs-y.text, z: bs-z.text,
-                                                    azimuth: val, elevation: bs-el.text,
-                                                });
-                                            }
-                                        }
-                                        Text { text: "El"; font-size: 11px; vertical-alignment: center; width: 18px; }
-                                        bs-el := NumericInput {
-                                            text: bs.elevation;
-                                            width: 85px;
-                                            edited(val) => {
-                                                root.update-base-station(idx, {
-                                                    x: bs-x.text, y: bs-y.text, z: bs-z.text,
-                                                    azimuth: bs-az.text, elevation: val,
-                                                });
-                                            }
-                                        }
-                                        Text { text: "°"; font-size: 11px; vertical-alignment: center; }
-                                    }
-                                }
+                        anchor-head := GroupHeader {
+                            title: "Loco anchors";
+                            count: root.anchors.length;
+                            addable: true;
+                            add => {
+                                root.add-anchor();
+                                root.pick(PlanKind.anchor, root.anchors.length - 1);
+                            }
+                        }
+                        if anchor-head.open && root.anchors.length == 0: HorizontalLayout { padding-left: 26px; padding-bottom: 6px; Note { text: "None in this scene"; } }
+                        if anchor-head.open: VerticalLayout {
+                            for a[i] in root.anchors: TreeItem {
+                                kind: PlanKind.anchor;
+                                text: "A" + (i + 1);
+                                sub: a.x + ", " + a.y + ", " + a.z;
+                                warn: !root.on-walls(a.x.to-float(), a.y.to-float(), a.z.to-float());
+                                on: root.sel-kind == PlanKind.anchor && root.sel-index == i;
+                                clicked => { root.pick(PlanKind.anchor, i); }
                             }
                         }
 
-                        Rectangle { height: 1px; background: Palette.border; }
-
-                        // --- TDoA3 Anchors ---
-                        HorizontalLayout {
-                            SectionHeader {
-                                title: "TDoA3 Anchors";
-                                count: root.anchors.length;
-                                expanded <=> anchors-expanded;
-                                horizontal-stretch: 1;
+                        obs-head := GroupHeader {
+                            title: "Obstacles";
+                            count: root.obstacles.length;
+                            addable: true;
+                            add => {
+                                root.add-box();
+                                root.pick(PlanKind.obstacle, root.obstacles.length - 1);
                             }
-                            Button {
-                                text: "Add";
-                                clicked => { root.add-anchor(); }
+                        }
+                        if obs-head.open && root.obstacles.length == 0: HorizontalLayout { padding-left: 26px; padding-bottom: 6px; Note { text: "None"; } }
+                        if obs-head.open: VerticalLayout {
+                            for o[i] in root.obstacles: TreeItem {
+                                kind: PlanKind.obstacle;
+                                text: o.kind + " " + (i + 1);
+                                sub: o.kind == "Cylinder"
+                                    ? "⌀" + (o.radius.to-float() * 2).to-fixed(2) + " × " + o.height
+                                    : o.width + " × " + o.depth + " × " + o.height;
+                                warn: !root.inside(o.x.to-float(), o.y.to-float(), root.room-z0);
+                                on: root.sel-kind == PlanKind.obstacle && root.sel-index == i;
+                                clicked => { root.pick(PlanKind.obstacle, i); }
                             }
                         }
 
-                        if anchors-expanded: VerticalLayout {
-                            spacing: 8px;
-
-                            for anchor[idx] in root.anchors: Rectangle {
-                                border-radius: 4px;
-                                background: root.selected-type == 2 && root.selected-index == idx
-                                    ? Palette.accent-background
-                                    : Palette.background;
-                                border-width: 1px;
-                                border-color: Palette.border;
-
-                                HorizontalLayout {
-                                    padding: 8px;
-                                    spacing: 2px;
-
-                                    Text {
-                                        text: "A\{idx + 1}";
-                                        font-size: 12px;
-                                        font-weight: 600;
-                                        vertical-alignment: center;
-                                        width: 30px;
-                                    }
-                                    Text { text: "X"; font-size: 11px; vertical-alignment: center; width: 14px; }
-                                    a-x := NumericInput {
-                                        text: anchor.x;
-                                        width: 55px;
-                                        edited(val) => {
-                                            root.update-anchor(idx, {
-                                                x: val, y: a-y.text, z: a-z.text,
-                                            });
-                                        }
-                                    }
-                                    Text { text: "Y"; font-size: 11px; vertical-alignment: center; width: 14px; }
-                                    a-y := NumericInput {
-                                        text: anchor.y;
-                                        width: 55px;
-                                        edited(val) => {
-                                            root.update-anchor(idx, {
-                                                x: a-x.text, y: val, z: a-z.text,
-                                            });
-                                        }
-                                    }
-                                    Text { text: "Z"; font-size: 11px; vertical-alignment: center; width: 14px; }
-                                    a-z := NumericInput {
-                                        text: anchor.z;
-                                        width: 55px;
-                                        edited(val) => {
-                                            root.update-anchor(idx, {
-                                                x: a-x.text, y: a-y.text, z: val,
-                                            });
-                                        }
-                                    }
-                                    Button {
-                                        text: "D";
-                                        width: 24px;
-                                        clicked => { root.duplicate-anchor(idx); }
-                                    }
-                                    Button {
-                                        text: "X";
-                                        width: 24px;
-                                        clicked => { root.remove-anchor(idx); }
-                                    }
-                                }
+                        flight-head := GroupHeader {
+                            title: "Flight areas";
+                            count: root.flight-areas.length;
+                            addable: true;
+                            add => {
+                                root.add-flight-area();
+                                root.pick(PlanKind.flight-area, root.flight-areas.length - 1);
+                            }
+                        }
+                        if flight-head.open && root.flight-areas.length == 0: HorizontalLayout { padding-left: 26px; padding-bottom: 6px; Note { text: "None: units are not fenced"; } }
+                        if flight-head.open: VerticalLayout {
+                            for a[i] in root.flight-areas: TreeItem {
+                                kind: PlanKind.flight-area;
+                                text: "Flight area " + (i + 1);
+                                sub: root.size-text(a);
+                                warn: !root.inside(a.min-x.to-float(), a.min-y.to-float(), root.room-z0)
+                                    || !root.inside(a.max-x.to-float(), a.max-y.to-float(), root.room-z0);
+                                on: root.sel-kind == PlanKind.flight-area && root.sel-index == i;
+                                clicked => { root.pick(PlanKind.flight-area, i); }
                             }
                         }
 
-                        Rectangle { height: 1px; background: Palette.border; }
-
-                        // --- Obstacles ---
-                        HorizontalLayout {
-                            SectionHeader {
-                                title: "Obstacles";
-                                count: root.obstacles.length;
-                                expanded <=> obs-expanded;
-                                horizontal-stretch: 1;
+                        wp-head := GroupHeader {
+                            title: "Waypoint areas";
+                            count: root.waypoint-areas.length;
+                            addable: true;
+                            add => {
+                                root.add-waypoint-area();
+                                root.pick(PlanKind.waypoint-area, root.waypoint-areas.length - 1);
                             }
-                            Button {
-                                text: "Box";
-                                clicked => { root.add-box(); }
-                            }
-                            Button {
-                                text: "Cyl";
-                                clicked => { root.add-cylinder(); }
+                        }
+                        if wp-head.open && root.waypoint-areas.length == 0: HorizontalLayout { padding-left: 26px; padding-bottom: 6px; Note { text: "None"; } }
+                        if wp-head.open: VerticalLayout {
+                            for a[i] in root.waypoint-areas: TreeItem {
+                                kind: PlanKind.waypoint-area;
+                                text: "Waypoint area " + (i + 1);
+                                sub: root.size-text(a);
+                                on: root.sel-kind == PlanKind.waypoint-area && root.sel-index == i;
+                                clicked => { root.pick(PlanKind.waypoint-area, i); }
                             }
                         }
 
-                        if obs-expanded: VerticalLayout {
-                            spacing: 8px;
-
-                            for obs[idx] in root.obstacles: obs-row := Rectangle {
-                                // Local mirror of the on-floor flag: the obstacle
-                                // model isn't refreshed on every edit, so sibling
-                                // field handlers must read this instead of the
-                                // (stale) obs.on-floor to avoid clobbering it.
-                                property <bool> on-floor-state: obs.on-floor;
-                                border-radius: 4px;
-                                background: root.selected-type == 3 && root.selected-index == idx
-                                    ? Palette.accent-background
-                                    : Palette.background;
-                                border-width: 1px;
-                                border-color: Palette.border;
-
-                                VerticalLayout {
-                                    padding: 8px;
-                                    spacing: 4px;
-
-                                    HorizontalLayout {
-                                        Text {
-                                            text: obs.kind + " \{idx + 1}";
-                                            font-size: 12px;
-                                            font-weight: 600;
-                                            vertical-alignment: center;
-                                        }
-                                        Rectangle { horizontal-stretch: 1; }
-                                        CheckBox {
-                                            text: "Floor";
-                                            checked: obs-row.on-floor-state;
-                                            toggled => {
-                                                obs-row.on-floor-state = self.checked;
-                                                root.update-obstacle(idx, {
-                                                    kind: obs.kind,
-                                                    x: obs-x.text, y: obs-y.text, z: obs-z.text,
-                                                    yaw: obs-yaw.text,
-                                                    width: obs-w.text, depth: obs-d.text, height: obs-h.text,
-                                                    radius: obs-r.text,
-                                                    color-r: obs.color-r, color-g: obs.color-g, color-b: obs.color-b,
-                                                    on-floor: self.checked,
-                                                });
-                                            }
-                                        }
-                                        Button {
-                                            text: "Dup";
-                                            clicked => { root.duplicate-obstacle(idx); }
-                                        }
-                                        Button {
-                                            text: "Remove";
-                                            clicked => { root.remove-obstacle(idx); }
-                                        }
-                                    }
-
-                                    HorizontalLayout {
-                                        spacing: 2px;
-                                        Text { text: "X"; font-size: 11px; vertical-alignment: center; width: 14px; }
-                                        obs-x := NumericInput {
-                                            text: obs.x;
-                                            width: 55px;
-                                            edited(val) => {
-                                                root.update-obstacle(idx, {
-                                                    kind: obs.kind,
-                                                    x: val, y: obs-y.text, z: obs-z.text,
-                                                    yaw: obs-yaw.text,
-                                                    width: obs-w.text, depth: obs-d.text, height: obs-h.text,
-                                                    radius: obs-r.text,
-                                                    color-r: obs.color-r, color-g: obs.color-g, color-b: obs.color-b,
-                                                    on-floor: obs-row.on-floor-state,
-                                                });
-                                            }
-                                        }
-                                        Text { text: "Y"; font-size: 11px; vertical-alignment: center; width: 14px; }
-                                        obs-y := NumericInput {
-                                            text: obs.y;
-                                            width: 55px;
-                                            edited(val) => {
-                                                root.update-obstacle(idx, {
-                                                    kind: obs.kind,
-                                                    x: obs-x.text, y: val, z: obs-z.text,
-                                                    yaw: obs-yaw.text,
-                                                    width: obs-w.text, depth: obs-d.text, height: obs-h.text,
-                                                    radius: obs-r.text,
-                                                    color-r: obs.color-r, color-g: obs.color-g, color-b: obs.color-b,
-                                                    on-floor: obs-row.on-floor-state,
-                                                });
-                                            }
-                                        }
-                                        Text { text: "Z"; font-size: 11px; vertical-alignment: center; width: 14px; }
-                                        obs-z := NumericInput {
-                                            text: obs.z;
-                                            width: 55px;
-                                            edited(val) => {
-                                                root.update-obstacle(idx, {
-                                                    kind: obs.kind,
-                                                    x: obs-x.text, y: obs-y.text, z: val,
-                                                    yaw: obs-yaw.text,
-                                                    width: obs-w.text, depth: obs-d.text, height: obs-h.text,
-                                                    radius: obs-r.text,
-                                                    color-r: obs.color-r, color-g: obs.color-g, color-b: obs.color-b,
-                                                    on-floor: obs-row.on-floor-state,
-                                                });
-                                            }
-                                        }
-                                        Text { text: "Yaw"; font-size: 11px; vertical-alignment: center; width: 24px; }
-                                        obs-yaw := NumericInput {
-                                            text: obs.yaw;
-                                            width: 45px;
-                                            edited(val) => {
-                                                root.update-obstacle(idx, {
-                                                    kind: obs.kind,
-                                                    x: obs-x.text, y: obs-y.text, z: obs-z.text,
-                                                    yaw: val,
-                                                    width: obs-w.text, depth: obs-d.text, height: obs-h.text,
-                                                    radius: obs-r.text,
-                                                    color-r: obs.color-r, color-g: obs.color-g, color-b: obs.color-b,
-                                                    on-floor: obs-row.on-floor-state,
-                                                });
-                                            }
-                                        }
-                                    }
-
-                                    HorizontalLayout {
-                                        spacing: 2px;
-                                        Text { text: "W"; font-size: 11px; vertical-alignment: center; width: 14px; }
-                                        obs-w := NumericInput {
-                                            text: obs.width;
-                                            width: 48px;
-                                            edited(val) => {
-                                                root.update-obstacle(idx, {
-                                                    kind: obs.kind,
-                                                    x: obs-x.text, y: obs-y.text, z: obs-z.text,
-                                                    yaw: obs-yaw.text,
-                                                    width: val, depth: obs-d.text, height: obs-h.text,
-                                                    radius: obs-r.text,
-                                                    color-r: obs.color-r, color-g: obs.color-g, color-b: obs.color-b,
-                                                    on-floor: obs-row.on-floor-state,
-                                                });
-                                            }
-                                        }
-                                        Text { text: "D"; font-size: 11px; vertical-alignment: center; width: 14px; }
-                                        obs-d := NumericInput {
-                                            text: obs.depth;
-                                            width: 48px;
-                                            edited(val) => {
-                                                root.update-obstacle(idx, {
-                                                    kind: obs.kind,
-                                                    x: obs-x.text, y: obs-y.text, z: obs-z.text,
-                                                    yaw: obs-yaw.text,
-                                                    width: obs-w.text, depth: val, height: obs-h.text,
-                                                    radius: obs-r.text,
-                                                    color-r: obs.color-r, color-g: obs.color-g, color-b: obs.color-b,
-                                                    on-floor: obs-row.on-floor-state,
-                                                });
-                                            }
-                                        }
-                                        Text { text: "H"; font-size: 11px; vertical-alignment: center; width: 14px; }
-                                        obs-h := NumericInput {
-                                            text: obs.height;
-                                            width: 48px;
-                                            edited(val) => {
-                                                root.update-obstacle(idx, {
-                                                    kind: obs.kind,
-                                                    x: obs-x.text, y: obs-y.text, z: obs-z.text,
-                                                    yaw: obs-yaw.text,
-                                                    width: obs-w.text, depth: obs-d.text, height: val,
-                                                    radius: obs-r.text,
-                                                    color-r: obs.color-r, color-g: obs.color-g, color-b: obs.color-b,
-                                                    on-floor: obs-row.on-floor-state,
-                                                });
-                                            }
-                                        }
-                                        Text { text: "R"; font-size: 11px; vertical-alignment: center; width: 14px; }
-                                        obs-r := NumericInput {
-                                            text: obs.radius;
-                                            width: 48px;
-                                            edited(val) => {
-                                                root.update-obstacle(idx, {
-                                                    kind: obs.kind,
-                                                    x: obs-x.text, y: obs-y.text, z: obs-z.text,
-                                                    yaw: obs-yaw.text,
-                                                    width: obs-w.text, depth: obs-d.text, height: obs-h.text,
-                                                    radius: val,
-                                                    color-r: obs.color-r, color-g: obs.color-g, color-b: obs.color-b,
-                                                    on-floor: obs-row.on-floor-state,
-                                                });
-                                            }
-                                        }
-                                    }
-
-                                    ColorPicker {
-                                        picked-r: obs.color-r;
-                                        picked-g: obs.color-g;
-                                        picked-b: obs.color-b;
-                                        changed(r, g, b) => {
-                                            root.update-obstacle(idx, {
-                                                kind: obs.kind,
-                                                x: obs-x.text, y: obs-y.text, z: obs-z.text,
-                                                yaw: obs-yaw.text,
-                                                width: obs-w.text, depth: obs-d.text, height: obs-h.text,
-                                                radius: obs-r.text,
-                                                color-r: r, color-g: g, color-b: b,
-                                                on-floor: obs-row.on-floor-state,
-                                            });
-                                        }
-                                    }
-                                }
+                        pad-head := GroupHeader {
+                            title: "Takeoff pads";
+                            count: root.takeoff-pads.length;
+                            open: false;
+                        }
+                        if pad-head.open && root.takeoff-pads.length == 0: HorizontalLayout { padding-left: 26px; padding-bottom: 6px; Note { text: "Save pad positions in the 3D view"; } }
+                        if pad-head.open: VerticalLayout {
+                            for pad[i] in root.takeoff-pads: TreeItem {
+                                kind: PlanKind.pad;
+                                text: pad.label == "" ? "Pad " + (i + 1) : pad.label;
+                                sub: pad.x + ", " + pad.y;
+                                on: root.sel-kind == PlanKind.pad && root.sel-index == i;
+                                clicked => { root.pick(PlanKind.pad, i); }
                             }
                         }
 
-                        Rectangle { height: 1px; background: Palette.border; }
-
-                        // --- Flight Areas (geofence) ---
-                        HorizontalLayout {
-                            SectionHeader {
-                                title: "Flight Areas";
-                                count: root.flight-areas.length;
-                                expanded <=> flight-area-expanded;
-                                horizontal-stretch: 1;
-                            }
-                            Button {
-                                text: "Add";
-                                clicked => { root.add-flight-area(); }
-                            }
+                        traj-head := GroupHeader {
+                            title: "Trajectories";
+                            count: root.trajectories-status == "" ? 0 : 1;
+                            addable: true;
+                            add-label: "Load trajectories (CSV)";
+                            add => { root.load-trajectories(); }
                         }
-
-                        if flight-area-expanded: VerticalLayout {
-                            spacing: 8px;
-                            for area[idx] in root.flight-areas: BoxVolumeRow {
-                                data: area;
-                                index: idx;
-                                title-prefix: "Flight";
-                                selected: root.selected-area-kind == 1 && root.selected-area-index == idx;
-                                edited(val) => { root.update-flight-area(idx, val); }
-                                removed() => { root.remove-flight-area(idx); }
-                                select-clicked() => { root.select-flight-area(idx); }
-                            }
+                        if traj-head.open && root.trajectories-status == "": HorizontalLayout {
+                            padding-left: 26px;
+                            Note { text: "No CSV loaded"; }
                         }
-
-                        Rectangle { height: 1px; background: Palette.border; }
-
-                        // --- Waypoint Areas (random-waypoint volumes) ---
-                        HorizontalLayout {
-                            SectionHeader {
-                                title: "Waypoint Areas";
-                                count: root.waypoint-areas.length;
-                                expanded <=> waypoint-area-expanded;
-                                horizontal-stretch: 1;
-                            }
-                            Button {
-                                text: "Add";
-                                clicked => { root.add-waypoint-area(); }
-                            }
+                        if traj-head.open && root.trajectories-status != "": TreeItem {
+                            kind: PlanKind.trajectory;
+                            text: "From CSV";
+                            sub: root.trajectories-status;
+                            on: root.sel-kind == PlanKind.trajectory;
+                            clicked => { root.pick(PlanKind.trajectory, 0); }
                         }
-
-                        if waypoint-area-expanded: VerticalLayout {
-                            spacing: 8px;
-                            for area[idx] in root.waypoint-areas: BoxVolumeRow {
-                                data: area;
-                                index: idx;
-                                title-prefix: "Waypoint";
-                                selected: root.selected-area-kind == 2 && root.selected-area-index == idx;
-                                edited(val) => { root.update-waypoint-area(idx, val); }
-                                removed() => { root.remove-waypoint-area(idx); }
-                                select-clicked() => { root.select-waypoint-area(idx); }
-                            }
-                        }
-
-                        Rectangle { height: 1px; background: Palette.border; }
-
-                        // --- Takeoff Pads (read-only; captured in Visualization) ---
-                        HorizontalLayout {
-                            SectionHeader {
-                                title: "Takeoff Pads";
-                                count: root.takeoff-pads.length;
-                                expanded <=> pads-expanded;
-                                horizontal-stretch: 1;
-                            }
-                        }
-
-                        if pads-expanded: VerticalLayout {
-                            spacing: 4px;
-                            if root.takeoff-pads.length == 0: Text {
-                                text: "No pads saved. Use \"Save Pad Positions\" in Visualization.";
-                                font-size: 10px;
-                                color: Palette.foreground.transparentize(0.5);
-                                wrap: word-wrap;
-                            }
-                            for pad in root.takeoff-pads: HorizontalLayout {
-                                spacing: 4px;
-                                Text {
-                                    text: pad.label;
-                                    font-size: 10px;
-                                    vertical-alignment: center;
-                                    horizontal-stretch: 1;
-                                }
-                                Text {
-                                    text: "(" + pad.x + ", " + pad.y + ") r=" + pad.radius;
-                                    font-size: 10px;
-                                    color: Palette.foreground.transparentize(0.4);
-                                    vertical-alignment: center;
-                                }
-                            }
-                        }
-
-                        Rectangle { height: 1px; background: Palette.border; }
-
-                        // --- Trajectories (LH overlay) ---
-                        HorizontalLayout {
-                            SectionHeader {
-                                title: "Trajectories";
-                                count: root.trajectories-status != "" ? 1 : 0;
-                                expanded <=> traj-expanded;
-                                horizontal-stretch: 1;
-                            }
-                            Button {
-                                text: "Load CSV";
-                                clicked => { root.load-trajectories(); }
-                            }
-                        }
-
-                        if traj-expanded: VerticalLayout {
-                            spacing: 6px;
-
-                            CheckBox {
-                                text: "Show trajectories";
-                                checked <=> root.show-trajectories;
-                            }
-
-                            HorizontalLayout {
-                                spacing: 4px;
-                                Text { text: "Offset"; font-size: 11px; vertical-alignment: center; width: 36px; }
-                                NumericInput { text <=> root.traj-offset-x; width: 60px; }
-                                NumericInput { text <=> root.traj-offset-y; width: 60px; }
-                                NumericInput { text <=> root.traj-offset-z; width: 60px; }
-                            }
-
-                            if root.trajectories-status != "": Text {
-                                text: root.trajectories-status;
-                                font-size: 10px;
-                                color: Palette.foreground.transparentize(0.4);
-                            }
-                        }
-
-                        Rectangle { height: 1px; background: Palette.border; }
-
-                        // --- Coverage ---
-                        Text {
-                            text: "Coverage";
-                            font-size: 12px;
-                            font-weight: 600;
-                            color: Palette.foreground.transparentize(0.3);
-                        }
-
-                        CheckBox {
-                            text: "Receiver FOV (170°)";
-                            checked <=> root.receiver-fov-enabled;
-                        }
-
-                        HorizontalLayout {
-                            spacing: 4px;
-                            CheckBox {
-                                text: "Max tilt ±";
-                                checked <=> root.tilt-compensation-enabled;
-                            }
-                            LineEdit { text <=> root.max-tilt-angle; width: 60px; }
-                            Text { text: "°"; font-size: 12px; vertical-alignment: center; }
-                        }
-
-                        HorizontalLayout {
-                            spacing: 4px;
-                            Text { text: "Max BS dist:"; font-size: 12px; vertical-alignment: center; }
-                            LineEdit { text <=> root.max-bs-distance; width: 60px; }
-                            Text { text: "m"; font-size: 12px; vertical-alignment: center; }
-                        }
-
-                        HorizontalLayout {
-                            spacing: 4px;
-                            Text { text: "Max range:"; font-size: 12px; vertical-alignment: center; }
-                            LineEdit { text <=> root.max-range; width: 60px; }
-                            Text { text: "m"; font-size: 12px; vertical-alignment: center; }
-                        }
-
-                        Button {
-                            text: "Compute Coverage";
-                            clicked => { root.recompute(); }
-                        }
-
-                        CheckBox { text: "0 BS"; checked <=> root.show-coverage-0; }
-                        CheckBox { text: "1 BS"; checked <=> root.show-coverage-1; }
-                        CheckBox { text: "2 BS"; checked <=> root.show-coverage-2; }
-                        CheckBox {
-                            text: "3+ BS";
-                            checked <=> root.show-coverage-3;
-                            toggled => { root.show-coverage-4 = self.checked; }
-                        }
-
-                        HorizontalLayout {
-                            spacing: 4px;
-                            CheckBox { text: "Show TDoA3"; checked <=> root.show-tdoa3-voxels; }
-                            ComboBox {
-                                model: root.error-metric-names;
-                                current-index <=> root.error-metric-index;
-                                selected(val) => { root.error-metric-changed(self.current-index); }
-                                horizontal-stretch: 1;
-                            }
-                        }
-
-                        if root.error-metric-index == 6: HorizontalLayout {
-                            spacing: 4px;
-                            Text { text: "Anchor A:"; font-size: 11px; vertical-alignment: center; }
-                            NumericInput {
-                                text <=> root.pair-a;
-                                width: 50px;
-                                edited(val) => { root.error-metric-changed(root.error-metric-index); }
-                            }
-                            Text { text: "B:"; font-size: 11px; vertical-alignment: center; }
-                            NumericInput {
-                                text <=> root.pair-b;
-                                width: 50px;
-                                edited(val) => { root.error-metric-changed(root.error-metric-index); }
-                            }
-                        }
-
-                        if root.error-metric-index >= 7 && root.error-metric-index <= 11: HorizontalLayout {
-                            spacing: 4px;
-                            Text { text: "σ TDoA (m):"; font-size: 11px; vertical-alignment: center; }
-                            LineEdit {
-                                text <=> root.measurement-noise;
-                                width: 60px;
-                                edited(val) => { root.error-metric-changed(root.error-metric-index); }
-                            }
-                        }
-
-                        CheckBox {
-                            text: "Show outside convex hull";
-                            checked <=> root.show-outside-hull;
-                            toggled => { root.error-metric-changed(root.error-metric-index); }
-                        }
-
-                        HorizontalLayout {
-                            spacing: 4px;
-                            Text { text: "Scale min:"; font-size: 11px; vertical-alignment: center; width: 60px; }
-                            Slider {
-                                minimum: 0;
-                                maximum: root.tdoa3-scale-limit;
-                                value <=> root.tdoa3-scale-min;
-                                horizontal-stretch: 1;
-                            }
-                            Text {
-                                text: "\{round(root.tdoa3-scale-min * 100) / 100}";
-                                font-size: 11px;
-                                vertical-alignment: center;
-                                width: 40px;
-                            }
-                        }
-
-                        HorizontalLayout {
-                            spacing: 4px;
-                            Text { text: "Scale max:"; font-size: 11px; vertical-alignment: center; width: 60px; }
-                            Slider {
-                                minimum: 0.01;
-                                maximum: root.tdoa3-scale-limit;
-                                value <=> root.tdoa3-scale-max;
-                                horizontal-stretch: 1;
-                            }
-                            Text {
-                                text: "\{round(root.tdoa3-scale-max * 100) / 100}";
-                                font-size: 11px;
-                                vertical-alignment: center;
-                                width: 40px;
-                            }
-                        }
-
-                        if root.stats-text-1 != "": VerticalLayout {
-                            spacing: 2px;
-                            Text { text: root.stats-text-1; font-size: 12px; }
-                            Text { text: root.stats-text-2; font-size: 12px; }
-                            if root.stats-text-3 != "": Text { text: root.stats-text-3; font-size: 12px; }
-                        }
-
-                        Button {
-                            text: "Undo";
-                            clicked => { root.undo(); }
-                        }
+                    }
+                }
+            }
+            scene-menu := PopupWindow {
+                x: 0;
+                y: 70px;
+                width: 252px;
+                MenuPanel {
+                    height: scene-list.preferred-height;
+                    scene-list := VerticalLayout {
+                        padding: 6px;
+                        MenuRow { text: "Open scene…"; icon: Icons.folder; clicked => { root.load-scene(); scene-menu.close(); } }
+                        MenuRow { text: "Save as…"; icon: Icons.download; clicked => { root.save-scene-as(); scene-menu.close(); } }
+                        MenuSeparator { }
+                        MenuRow { text: "Import Lighthouse geometry…"; icon: Icons.lighthouse; clicked => { root.load-geometry(); scene-menu.close(); } }
+                        MenuRow { text: "Import Lighthouse scene…"; clicked => { root.load-lh-scene(); scene-menu.close(); } }
+                        MenuRow { text: "Import TDoA3 scene…"; icon: Icons.loco; clicked => { root.load-tdoa3-scene(); scene-menu.close(); } }
+                        MenuRow { text: "Load trajectories (CSV)…"; icon: Icons.trajectory; clicked => { root.load-trajectories(); scene-menu.close(); } }
                     }
                 }
             }
         }
 
-        // Right panel: 3D view
+        // ---- The room ----
         view-area := Rectangle {
             horizontal-stretch: 1;
+            clip: true;
 
             Image {
                 source: root.texture;
@@ -1132,30 +864,46 @@ export component PlanningContent inherits Rectangle {
                 image-fit: fill;
             }
 
-            // Grid measurement labels
-            Rectangle {
-                width: 100%;
-                height: 100%;
-                for label in root.grid-labels: Text {
-                    x: label.screen-x * 1px;
-                    y: label.screen-y * 1px;
-                    text: label.text;
-                    font-size: 9px;
-                    color: #4d4d59;
+            // Metres along the edges of the room
+            for label in root.grid-labels: Text {
+                x: label.screen-x * 1px - self.width / 2;
+                y: label.screen-y * 1px - self.height / 2;
+                text: label.text;
+                font-family: Theme.font-mono;
+                font-size: 10.5px;
+                color: Theme.text3;
+            }
+            // Base stations and anchors by name
+            for mark in root.marks: Rectangle {
+                x: mark.x * 1px;
+                y: mark.y * 1px - self.height / 2;
+                width: mark-text.preferred-width + 12px;
+                height: mark-text.preferred-height + 2px;
+                border-radius: 4px;
+                background: mark.selected ? Theme.accent-button : Theme.surface;
+                border-width: mark.selected ? 0px : 1px;
+                border-color: Theme.border;
+                mark-text := Text {
+                    text: mark.text;
+                    font-size: 11.5px;
+                    font-weight: 600;
+                    color: mark.selected ? #ffffff : Theme.text;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
                 }
             }
 
             view-focus := FocusScope {
                 key-pressed(e) => {
                     if (e.text == Key.Delete || e.text == Key.Backspace) {
-                        if (root.selected-type == 1 && root.selected-index >= 0) {
-                            root.remove-base-station(root.selected-index);
+                        if (root.sel-kind == PlanKind.base-station) {
+                            root.remove-base-station(root.sel-index);
                             accept
-                        } else if (root.selected-type == 2 && root.selected-index >= 0) {
-                            root.remove-anchor(root.selected-index);
+                        } else if (root.sel-kind == PlanKind.anchor) {
+                            root.remove-anchor(root.sel-index);
                             accept
-                        } else if (root.selected-type == 3 && root.selected-index >= 0) {
-                            root.remove-obstacle(root.selected-index);
+                        } else if (root.sel-kind == PlanKind.obstacle) {
+                            root.remove-obstacle(root.sel-index);
                             accept
                         } else {
                             reject
@@ -1165,86 +913,923 @@ export component PlanningContent inherits Rectangle {
                     }
                 }
 
-            TouchArea {
-                property <float> prev-x;
-                property <float> prev-y;
-                property <bool> dragging;
-                property <bool> panning;
+                TouchArea {
+                    property <float> prev-x;
+                    property <float> prev-y;
+                    property <bool> dragging;
+                    property <bool> panning;
 
-                scroll-event(e) => {
-                    if (e.delta-y > 0) {
-                        root.cam-distance = max(1.0, root.cam-distance - 0.5);
-                    } else if (e.delta-y < 0) {
-                        root.cam-distance = min(100.0, root.cam-distance + 0.5);
+                    scroll-event(e) => {
+                        if (e.delta-y > 0) {
+                            root.cam-distance = max(1.0, root.cam-distance * 0.92);
+                        } else if (e.delta-y < 0) {
+                            root.cam-distance = min(100.0, root.cam-distance / 0.92);
+                        }
+                        accept
                     }
-                    accept
-                }
 
-                pointer-event(e) => {
-                    if (e.kind == PointerEventKind.down) {
-                        view-focus.focus();
-                        if (e.button == PointerEventButton.left) {
-                            root.view-mouse-pressed(self.mouse-x / 1px, self.mouse-y / 1px);
-                            if (!root.handle-active) {
+                    pointer-event(e) => {
+                        if (e.kind == PointerEventKind.down) {
+                            view-focus.focus();
+                            if (e.button == PointerEventButton.left) {
+                                root.view-mouse-pressed(self.mouse-x / 1px, self.mouse-y / 1px);
+                                if (!root.handle-active) {
+                                    self.prev-x = self.mouse-x / 1px;
+                                    self.prev-y = self.mouse-y / 1px;
+                                    self.dragging = true;
+                                    self.panning = false;
+                                }
+                            } else if (e.button == PointerEventButton.middle || e.button == PointerEventButton.right) {
                                 self.prev-x = self.mouse-x / 1px;
                                 self.prev-y = self.mouse-y / 1px;
-                                self.dragging = true;
-                                self.panning = false;
+                                self.panning = true;
                             }
-                        } else if (e.button == PointerEventButton.middle || e.button == PointerEventButton.right) {
+                        } else if (e.kind == PointerEventKind.up) {
+                            if (root.handle-active) {
+                                root.view-mouse-released();
+                            }
+                            self.dragging = false;
+                            self.panning = false;
+                        }
+                    }
+
+                    moved => {
+                        if (root.handle-active) {
+                            root.view-mouse-moved(self.mouse-x / 1px, self.mouse-y / 1px);
+                        } else if (self.panning) {
+                            root.view-preset = -1;
+                            root.view-pan(self.mouse-x / 1px - self.prev-x, self.mouse-y / 1px - self.prev-y);
                             self.prev-x = self.mouse-x / 1px;
                             self.prev-y = self.mouse-y / 1px;
-                            self.panning = true;
+                        } else if (self.dragging) {
+                            root.view-preset = -1;
+                            root.cam-yaw -= (self.mouse-x / 1px - self.prev-x) * 0.01;
+                            root.cam-pitch = clamp(root.cam-pitch + (self.mouse-y / 1px - self.prev-y) * 0.01, 0.1, 1.55);
+                            self.prev-x = self.mouse-x / 1px;
+                            self.prev-y = self.mouse-y / 1px;
                         }
-                    } else if (e.kind == PointerEventKind.up) {
-                        if (root.handle-active) {
-                            root.view-mouse-released();
-                        }
-                        self.dragging = false;
-                        self.panning = false;
-                    }
-                }
-
-                moved => {
-                    if (root.handle-active) {
-                        root.view-mouse-moved(self.mouse-x / 1px, self.mouse-y / 1px);
-                    } else if (self.panning) {
-                        root.view-pan(
-                            self.mouse-x / 1px - self.prev-x,
-                            self.mouse-y / 1px - self.prev-y,
-                        );
-                        self.prev-x = self.mouse-x / 1px;
-                        self.prev-y = self.mouse-y / 1px;
-                    } else if (self.dragging) {
-                        root.cam-yaw -= (self.mouse-x / 1px - self.prev-x) * 0.01;
-                        root.cam-pitch = clamp(root.cam-pitch + (self.mouse-y / 1px - self.prev-y) * 0.01, 0.1, 1.5);
-                        self.prev-x = self.mouse-x / 1px;
-                        self.prev-y = self.mouse-y / 1px;
                     }
                 }
             }
+
+            // View presets and Fit, top left
+            HorizontalLayout {
+                x: 16px;
+                y: 16px;
+                width: self.preferred-width;
+                height: 38px;
+                spacing: 6px;
+                Float {
+                    width: presets.min-width + 2px;
+                    border-radius: 10px;
+                    presets := Segmented {
+                        x: 1px;
+                        y: 1px;
+                        height: parent.height - 2px;
+                        background: Theme.surface;
+                        border-width: 0px;
+                        items: [{ label: "Perspective" }, { label: "Top" }, { label: "Front" }, { label: "Side" }];
+                        current <=> root.view-preset;
+                        selected(i) => { root.view-from(i); }
+                    }
+                }
+                ViewButton {
+                    text: "Fit";
+                    icon: Icons.fit;
+                    clicked => { root.fit(); }
+                }
+            }
+
+            // Undo, top right
+            ViewButton {
+                x: parent.width - self.width - 16px;
+                y: 16px;
+                text: root.undo-count > 0 ? "Undo (" + root.undo-count + ")" : "Undo";
+                icon: Icons.undo;
+                enabled: root.undo-count > 0;
+                clicked => { root.undo(); }
+            }
+
+            // Busy, top middle
+            if root.computing: Float {
+                x: (parent.width - self.width) / 2;
+                y: 16px;
+                width: busy-text.preferred-width + 28px;
+                height: 34px;
+                busy-text := Text {
+                    text: "Computing coverage…";
+                    font-size: 12.5px;
+                    color: Theme.text;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+            }
+
+            // The coverage slice, bottom left
+            if root.slice-shown: Float {
+                x: 16px;
+                y: parent.height - self.height - 16px;
+                width: 250px;
+                height: slice-layout.preferred-height;
+                TouchArea { }
+                slice-layout := VerticalLayout {
+                    padding: 12px;
+                    spacing: 8px;
+                    HorizontalLayout {
+                        Text {
+                            horizontal-stretch: 1;
+                            text: (root.coverage-source == 0 ? "Coverage at " : root.error-metric-names[root.error-metric-index] + " at ")
+                                + root.slice-z.to-fixed(2) + " m";
+                            font-size: Theme.font-small;
+                            font-weight: 600;
+                            color: Theme.text;
+                        }
+                        if root.coverage-stale: Text {
+                            text: "out of date";
+                            font-size: Theme.font-small;
+                            color: Theme.warn-text;
+                        }
+                    }
+                    Slider {
+                        minimum: root.room-z0;
+                        maximum: root.room-z0 + root.room-h;
+                        value <=> root.slice-z;
+                    }
+                    if root.coverage-source == 0: HorizontalLayout {
+                        spacing: 4px;
+                        for level[k] in [
+                            { on: root.show-coverage-0, name: "0" },
+                            { on: root.show-coverage-1, name: "1" },
+                            { on: root.show-coverage-2, name: "2" },
+                            { on: root.show-coverage-3, name: "3" },
+                            { on: root.show-coverage-4, name: "4+" },
+                        ]: Rectangle {
+                            height: 30px;
+                            horizontal-stretch: 1;
+                            border-radius: 7px;
+                            border-width: 1px;
+                            border-color: Theme.border;
+                            background: Theme.surface2;
+                            opacity: level.on ? 1 : 0.45;
+                            HorizontalLayout {
+                                alignment: center;
+                                spacing: 5px;
+                                Rectangle {
+                                    y: (parent.height - self.height) / 2;
+                                    width: 10px;
+                                    height: 10px;
+                                    border-radius: 2px;
+                                    background: level.on ? root.level-colors[k] : transparent;
+                                    border-width: level.on ? 0px : 1.5px;
+                                    border-color: Theme.text3;
+                                }
+                                Text {
+                                    text: level.name;
+                                    font-size: 11.5px;
+                                    font-weight: 600;
+                                    color: Theme.text2;
+                                    vertical-alignment: center;
+                                }
+                            }
+                            TouchArea {
+                                mouse-cursor: pointer;
+                                clicked => {
+                                    if (k == 0) { root.show-coverage-0 = !root.show-coverage-0; }
+                                    if (k == 1) { root.show-coverage-1 = !root.show-coverage-1; }
+                                    if (k == 2) { root.show-coverage-2 = !root.show-coverage-2; }
+                                    if (k == 3) { root.show-coverage-3 = !root.show-coverage-3; }
+                                    if (k == 4) { root.show-coverage-4 = !root.show-coverage-4; }
+                                }
+                            }
+                        }
+                    }
+                    Note {
+                        text: root.coverage-source == 0 ? "Base stations that see each point"
+                            : "Green is good; scale " + root.tdoa3-scale-min.to-fixed(1) + " to " + root.tdoa3-scale-max.to-fixed(1);
+                    }
+                }
+            }
+
+            // Which way is which, and the zoom, bottom right
+            Float {
+                x: parent.width - self.width - 16px;
+                y: parent.height - self.height - 16px;
+                width: 68px;
+                height: zoom-layout.preferred-height;
+                TouchArea { }
+                property <float> rx: -Math.sin(root.cam-yaw * 1rad);
+                property <float> ry: Math.cos(root.cam-yaw * 1rad);
+                property <float> ux: -Math.cos(root.cam-yaw * 1rad) * Math.sin(root.cam-pitch * 1rad);
+                property <float> uy: -Math.sin(root.cam-yaw * 1rad) * Math.sin(root.cam-pitch * 1rad);
+                property <float> uz: Math.cos(root.cam-pitch * 1rad);
+                zoom-layout := VerticalLayout {
+                    padding: 6px;
+                    spacing: 2px;
+                    Rectangle {
+                        height: 56px;
+                        for axis in [
+                            { name: "X", dx: rx, dy: -ux, tint: Theme.axis-x, preset: 3 },
+                            { name: "Y", dx: ry, dy: -uy, tint: Theme.axis-y, preset: 2 },
+                            { name: "Z", dx: 0, dy: -uz, tint: Theme.axis-z, preset: 1 },
+                        ]: Rectangle {
+                            Path {
+                                x: 0;
+                                y: 0;
+                                width: 56px;
+                                height: 56px;
+                                viewbox-width: 56;
+                                viewbox-height: 56;
+                                stroke: axis.tint;
+                                stroke-width: 2px;
+                                MoveTo { x: 28; y: 28; }
+                                LineTo { x: 28 + axis.dx * 17; y: 28 + axis.dy * 17; }
+                            }
+                            Rectangle {
+                                x: (28 + axis.dx * 24) * 1px - self.width / 2;
+                                y: (28 + axis.dy * 24) * 1px - self.height / 2;
+                                width: 16px;
+                                height: 16px;
+                                border-radius: 4px;
+                                background: gz-touch.has-hover ? Theme.hover : transparent;
+                                Text {
+                                    text: axis.name;
+                                    font-size: 10.5px;
+                                    font-weight: 700;
+                                    color: axis.tint;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                }
+                                gz-touch := TouchArea {
+                                    mouse-cursor: pointer;
+                                    clicked => { root.view-from(axis.preset); }
+                                }
+                            }
+                        }
+                    }
+                    Rectangle {
+                        height: 9px;
+                        Rectangle { height: 1px; width: 36px; background: Theme.border; }
+                    }
+                    HorizontalLayout {
+                        alignment: center;
+                        IconButton { icon: Icons.plus; clicked => { root.cam-distance = max(1.0, root.cam-distance / 1.2); } }
+                    }
+                    HorizontalLayout {
+                        alignment: center;
+                        IconButton { icon: Icons.minus; clicked => { root.cam-distance = min(100.0, root.cam-distance * 1.2); } }
+                    }
+                }
+            }
+
+            // How to move around, bottom middle
+            Float {
+                x: (parent.width - self.width) / 2;
+                y: parent.height - self.height - 16px;
+                width: hint-text.preferred-width + 24px;
+                height: hint-text.preferred-height + 12px;
+                border-radius: self.height / 2;
+                visible: parent.width > 760px;
+                hint-text := Text {
+                    text: "Drag to orbit · Right-drag to pan · Scroll to zoom · Drag the arrows to move";
+                    font-size: Theme.font-small;
+                    color: Theme.text3;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
             }
         }
 
+        // ---- The inspector ----
+        Rectangle {
+            width: 330px;
+            background: Theme.surface;
+            Rectangle {
+                x: 0;
+                width: 1px;
+                background: Theme.border;
+            }
+            VerticalLayout {
+                // Tabs
+                Rectangle {
+                    height: 45px;
+                    HorizontalLayout {
+                        padding-left: 12px;
+                        spacing: 2px;
+                        alignment: start;
+                        for name[i] in ["Selection", "Coverage"]: Rectangle {
+                            width: tab-text.preferred-width + 20px;
+                            tab-text := Text {
+                                text: name;
+                                font-size: 13px;
+                                font-weight: 500;
+                                color: root.tab == i ? Theme.accent-text : tab-touch.has-hover ? Theme.text : Theme.text3;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+                            Rectangle {
+                                y: parent.height - 2px;
+                                height: 2px;
+                                background: root.tab == i ? Theme.accent : transparent;
+                            }
+                            tab-touch := TouchArea {
+                                mouse-cursor: pointer;
+                                clicked => { root.tab = i; }
+                            }
+                        }
+                    }
+                    Rectangle {
+                        y: parent.height - 1px;
+                        height: 1px;
+                        background: Theme.border;
+                    }
+                }
+
+                ScrollView {
+                    vertical-stretch: 1;
+                    VerticalLayout {
+                        padding: 16px;
+                        spacing: 16px;
+                        alignment: start;
+
+                        // ---- Selection ----
+                        if root.tab == 0 && root.sel-kind == PlanKind.none: VerticalLayout {
+                            padding-top: 20px;
+                            spacing: 8px;
+                            Text {
+                                text: "Nothing selected";
+                                font-size: 14px;
+                                font-weight: 600;
+                                color: Theme.text;
+                                horizontal-alignment: center;
+                            }
+                            Text {
+                                text: "Pick an object in the list or in the view to edit it.";
+                                font-size: 12.5px;
+                                color: Theme.text2;
+                                horizontal-alignment: center;
+                                wrap: word-wrap;
+                            }
+                        }
+
+                        if root.tab == 0 && root.sel-kind != PlanKind.none: HorizontalLayout {
+                            spacing: 10px;
+                            Rectangle {
+                                width: 36px;
+                                height: 36px;
+                                border-radius: 9px;
+                                background: Theme.surface2;
+                                border-width: 1px;
+                                border-color: Theme.border;
+                                Glyph {
+                                    kind: root.sel-kind;
+                                    size: 16px;
+                                }
+                            }
+                            VerticalLayout {
+                                horizontal-stretch: 1;
+                                alignment: center;
+                                Text {
+                                    text: root.sel-kind == PlanKind.room ? "Room"
+                                        : root.sel-kind == PlanKind.base-station ? "BS " + (root.sel-index + 1)
+                                        : root.sel-kind == PlanKind.anchor ? "A" + (root.sel-index + 1)
+                                        : root.sel-kind == PlanKind.obstacle && root.sel-index < root.obstacles.length ? root.obstacles[root.sel-index].kind + " " + (root.sel-index + 1)
+                                        : root.sel-kind == PlanKind.flight-area ? "Flight area " + (root.sel-index + 1)
+                                        : root.sel-kind == PlanKind.waypoint-area ? "Waypoint area " + (root.sel-index + 1)
+                                        : root.sel-kind == PlanKind.pad && root.sel-index < root.takeoff-pads.length ? "Pad " + root.takeoff-pads[root.sel-index].label
+                                        : root.sel-kind == PlanKind.trajectory ? "Trajectories"
+                                        : "";
+                                    font-size: 16px;
+                                    font-weight: 600;
+                                    color: Theme.text;
+                                }
+                                Note {
+                                    text: root.sel-kind == PlanKind.room ? "Sets the grid, the floor and the coverage volume"
+                                        : root.sel-kind == PlanKind.base-station ? "Lighthouse base station"
+                                        : root.sel-kind == PlanKind.anchor ? "Loco anchor (TDoA3)"
+                                        : root.sel-kind == PlanKind.obstacle ? "Obstacle: blocks base station sweeps"
+                                        : root.sel-kind == PlanKind.flight-area ? "Geofence: units stay inside it"
+                                        : root.sel-kind == PlanKind.waypoint-area ? "Random go-to targets are picked inside it"
+                                        : root.sel-kind == PlanKind.trajectory ? "Flown paths from a CSV, to check against the coverage"
+                                        : "Takeoff pad";
+                                }
+                            }
+                        }
+
+                        // Room
+                        if root.tab == 0 && root.sel-kind == PlanKind.room: VerticalLayout {
+                            spacing: 16px;
+                            VerticalLayout {
+                                spacing: 8px;
+                                Title { text: "SIZE"; }
+                                HorizontalLayout {
+                                    spacing: 8px;
+                                    Field { label: "X (m)"; value: root.room-x; changed(v) => { root.room-x = v; root.room-changed(); } }
+                                    Field { label: "Y (m)"; value: root.room-y; changed(v) => { root.room-y = v; root.room-changed(); } }
+                                    Field { label: "Z (m)"; value: root.room-z; changed(v) => { root.room-z = v; root.room-changed(); } }
+                                }
+                            }
+                            VerticalLayout {
+                                spacing: 8px;
+                                Title { text: "OFFSET"; }
+                                HorizontalLayout {
+                                    spacing: 8px;
+                                    Field { label: "X (m)"; value: root.room-offset-x; changed(v) => { root.room-offset-x = v; root.room-changed(); } }
+                                    Field { label: "Y (m)"; value: root.room-offset-y; changed(v) => { root.room-offset-y = v; root.room-changed(); } }
+                                    Field { label: "Z (m)"; value: root.room-offset-z; changed(v) => { root.room-offset-z = v; root.room-changed(); } }
+                                }
+                            }
+                            VerticalLayout {
+                                spacing: 8px;
+                                Title { text: "COVERAGE GRID"; }
+                                HorizontalLayout {
+                                    spacing: 8px;
+                                    Field { label: "Resolution"; value: root.resolution; changed(v) => { root.resolution = v; root.room-changed(); } }
+                                    Rectangle { horizontal-stretch: 1; }
+                                }
+                                Note { text: "Points per metre. 5 means a 0.2 m grid."; }
+                            }
+                            SwitchRow {
+                                text: "Centre the room on the origin";
+                                note: "Otherwise the room starts at the offset";
+                                checked <=> root.center-origin;
+                                toggled => { root.room-changed(); }
+                            }
+                        }
+
+                        // Base station
+                        if root.tab == 0 && root.sel-kind == PlanKind.base-station && root.sel-index < root.base-stations.length: VerticalLayout {
+                            property <LhBaseStationData> bs: root.base-stations[root.sel-index];
+                            property <int> i: root.sel-index;
+                            spacing: 16px;
+                            if !root.on-walls(bs.x.to-float(), bs.y.to-float(), bs.z.to-float()): Alert { text: "Outside the room."; }
+                            VerticalLayout {
+                                spacing: 8px;
+                                Title { text: "POSITION"; }
+                                HorizontalLayout {
+                                    spacing: 8px;
+                                    Field { label: "X (m)"; value: bs.x; changed(v) => { root.update-base-station(i, { x: v, y: bs.y, z: bs.z, azimuth: bs.azimuth, elevation: bs.elevation }); } }
+                                    Field { label: "Y (m)"; value: bs.y; changed(v) => { root.update-base-station(i, { x: bs.x, y: v, z: bs.z, azimuth: bs.azimuth, elevation: bs.elevation }); } }
+                                    Field { label: "Z (m)"; value: bs.z; changed(v) => { root.update-base-station(i, { x: bs.x, y: bs.y, z: v, azimuth: bs.azimuth, elevation: bs.elevation }); } }
+                                }
+                            }
+                            VerticalLayout {
+                                spacing: 8px;
+                                Title { text: "AIM"; }
+                                HorizontalLayout {
+                                    spacing: 8px;
+                                    Field { label: "Azimuth (°)"; value: bs.azimuth; changed(v) => { root.update-base-station(i, { x: bs.x, y: bs.y, z: bs.z, azimuth: v, elevation: bs.elevation }); } }
+                                    Field { label: "Elevation (°)"; value: bs.elevation; changed(v) => { root.update-base-station(i, { x: bs.x, y: bs.y, z: bs.z, azimuth: bs.azimuth, elevation: v }); } }
+                                }
+                                Note { text: "Azimuth from +X towards +Y. Elevation is the tilt down from horizontal."; }
+                            }
+                            InfoCard {
+                                property <float> sees: root.coverage.computed && i < root.coverage.per-bs.length ? root.coverage.per-bs[i] : -1;
+                                Title { text: "COVERAGE"; }
+                                HorizontalLayout {
+                                    spacing: 8px;
+                                    Text {
+                                        text: sees < 0 ? "–" : Math.round(sees * 100) + " %";
+                                        font-size: 28px;
+                                        font-weight: 600;
+                                        color: Theme.text;
+                                    }
+                                    Text {
+                                        horizontal-stretch: 1;
+                                        text: "of the counted points see it";
+                                        font-size: Theme.font-small;
+                                        color: Theme.text2;
+                                        vertical-alignment: bottom;
+                                        wrap: word-wrap;
+                                    }
+                                }
+                                Meter { value: max(0, sees); }
+                                Note { text: sees < 0 ? "Compute the coverage to see how much of the area this base station covers." : root.coverage.area; }
+                            }
+                            HorizontalLayout {
+                                spacing: 8px;
+                                KButton { horizontal-stretch: 1; small: true; text: "Duplicate"; icon: Icons.duplicate; clicked => { root.duplicate-base-station(i); root.pick(PlanKind.base-station, root.base-stations.length - 1); } }
+                                KButton { horizontal-stretch: 1; small: true; text: "Delete"; icon: Icons.trash; clicked => { root.remove-base-station(i); root.pick(PlanKind.none, -1); } }
+                            }
+                        }
+
+                        // Anchor
+                        if root.tab == 0 && root.sel-kind == PlanKind.anchor && root.sel-index < root.anchors.length: VerticalLayout {
+                            property <Tdoa3AnchorData> a: root.anchors[root.sel-index];
+                            property <int> i: root.sel-index;
+                            spacing: 16px;
+                            if !root.on-walls(a.x.to-float(), a.y.to-float(), a.z.to-float()): Alert { text: "Outside the room."; }
+                            VerticalLayout {
+                                spacing: 8px;
+                                Title { text: "POSITION"; }
+                                HorizontalLayout {
+                                    spacing: 8px;
+                                    Field { label: "X (m)"; value: a.x; changed(v) => { root.update-anchor(i, { x: v, y: a.y, z: a.z }); } }
+                                    Field { label: "Y (m)"; value: a.y; changed(v) => { root.update-anchor(i, { x: a.x, y: v, z: a.z }); } }
+                                    Field { label: "Z (m)"; value: a.z; changed(v) => { root.update-anchor(i, { x: a.x, y: a.y, z: v }); } }
+                                }
+                            }
+                            HorizontalLayout {
+                                spacing: 8px;
+                                KButton { horizontal-stretch: 1; small: true; text: "Duplicate"; icon: Icons.duplicate; clicked => { root.duplicate-anchor(i); root.pick(PlanKind.anchor, root.anchors.length - 1); } }
+                                KButton { horizontal-stretch: 1; small: true; text: "Delete"; icon: Icons.trash; clicked => { root.remove-anchor(i); root.pick(PlanKind.none, -1); } }
+                            }
+                        }
+
+                        // Obstacle
+                        if root.tab == 0 && root.sel-kind == PlanKind.obstacle && root.sel-index < root.obstacles.length: VerticalLayout {
+                            property <PlanObstacleData> o: root.obstacles[root.sel-index];
+                            property <int> i: root.sel-index;
+                            property <bool> cylinder: o.kind == "Cylinder";
+                            // Clicking these breaks their bindings: set them again
+                            changed o => {
+                                kind-choice.current = cylinder ? 1 : 0;
+                                floor-switch.checked = o.on-floor;
+                            }
+                            spacing: 16px;
+                            if !root.inside(o.x.to-float(), o.y.to-float(), root.room-z0): Alert { text: "Outside the room: it doesn't block anything there."; }
+                            kind-choice := Segmented {
+                                fill: true;
+                                items: [{ label: "Box" }, { label: "Cylinder" }];
+                                current: cylinder ? 1 : 0;
+                                selected(k) => {
+                                    root.update-obstacle(i, { kind: k == 1 ? "Cylinder" : "Box", x: o.x, y: o.y, z: o.z, yaw: o.yaw, width: o.width, depth: o.depth, height: o.height, radius: o.radius, color-r: o.color-r, color-g: o.color-g, color-b: o.color-b, on-floor: o.on-floor });
+                                }
+                            }
+                            VerticalLayout {
+                                spacing: 8px;
+                                Title { text: "POSITION"; }
+                                HorizontalLayout {
+                                    spacing: 8px;
+                                    Field { label: "X (m)"; value: o.x; changed(v) => { root.update-obstacle(i, { kind: o.kind, x: v, y: o.y, z: o.z, yaw: o.yaw, width: o.width, depth: o.depth, height: o.height, radius: o.radius, color-r: o.color-r, color-g: o.color-g, color-b: o.color-b, on-floor: o.on-floor }); } }
+                                    Field { label: "Y (m)"; value: o.y; changed(v) => { root.update-obstacle(i, { kind: o.kind, x: o.x, y: v, z: o.z, yaw: o.yaw, width: o.width, depth: o.depth, height: o.height, radius: o.radius, color-r: o.color-r, color-g: o.color-g, color-b: o.color-b, on-floor: o.on-floor }); } }
+                                    Field { label: "Z (m)"; value: o.z; enabled: !o.on-floor; changed(v) => { root.update-obstacle(i, { kind: o.kind, x: o.x, y: o.y, z: v, yaw: o.yaw, width: o.width, depth: o.depth, height: o.height, radius: o.radius, color-r: o.color-r, color-g: o.color-g, color-b: o.color-b, on-floor: o.on-floor }); } }
+                                }
+                            }
+                            if cylinder: VerticalLayout {
+                                spacing: 8px;
+                                Title { text: "SIZE"; }
+                                HorizontalLayout {
+                                    spacing: 8px;
+                                    Field { label: "Radius (m)"; value: o.radius; changed(v) => { root.update-obstacle(i, { kind: o.kind, x: o.x, y: o.y, z: o.z, yaw: o.yaw, width: o.width, depth: o.depth, height: o.height, radius: v, color-r: o.color-r, color-g: o.color-g, color-b: o.color-b, on-floor: o.on-floor }); } }
+                                    Field { label: "Height (m)"; value: o.height; changed(v) => { root.update-obstacle(i, { kind: o.kind, x: o.x, y: o.y, z: o.z, yaw: o.yaw, width: o.width, depth: o.depth, height: v, radius: o.radius, color-r: o.color-r, color-g: o.color-g, color-b: o.color-b, on-floor: o.on-floor }); } }
+                                }
+                            }
+                            if !cylinder: VerticalLayout {
+                                spacing: 8px;
+                                Title { text: "SIZE AND ROTATION"; }
+                                HorizontalLayout {
+                                    spacing: 8px;
+                                    Field { label: "W (m)"; value: o.width; changed(v) => { root.update-obstacle(i, { kind: o.kind, x: o.x, y: o.y, z: o.z, yaw: o.yaw, width: v, depth: o.depth, height: o.height, radius: o.radius, color-r: o.color-r, color-g: o.color-g, color-b: o.color-b, on-floor: o.on-floor }); } }
+                                    Field { label: "D (m)"; value: o.depth; changed(v) => { root.update-obstacle(i, { kind: o.kind, x: o.x, y: o.y, z: o.z, yaw: o.yaw, width: o.width, depth: v, height: o.height, radius: o.radius, color-r: o.color-r, color-g: o.color-g, color-b: o.color-b, on-floor: o.on-floor }); } }
+                                    Field { label: "H (m)"; value: o.height; changed(v) => { root.update-obstacle(i, { kind: o.kind, x: o.x, y: o.y, z: o.z, yaw: o.yaw, width: o.width, depth: o.depth, height: v, radius: o.radius, color-r: o.color-r, color-g: o.color-g, color-b: o.color-b, on-floor: o.on-floor }); } }
+                                    Field { label: "Yaw (°)"; value: o.yaw; changed(v) => { root.update-obstacle(i, { kind: o.kind, x: o.x, y: o.y, z: o.z, yaw: v, width: o.width, depth: o.depth, height: o.height, radius: o.radius, color-r: o.color-r, color-g: o.color-g, color-b: o.color-b, on-floor: o.on-floor }); } }
+                                }
+                            }
+                            floor-switch := SwitchRow {
+                                text: "Standing on the floor";
+                                note: "Keeps the bottom at z = 0";
+                                checked: o.on-floor;
+                                toggled => {
+                                    root.update-obstacle(i, { kind: o.kind, x: o.x, y: o.y, z: o.z, yaw: o.yaw, width: o.width, depth: o.depth, height: o.height, radius: o.radius, color-r: o.color-r, color-g: o.color-g, color-b: o.color-b, on-floor: !o.on-floor });
+                                }
+                            }
+                            VerticalLayout {
+                                spacing: 8px;
+                                Title { text: "COLOUR"; }
+                                HorizontalLayout {
+                                    spacing: 6px;
+                                    alignment: start;
+                                    for c in [
+                                        { r: 0.45, g: 0.45, b: 0.50 },
+                                        { r: 0.85, g: 0.30, b: 0.25 },
+                                        { r: 0.20, g: 0.65, b: 0.30 },
+                                        { r: 0.25, g: 0.50, b: 0.85 },
+                                        { r: 0.85, g: 0.70, b: 0.20 },
+                                        { r: 0.70, g: 0.35, b: 0.75 },
+                                        { r: 0.60, g: 0.40, b: 0.25 },
+                                    ]: Rectangle {
+                                        property <bool> on: Math.abs(c.r - o.color-r) < 0.01 && Math.abs(c.g - o.color-g) < 0.01 && Math.abs(c.b - o.color-b) < 0.01;
+                                        width: 26px;
+                                        height: 26px;
+                                        border-radius: 7px;
+                                        background: rgb(c.r * 255, c.g * 255, c.b * 255);
+                                        border-width: self.on ? 2px : 0px;
+                                        border-color: Theme.accent;
+                                        TouchArea {
+                                            mouse-cursor: pointer;
+                                            clicked => {
+                                                root.update-obstacle(i, { kind: o.kind, x: o.x, y: o.y, z: o.z, yaw: o.yaw, width: o.width, depth: o.depth, height: o.height, radius: o.radius, color-r: c.r, color-g: c.g, color-b: c.b, on-floor: o.on-floor });
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            HorizontalLayout {
+                                spacing: 8px;
+                                KButton { horizontal-stretch: 1; small: true; text: "Duplicate"; icon: Icons.duplicate; clicked => { root.duplicate-obstacle(i); root.pick(PlanKind.obstacle, root.obstacles.length - 1); } }
+                                KButton { horizontal-stretch: 1; small: true; text: "Delete"; icon: Icons.trash; clicked => { root.remove-obstacle(i); root.pick(PlanKind.none, -1); } }
+                            }
+                        }
+
+                        // Flight or waypoint area
+                        if root.tab == 0 && ((root.sel-kind == PlanKind.flight-area && root.sel-index < root.flight-areas.length)
+                            || (root.sel-kind == PlanKind.waypoint-area && root.sel-index < root.waypoint-areas.length)): VerticalLayout {
+                            property <bool> flight: root.sel-kind == PlanKind.flight-area;
+                            property <PlanBoxVolumeData> a: flight ? root.flight-areas[root.sel-index] : root.waypoint-areas[root.sel-index];
+                            property <int> i: root.sel-index;
+                            function set(v: PlanBoxVolumeData) {
+                                if (flight) { root.update-flight-area(i, v); } else { root.update-waypoint-area(i, v); }
+                            }
+                            spacing: 16px;
+                            if flight && (!root.inside(a.min-x.to-float(), a.min-y.to-float(), root.room-z0) || !root.inside(a.max-x.to-float(), a.max-y.to-float(), root.room-z0)): Alert {
+                                text: "Reaches outside the room.";
+                            }
+                            VerticalLayout {
+                                spacing: 8px;
+                                Title { text: "FROM"; }
+                                HorizontalLayout {
+                                    spacing: 8px;
+                                    Field { label: "X (m)"; value: a.min-x; changed(v) => { set({ label: a.label, min-x: v, min-y: a.min-y, min-z: a.min-z, max-x: a.max-x, max-y: a.max-y, max-z: a.max-z }); } }
+                                    Field { label: "Y (m)"; value: a.min-y; changed(v) => { set({ label: a.label, min-x: a.min-x, min-y: v, min-z: a.min-z, max-x: a.max-x, max-y: a.max-y, max-z: a.max-z }); } }
+                                    Field { label: "Z (m)"; value: a.min-z; changed(v) => { set({ label: a.label, min-x: a.min-x, min-y: a.min-y, min-z: v, max-x: a.max-x, max-y: a.max-y, max-z: a.max-z }); } }
+                                }
+                            }
+                            VerticalLayout {
+                                spacing: 8px;
+                                Title { text: "TO"; }
+                                HorizontalLayout {
+                                    spacing: 8px;
+                                    Field { label: "X (m)"; value: a.max-x; changed(v) => { set({ label: a.label, min-x: a.min-x, min-y: a.min-y, min-z: a.min-z, max-x: v, max-y: a.max-y, max-z: a.max-z }); } }
+                                    Field { label: "Y (m)"; value: a.max-y; changed(v) => { set({ label: a.label, min-x: a.min-x, min-y: a.min-y, min-z: a.min-z, max-x: a.max-x, max-y: v, max-z: a.max-z }); } }
+                                    Field { label: "Z (m)"; value: a.max-z; changed(v) => { set({ label: a.label, min-x: a.min-x, min-y: a.min-y, min-z: a.min-z, max-x: a.max-x, max-y: a.max-y, max-z: v }); } }
+                                }
+                                Note { text: root.size-text(a) + " m. Drag the handles on its sides in the view."; }
+                            }
+                            HorizontalLayout {
+                                spacing: 8px;
+                                KButton {
+                                    horizontal-stretch: 1;
+                                    small: true;
+                                    text: "Duplicate";
+                                    icon: Icons.duplicate;
+                                    clicked => {
+                                        if (flight) {
+                                            root.add-flight-area();
+                                            root.update-flight-area(root.flight-areas.length - 1, a);
+                                            root.pick(PlanKind.flight-area, root.flight-areas.length - 1);
+                                        } else {
+                                            root.add-waypoint-area();
+                                            root.update-waypoint-area(root.waypoint-areas.length - 1, a);
+                                            root.pick(PlanKind.waypoint-area, root.waypoint-areas.length - 1);
+                                        }
+                                    }
+                                }
+                                KButton {
+                                    horizontal-stretch: 1;
+                                    small: true;
+                                    text: "Delete";
+                                    icon: Icons.trash;
+                                    clicked => {
+                                        if (flight) { root.remove-flight-area(i); } else { root.remove-waypoint-area(i); }
+                                        root.pick(PlanKind.none, -1);
+                                    }
+                                }
+                            }
+                        }
+
+                        // Takeoff pad
+                        if root.tab == 0 && root.sel-kind == PlanKind.pad && root.sel-index < root.takeoff-pads.length: VerticalLayout {
+                            property <PlanPadData> pad: root.takeoff-pads[root.sel-index];
+                            spacing: 8px;
+                            Title { text: "POSITION"; }
+                            HorizontalLayout {
+                                spacing: 8px;
+                                Field { label: "X (m)"; value: pad.x; enabled: false; }
+                                Field { label: "Y (m)"; value: pad.y; enabled: false; }
+                                Field { label: "Radius (m)"; value: pad.radius; enabled: false; }
+                            }
+                            Note { text: "Pads are saved from where the units sit, with Save pad positions in the 3D view."; }
+                        }
+
+                        // Trajectories
+                        if root.tab == 0 && root.sel-kind == PlanKind.trajectory: VerticalLayout {
+                            spacing: 16px;
+                            VerticalLayout {
+                                spacing: 8px;
+                                Title { text: "OFFSET"; }
+                                HorizontalLayout {
+                                    spacing: 8px;
+                                    Field { label: "X (m)"; value: root.traj-offset-x; changed(v) => { root.traj-offset-x = v; } }
+                                    Field { label: "Y (m)"; value: root.traj-offset-y; changed(v) => { root.traj-offset-y = v; } }
+                                    Field { label: "Z (m)"; value: root.traj-offset-z; changed(v) => { root.traj-offset-z = v; } }
+                                }
+                                Note { text: "Moves every path, to place them in the room."; }
+                            }
+                            SwitchRow { text: "Show in the view"; checked <=> root.show-trajectories; }
+                            KButton { small: true; text: "Load another CSV…"; icon: Icons.folder; clicked => { root.load-trajectories(); } }
+                        }
+
+                        // ---- Coverage ----
+                        if root.tab == 1: Segmented {
+                            fill: true;
+                            items: [{ label: "Lighthouse" }, { label: "Loco (TDoA3)" }];
+                            current <=> root.coverage-source;
+                        }
+
+                        if root.tab == 1 && root.coverage-source == 0 && root.coverage-stale && root.coverage.computed: Alert {
+                            text: "The scene or the model changed after " + root.coverage.at + ". These numbers are from before.";
+                            HorizontalLayout {
+                                alignment: start;
+                                KButton { small: true; text: "Recompute"; clicked => { root.recompute(); } }
+                            }
+                        }
+
+                        if root.tab == 1 && root.coverage-source == 0: InfoCard {
+                            Title { text: root.coverage.computed ? root.coverage.area : "NOT COMPUTED YET"; }
+                            HorizontalLayout {
+                                spacing: 8px;
+                                Text {
+                                    text: root.coverage.computed ? root.coverage.good : "–";
+                                    font-size: 28px;
+                                    font-weight: 600;
+                                    color: Theme.text;
+                                }
+                                Text {
+                                    horizontal-stretch: 1;
+                                    text: "see 2 or more base stations";
+                                    font-size: Theme.font-small;
+                                    color: Theme.text2;
+                                    vertical-alignment: bottom;
+                                    wrap: word-wrap;
+                                }
+                            }
+                            if root.coverage.computed: HorizontalLayout {
+                                height: 10px;
+                                spacing: 2px;
+                                for k in [4, 3, 2, 1, 0]: Rectangle {
+                                    horizontal-stretch: k < root.coverage.levels.length ? root.coverage.levels[k] : 0;
+                                    min-width: 0;
+                                    border-radius: 3px;
+                                    background: root.level-colors[k];
+                                }
+                            }
+                            if root.coverage.computed: VerticalLayout {
+                                for k in [4, 3, 2, 1, 0]: HorizontalLayout {
+                                    height: 24px;
+                                    spacing: 8px;
+                                    Rectangle {
+                                        y: (parent.height - self.height) / 2;
+                                        width: 10px;
+                                        height: 10px;
+                                        border-radius: 2px;
+                                        background: root.level-colors[k];
+                                    }
+                                    Text { horizontal-stretch: 1; text: root.level-names[k]; font-size: 12.5px; color: Theme.text; vertical-alignment: center; }
+                                    Text {
+                                        text: (k < root.coverage.levels.length ? root.coverage.levels[k] * 100 : 0).to-fixed(1) + " %";
+                                        font-family: Theme.font-mono;
+                                        font-size: 12px;
+                                        color: Theme.text3;
+                                        vertical-alignment: center;
+                                    }
+                                }
+                            }
+                            Note { text: root.coverage.computed ? root.coverage.meta : "Compute the coverage to see how much of the flight area the base stations cover."; }
+                        }
+
+                        if root.tab == 1 && root.coverage-source == 0 && root.coverage.computed && root.coverage.per-bs.length > 0: InfoCard {
+                            Title { text: "PER BASE STATION"; }
+                            for share[b] in root.coverage.per-bs: HorizontalLayout {
+                                spacing: 10px;
+                                height: 20px;
+                                Text { width: 40px; text: "BS " + (b + 1); font-size: 12.5px; color: Theme.text; vertical-alignment: center; }
+                                Meter { horizontal-stretch: 1; y: (parent.height - self.height) / 2; value: share; }
+                                Text {
+                                    width: 40px;
+                                    text: Math.round(share * 100) + "%";
+                                    font-family: Theme.font-mono;
+                                    font-size: 12px;
+                                    color: Theme.text2;
+                                    horizontal-alignment: right;
+                                    vertical-alignment: center;
+                                }
+                            }
+                        }
+
+                        if root.tab == 1 && root.coverage-source == 0: VerticalLayout {
+                            spacing: 8px;
+                            Title { text: "MODEL"; }
+                            SwitchRow {
+                                text: "Receiver field of view";
+                                note: "Base stations within 85° of straight up";
+                                checked <=> root.receiver-fov-enabled;
+                                toggled => { root.coverage-stale = true; root.scene-dirty = true; }
+                            }
+                            SwitchRow {
+                                text: "Allow for tilt";
+                                note: "Narrows the field of view by the tilt";
+                                checked <=> root.tilt-compensation-enabled;
+                                toggled => { root.coverage-stale = true; root.scene-dirty = true; }
+                            }
+                            HorizontalLayout {
+                                spacing: 8px;
+                                Field { label: "Max tilt (°)"; value: root.max-tilt-angle; enabled: root.tilt-compensation-enabled; changed(v) => { root.max-tilt-angle = v; root.coverage-stale = true; root.scene-dirty = true; } }
+                                Field { label: "Max distance (m)"; value: root.max-bs-distance; changed(v) => { root.max-bs-distance = v; root.coverage-stale = true; root.scene-dirty = true; } }
+                            }
+                            Note { text: "Grid: 1/" + root.resolution + " m, from the room settings."; }
+                            KButton {
+                                kind: ButtonKind.primary;
+                                text: root.computing ? "Computing…" : "Compute coverage";
+                                enabled: !root.computing;
+                                clicked => { root.recompute(); }
+                            }
+                        }
+
+                        if root.tab == 1 && root.coverage-source == 0: VerticalLayout {
+                            spacing: 8px;
+                            Title { text: "IN THE VIEW"; }
+                            SwitchRow { text: "Show a coverage slice"; checked <=> root.show-slice; }
+                            SwitchRow { text: "Trajectories"; note: root.trajectories-status; checked <=> root.show-trajectories; }
+                        }
+
+                        // Loco (TDoA3)
+                        if root.tab == 1 && root.coverage-source == 1 && root.anchors.length < 4: VerticalLayout {
+                            padding-top: 12px;
+                            spacing: 8px;
+                            Text {
+                                text: root.anchors.length == 0 ? "No Loco anchors in this scene" : "Too few Loco anchors";
+                                font-size: 14px;
+                                font-weight: 600;
+                                color: Theme.text;
+                                horizontal-alignment: center;
+                            }
+                            Text {
+                                text: "Add at least four anchors, or import a TDoA3 scene, to see TDoA3 accuracy (GDOP and position error).";
+                                font-size: 12.5px;
+                                color: Theme.text2;
+                                horizontal-alignment: center;
+                                wrap: word-wrap;
+                            }
+                            HorizontalLayout {
+                                spacing: 8px;
+                                KButton { horizontal-stretch: 1; small: true; text: "Add anchor"; clicked => { root.add-anchor(); root.pick(PlanKind.anchor, root.anchors.length - 1); } }
+                                KButton { horizontal-stretch: 1; small: true; text: "Import TDoA3 scene…"; clicked => { root.load-tdoa3-scene(); } }
+                            }
+                        }
+
+                        if root.tab == 1 && root.coverage-source == 1 && root.anchors.length >= 4: InfoCard {
+                            Title { text: root.error-metric-names[root.error-metric-index]; }
+                            if root.stats-text-2 != "": Text { text: root.stats-text-2; font-size: 12.5px; color: Theme.text; wrap: word-wrap; }
+                            if root.stats-text-3 != "": Text { text: root.stats-text-3; font-size: 12.5px; color: Theme.text; wrap: word-wrap; }
+                            Note { text: root.coverage.computed ? root.stats-text-1 : "Compute to see the accuracy."; }
+                        }
+
+                        if root.tab == 1 && root.coverage-source == 1: VerticalLayout {
+                            spacing: 8px;
+                            Title { text: "MODEL"; }
+                            HorizontalLayout {
+                                spacing: 8px;
+                                Field { label: "Max range (m)"; value: root.max-range; changed(v) => { root.max-range = v; root.coverage-stale = true; root.scene-dirty = true; } }
+                                Field { label: "σ TDoA (m)"; value: root.measurement-noise; changed(v) => { root.measurement-noise = v; root.error-metric-changed(root.error-metric-index); } }
+                            }
+                            Text { text: "Shown"; font-size: 11.5px; font-weight: 500; color: Theme.text3; }
+                            ComboBox {
+                                model: root.error-metric-names;
+                                current-index <=> root.error-metric-index;
+                                selected => { root.error-metric-changed(root.error-metric-index); }
+                            }
+                            if root.error-metric-index == 6: HorizontalLayout {
+                                spacing: 8px;
+                                Field { label: "Anchor A"; value: root.pair-a; changed(v) => { root.pair-a = v; root.error-metric-changed(root.error-metric-index); } }
+                                Field { label: "Anchor B"; value: root.pair-b; changed(v) => { root.pair-b = v; root.error-metric-changed(root.error-metric-index); } }
+                            }
+                            HorizontalLayout {
+                                spacing: 8px;
+                                Field { label: "Scale from"; value: root.tdoa3-scale-min.to-fixed(2); changed(v) => { root.tdoa3-scale-min = v.to-float(); root.error-metric-changed(root.error-metric-index); } }
+                                Field { label: "Scale to"; value: root.tdoa3-scale-max.to-fixed(2); changed(v) => { root.tdoa3-scale-max = v.to-float(); root.error-metric-changed(root.error-metric-index); } }
+                            }
+                            SwitchRow {
+                                text: "Outside the anchors too";
+                                note: "Show points outside the hull of the anchors";
+                                checked <=> root.show-outside-hull;
+                                toggled => { root.error-metric-changed(root.error-metric-index); }
+                            }
+                            KButton {
+                                kind: ButtonKind.primary;
+                                text: root.computing ? "Computing…" : "Compute";
+                                enabled: !root.computing;
+                                clicked => { root.recompute(); }
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 
-    // Computing indicator (bottom-right corner, no overlay)
-    if root.computing: Rectangle {
-        width: 180px;
-        height: 36px;
-        x: root.width - self.width - 12px;
-        y: root.height - self.height - 12px;
-        background: Palette.background;
-        border-radius: 6px;
-        border-width: 1px;
-        border-color: Palette.border;
-
-        Text {
-            text: "Computing...";
-            font-size: 12px;
-            font-weight: 600;
-            horizontal-alignment: center;
-            vertical-alignment: center;
-        }
+    // The room changed: the scene is unsaved and the coverage out of date
+    function room-changed() {
+        root.scene-dirty = true;
+        root.coverage-stale = true;
     }
 }

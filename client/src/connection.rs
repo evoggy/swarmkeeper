@@ -21,6 +21,7 @@
 //! work in `shared` and `direct` mode.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use crazyflie_connection_server::{Client, CONNECTION_ENV};
 use tokio::sync::RwLock;
@@ -31,6 +32,11 @@ use crate::AppWindow;
 
 /// The mode when none is chosen.
 pub const DEFAULT_MODE: &str = "auto";
+
+/// How long to wait for a connection server. A host that doesn't answer
+/// at all would otherwise hold up the start for the kernel's ~2 minutes
+/// of connect retries, with no window.
+const OPEN_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// The connection, replaced when the user picks another mode.
 pub type SharedConnection = Arc<RwLock<Connection>>;
@@ -55,12 +61,15 @@ pub fn mode(setting: Option<&str>) -> String {
 }
 
 impl Connection {
-    /// Open `mode`. When that fails (a server that doesn't answer, port
-    /// 7777 taken), fall back to `direct` and keep the reason in `problem`,
-    /// so that Swarmkeeper still starts.
+    /// Open `mode`. When that fails (a server that doesn't answer within
+    /// [`OPEN_TIMEOUT`], port 7777 taken), fall back to `direct` and keep
+    /// the reason in `problem`, so that Swarmkeeper still starts.
     pub async fn open(mode: &str, link_context: Arc<LinkContext>, toc_cache: FileTocCache) -> Connection {
         let name = format!("Swarmkeeper on {}", host::env::hostname());
-        let (client, problem) = match server::open(mode, &name, link_context.clone(), toc_cache.clone()).await {
+        let opened = host::task::timeout(OPEN_TIMEOUT, server::open(mode, &name, link_context.clone(), toc_cache.clone()))
+            .await
+            .unwrap_or_else(|_| Err(crazyflie_connection_server::Error::Transport(format!("no answer within {} s", OPEN_TIMEOUT.as_secs()))));
+        let (client, problem) = match opened {
             Ok(client) => (client, None),
             Err(e) => {
                 eprintln!("Connection mode '{}': {}. Using this computer's Crazyradios", mode, e);

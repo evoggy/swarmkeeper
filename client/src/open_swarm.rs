@@ -234,6 +234,7 @@ fn refresh_account(ctx: &Ctx) {
         ctx.ui(|ui| {
             ui.set_account_label("Sign in".into());
             ui.set_account_text("Not signed in. Sign in to open the swarms shared in your organizations.".into());
+            ui.set_account_orgs("".into());
             ui.set_signed_in(false);
             ui.set_needs_sign_in(true);
             ui.set_os_shared_title("Shared".into());
@@ -257,6 +258,7 @@ fn refresh_account(ctx: &Ctx) {
     host::spawn(async move {
         match account::whoami(&credentials).await {
             Ok(user) => {
+                let org_names = user.orgs.iter().map(|org| org.name.as_str()).collect::<Vec<_>>().join(", ");
                 let orgs = if user.orgs.is_empty() {
                     format!(
                         "You aren't in an organization yet: create one at {}, or ask an admin to invite you.",
@@ -274,6 +276,7 @@ fn refresh_account(ctx: &Ctx) {
                 ctx.ui(move |ui| {
                     ui.set_account_label(user.name.into());
                     ui.set_account_text(text.into());
+                    ui.set_account_orgs(org_names.into());
                 });
             }
             Err(e) if e.downcast_ref::<KeyRejected>().is_some() => {
@@ -282,6 +285,7 @@ fn refresh_account(ctx: &Ctx) {
                     ui.set_account_label("Sign in again".into());
                     ui.set_account_text(text.into());
                     ui.set_needs_sign_in(true);
+                    ui.set_account_orgs("".into());
                 });
             }
             Err(e) => {
@@ -299,6 +303,7 @@ fn key_rejected(ctx: &Ctx, text: String) {
         ui.set_account_label("Sign in again".into());
         ui.set_account_text(text.into());
         ui.set_needs_sign_in(true);
+        ui.set_account_orgs("".into());
     });
 }
 

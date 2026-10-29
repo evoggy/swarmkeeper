@@ -319,6 +319,12 @@ fn schedule_rebuild(ui: &AppWindow) {
     });
 }
 
+/// Whether the 3D view has a position for a unit in this state: not for one
+/// that is disconnected or timed out.
+pub(crate) fn has_position(state: UnitState) -> bool {
+    !matches!(state, UnitState::Disconnected | UnitState::Error)
+}
+
 /// Lazily fetch platform/firmware info for the unit at a `sorted-units` row
 /// index, updating the UI when done. Shared by the Units-table selection and
 /// the visualization click-to-select so both populate the sidebar identically.
@@ -389,6 +395,16 @@ pub(crate) fn setup(ui: &AppWindow, cx: &AppContext) {
         ui.on_unit_filter_changed(move || {
             let Some(ui) = ui_weak.upgrade() else { return };
             rebuild_table_rows(&ui);
+        });
+    }
+
+    // Status shows the account and the connection, which change without
+    // the units changing.
+    {
+        let ui_weak = ui.as_weak();
+        ui.on_status_inputs_changed(move || {
+            let Some(ui) = ui_weak.upgrade() else { return };
+            schedule_rebuild(&ui);
         });
     }
 

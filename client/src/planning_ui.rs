@@ -4,7 +4,8 @@ use slint::{ComponentHandle, Model};
 
 use crate::app::AppContext;
 use crate::settings::AppSettings;
-use crate::{AppWindow, coverage, LhBaseStationData, PlanBoxVolumeData, planning, PlanObstacleData, PlanPadData, host::renderer, tdoa3, Tdoa3AnchorData};
+use crate::view3d::VizSceneState;
+use crate::{AppWindow, coverage, LhBaseStationData, PlanBoxVolumeData, PlanCoverage, planning, PlanObstacleData, PlanPadData, host::renderer, tdoa3, Tdoa3AnchorData};
 use crate::host;
 
 // Planning shared state
@@ -28,7 +29,12 @@ pub(crate) struct PlanningState {
     pub(crate) selected_area_kind: i32,
     pub(crate) selected_area_index: i32,
     pub(crate) takeoff_pads: Vec<planning::TakeoffPad>,
-    pub(crate) undo_stack: Vec<(Vec<coverage::BaseStation>, Vec<tdoa3::Anchor>, Vec<planning::Obstacle>)>,
+    pub(crate) undo_stack: Vec<UndoSnapshot>,
+    /// The object the last edit changed, so that typing in its fields is
+    /// one undo step.
+    pub(crate) last_edit: Option<EditKey>,
+    /// The file the scene was read from or saved to
+    pub(crate) scene_path: Option<std::path::PathBuf>,
     pub(crate) convex_hull: Option<tdoa3::ConvexHull>,
     pub(crate) trajectories: Vec<Vec<[f32; 3]>>,
     pub(crate) lh_ratio_1: f32,
@@ -36,6 +42,61 @@ pub(crate) struct PlanningState {
     pub(crate) gdop_mean: f32,
     pub(crate) hull_stats: Option<(f32, f32, f32)>,
     pub(crate) last_metric: i32,
+}
+
+impl Default for PlanningState {
+    fn default() -> Self {
+        Self {
+            base_stations: Vec::new(),
+            anchors: Vec::new(),
+            obstacles: Vec::new(),
+            lh_voxels: Vec::new(),
+            tdoa3_voxels: Vec::new(),
+            tdoa3_gdop_result: None,
+            bs_render_data: Vec::new(),
+            anchor_positions: Vec::new(),
+            obstacle_triangles: Vec::new(),
+            obstacle_wireframes: Vec::new(),
+            obstacle_colors: Vec::new(),
+            room: [8.0, 8.0, 3.0],
+            room_offset: [0.0; 3],
+            flight_areas: Vec::new(),
+            waypoint_areas: Vec::new(),
+            selected_area_kind: 0,
+            selected_area_index: -1,
+            takeoff_pads: Vec::new(),
+            undo_stack: Vec::new(),
+            last_edit: None,
+            scene_path: None,
+            convex_hull: None,
+            trajectories: Vec::new(),
+            lh_ratio_1: 0.0,
+            lh_ratio_2: 0.0,
+            gdop_mean: 0.0,
+            hull_stats: None,
+            last_metric: -1,
+        }
+    }
+}
+
+/// The scene before an edit: base stations, anchors, obstacles, flight
+/// areas, waypoint areas.
+pub(crate) type UndoSnapshot = (
+    Vec<coverage::BaseStation>,
+    Vec<tdoa3::Anchor>,
+    Vec<planning::Obstacle>,
+    Vec<planning::BoxVolume>,
+    Vec<planning::BoxVolume>,
+);
+
+/// What an edit changed.
+#[derive(Clone, Copy, PartialEq)]
+pub(crate) enum EditKey {
+    BaseStation(usize),
+    Anchor(usize),
+    Obstacle(usize),
+    FlightArea(usize),
+    WaypointArea(usize),
 }
 
 pub(crate) struct PlanningGizmoState {
@@ -50,6 +111,684 @@ pub(crate) struct PlanningGizmoState {
     pub(crate) area_start_max: [f32; 3],
     pub(crate) area_axis_screen: [f32; 2], // screen-space unit vector of the dragged axis
     pub(crate) area_world_per_px: f32,     // world meters per screen pixel along that axis
+}
+
+// Helper: rebuild obstacle meshes in state
+fn rebuild_obstacle_meshes(ps: &mut PlanningState) {
+    ps.obstacle_triangles = ps.obstacles.iter().map(|o| o.triangulate()).collect();
+    ps.obstacle_wireframes = ps.obstacles.iter().map(|o| o.wireframe()).collect();
+    ps.obstacle_colors = ps.obstacles.iter().map(|o| o.color).collect();
+}
+
+// Build the Slint model rows for a list of area box volumes.
+fn area_models(areas: &[planning::BoxVolume]) -> Vec<PlanBoxVolumeData> {
+    areas
+        .iter()
+        .map(|a| PlanBoxVolumeData {
+            label: a.label.clone().into(),
+            min_x: format!("{:.2}", a.min[0]).into(),
+            min_y: format!("{:.2}", a.min[1]).into(),
+            min_z: format!("{:.2}", a.min[2]).into(),
+            max_x: format!("{:.2}", a.max[0]).into(),
+            max_y: format!("{:.2}", a.max[1]).into(),
+            max_z: format!("{:.2}", a.max[2]).into(),
+        })
+        .collect()
+}
+
+// Parse a Slint area row back into a BoxVolume.
+fn box_volume_from_model(d: &PlanBoxVolumeData) -> planning::BoxVolume {
+    planning::BoxVolume {
+        min: [
+            d.min_x.parse().unwrap_or(0.0),
+            d.min_y.parse().unwrap_or(0.0),
+            d.min_z.parse().unwrap_or(0.0),
+        ],
+        max: [
+            d.max_x.parse().unwrap_or(0.0),
+            d.max_y.parse().unwrap_or(0.0),
+            d.max_z.parse().unwrap_or(0.0),
+        ],
+        label: d.label.to_string(),
+    }
+}
+
+// Compute the displayed TDoA3 voxels + two stats lines for a given metric.
+// Ported from the standalone TDoA3 Coverage tab so Planning supports the
+// full set of metrics (DOP / error / sensitivity / pair sensitivity).
+#[allow(clippy::too_many_arguments)]
+fn tdoa3_metric_voxels_and_stats(
+    display_metric: usize,
+    gdop_result: Option<&tdoa3::GdopResult>,
+    anchors: &[tdoa3::Anchor],
+    convex_hull: Option<&tdoa3::ConvexHull>,
+    room: [f32; 3],
+    resolution: f32,
+    max_range: f32,
+    offset: [f32; 3],
+    sigma: f32,
+    min_slider: f32,
+    max_slider: f32,
+    show_outside_hull: bool,
+    pair_a: usize,
+    pair_b: usize,
+) -> (Vec<(f32, f32, f32, f32)>, [String; 2]) {
+    const DISP_PAIRS: usize = 5;
+    const DISP_PAIR_SENS: usize = 6;
+    const DISP_X_ERR: usize = 7;
+    const DISP_Y_ERR: usize = 8;
+    const DISP_Z_ERR: usize = 9;
+    const DISP_XY_ERR: usize = 10;
+    const DISP_GLOBAL_ERR: usize = 11;
+    const DISP_X_SENS: usize = 12;
+    const DISP_Z_SENS: usize = 14;
+    const DISP_MIN_SENS: usize = 15;
+    const DISP_MIN_XY_SENS: usize = 16;
+
+    let hull_filter = |voxels: Vec<(f32, f32, f32, f32)>| -> Vec<(f32, f32, f32, f32)> {
+        if show_outside_hull {
+            voxels
+        } else {
+            voxels.into_iter()
+                .filter(|(x, y, z, _)| convex_hull.map_or(true, |h| h.contains(&[*x, *y, *z])))
+                .collect()
+        }
+    };
+
+    // Pair sensitivity (single anchor pair)
+    if display_metric == DISP_PAIR_SENS {
+        if pair_a >= anchors.len() || pair_b >= anchors.len() || pair_a == pair_b {
+            return (Vec::new(), [
+                "Select two different valid anchor indices".to_string(),
+                String::new(),
+            ]);
+        }
+        let voxels = hull_filter(tdoa3::compute_pair_sensitivity(
+            room[0], room[1], room[2], resolution,
+            anchors[pair_a].pos, anchors[pair_b].pos, max_range, offset,
+        ));
+        let (min_v, max_v, avg_v) = tdoa3::voxel_stats(&voxels);
+        return (voxels, [
+            format!("|h| min: {:.2}  max: {:.2}  avg: {:.2}", min_v, max_v, avg_v),
+            format!("Pair: anchor {} ↔ anchor {} (0 = degenerate, 2 = ideal)", pair_a, pair_b),
+        ]);
+    }
+
+    // Axis sensitivity (X / Y / Z)
+    if (DISP_X_SENS..=DISP_Z_SENS).contains(&display_metric) {
+        let axis = display_metric - DISP_X_SENS;
+        let axis_name = ["X", "Y", "Z"][axis];
+        let voxels = hull_filter(tdoa3::compute_axis_sensitivity(
+            room[0], room[1], room[2], resolution, anchors, max_range, offset, axis,
+        ));
+        let (min_v, max_v, avg_v) = tdoa3::voxel_stats(&voxels);
+        return (voxels, [
+            format!("{} sensitivity: min {:.2}  max {:.2}  avg {:.2}", axis_name, min_v, max_v, avg_v),
+            "High = measurements respond to movement, low = flat hyperbolas".to_string(),
+        ]);
+    }
+
+    // Min-of-axes sensitivity
+    if display_metric == DISP_MIN_SENS || display_metric == DISP_MIN_XY_SENS {
+        let include_z = display_metric == DISP_MIN_SENS;
+        let voxels = hull_filter(tdoa3::compute_min_axis_sensitivity(
+            room[0], room[1], room[2], resolution, anchors, max_range, offset, include_z,
+        ));
+        let label = if include_z { "Min XYZ" } else { "Min XY" };
+        let (min_v, max_v, avg_v) = tdoa3::voxel_stats(&voxels);
+        return (voxels, [
+            format!("{} sensitivity: min {:.2}  max {:.2}  avg {:.2}", label, min_v, max_v, avg_v),
+            "Weakest axis at each point (low = bottleneck for positioning)".to_string(),
+        ]);
+    }
+
+    // DOP / error metrics from the precomputed GDOP result
+    let Some(result) = gdop_result else {
+        return (Vec::new(), [String::new(), String::new()]);
+    };
+    let (storage_metric, metric_name, sigma_mult) = match display_metric {
+        0 => (tdoa3::METRIC_GDOP, "GDOP", 1.0),
+        1 => (tdoa3::METRIC_HDOP, "HDOP", 1.0),
+        2 => (tdoa3::METRIC_VDOP, "VDOP", 1.0),
+        3 => (tdoa3::METRIC_XDOP, "XDOP", 1.0),
+        4 => (tdoa3::METRIC_YDOP, "YDOP", 1.0),
+        DISP_PAIRS => (tdoa3::METRIC_PAIRS, "Pairs", 1.0),
+        DISP_X_ERR => (tdoa3::METRIC_XDOP, "σ_x", sigma),
+        DISP_Y_ERR => (tdoa3::METRIC_YDOP, "σ_y", sigma),
+        DISP_Z_ERR => (tdoa3::METRIC_VDOP, "σ_z", sigma),
+        DISP_XY_ERR => (tdoa3::METRIC_HDOP, "σ_xy", sigma),
+        DISP_GLOBAL_ERR => (tdoa3::METRIC_GDOP, "σ_xyz", sigma),
+        _ => (tdoa3::METRIC_GDOP, "GDOP", 1.0),
+    };
+
+    let mut voxels: Vec<(f32, f32, f32, f32)> =
+        hull_filter(result.iter_voxels(offset, storage_metric).collect());
+    if sigma_mult != 1.0 {
+        for v in &mut voxels {
+            if v.3.is_finite() { v.3 *= sigma_mult; }
+        }
+    }
+
+    // Stats over visible voxels within slider range
+    let mut vis_min = f32::INFINITY;
+    let mut vis_max = f32::NEG_INFINITY;
+    let mut vis_sum = 0.0_f64;
+    let mut vis_sum_sq = 0.0_f64;
+    let mut vis_count = 0u32;
+    let mut total_finite = 0u32;
+    for &(_, _, _, v) in &voxels {
+        if v.is_finite() {
+            total_finite += 1;
+            if v >= min_slider && v <= max_slider {
+                vis_min = vis_min.min(v);
+                vis_max = vis_max.max(v);
+                vis_sum += v as f64;
+                vis_sum_sq += (v as f64) * (v as f64);
+                vis_count += 1;
+            }
+        }
+    }
+    let vis_mean = if vis_count > 0 { vis_sum / vis_count as f64 } else { 0.0 };
+    let vis_std = if vis_count > 1 {
+        ((vis_sum_sq / vis_count as f64) - vis_mean * vis_mean).max(0.0).sqrt()
+    } else { 0.0 };
+    let ratio = if total_finite > 0 { vis_count as f32 / total_finite as f32 } else { 0.0 };
+
+    let lines = if (DISP_X_ERR..=DISP_GLOBAL_ERR).contains(&display_metric) {
+        let axis = match display_metric {
+            DISP_X_ERR => "X", DISP_Y_ERR => "Y", DISP_Z_ERR => "Z",
+            DISP_XY_ERR => "XY", _ => "Global",
+        };
+        [
+            format!("{} error: min {:.3}m  max {:.3}m  avg {:.3}m  σ {:.3}m",
+                axis, vis_min, vis_max, vis_mean, vis_std),
+            format!("{} ∈ [{:.2}, {:.2}]m: {:.1}% (σ_tdoa = {}m)",
+                metric_name, min_slider, max_slider, ratio * 100.0, sigma),
+        ]
+    } else if display_metric == DISP_PAIRS {
+        [
+            format!("{} min: {:.0}  max: {:.0}  avg: {:.1}", metric_name,
+                if vis_min.is_finite() { vis_min } else { 0.0 },
+                if vis_max.is_finite() { vis_max } else { 0.0 }, vis_mean),
+            format!("≥3 pairs: {:.1}%  ≥6 pairs: {:.1}%",
+                result.coverage_ratio_pairs(3.0) * 100.0,
+                result.coverage_ratio_pairs(6.0) * 100.0),
+        ]
+    } else {
+        [
+            format!("{} min: {:.3}  max: {:.3}  avg: {:.3}  σ: {:.3}", metric_name,
+                if vis_min.is_finite() { vis_min } else { 0.0 },
+                if vis_max.is_finite() { vis_max } else { 0.0 }, vis_mean, vis_std),
+            format!("{} ∈ [{:.2}, {:.2}]: {:.1}%", metric_name, min_slider, max_slider, ratio * 100.0),
+        ]
+    };
+    (voxels, lines)
+}
+
+// Refresh Planning's TDoA3 voxels + stats text for the current metric,
+// reusing the already-computed GDOP result (no recompute needed).
+fn refresh_planning_tdoa3(ui: &AppWindow, ps: &mut PlanningState) {
+    let metric = ui.get_planning_error_metric_index().max(0) as usize;
+    let sigma: f32 = ui.get_planning_measurement_noise().parse().unwrap_or(0.15);
+    let resolution: f32 = ui.get_planning_resolution().parse().unwrap_or(5.0);
+    let max_range: f32 = ui.get_planning_max_range().parse().unwrap_or(15.0);
+    let min_slider = ui.get_planning_tdoa3_scale_min();
+    let max_slider = ui.get_planning_tdoa3_scale_max();
+    let show_outside_hull = ui.get_planning_show_outside_hull();
+    let pair_a: usize = ui.get_planning_pair_a().parse().unwrap_or(0);
+    let pair_b: usize = ui.get_planning_pair_b().parse().unwrap_or(1);
+
+    let (voxels, stats) = tdoa3_metric_voxels_and_stats(
+        metric,
+        ps.tdoa3_gdop_result.as_ref(),
+        &ps.anchors,
+        ps.convex_hull.as_ref(),
+        ps.room,
+        resolution,
+        max_range,
+        ps.room_offset,
+        sigma,
+        min_slider,
+        max_slider,
+        show_outside_hull,
+        pair_a,
+        pair_b,
+    );
+    ps.tdoa3_voxels = voxels;
+
+    // Line 1: LH coverage + room global-error glance (+ hull glance if available)
+    let mut line1 = format!(
+        "LH: {:.0}% ≥1BS, {:.0}% ≥2BS  |  Room σ_xyz {:.1}cm",
+        ps.lh_ratio_1 * 100.0, ps.lh_ratio_2 * 100.0, ps.gdop_mean * sigma * 100.0,
+    );
+    if let Some((g, _, _)) = ps.hull_stats {
+        line1 += &format!("  Hull {:.1}cm", g * sigma * 100.0);
+    }
+    ui.set_planning_stats_text_1(line1.into());
+    ui.set_planning_stats_text_2(stats[0].clone().into());
+    ui.set_planning_stats_text_3(stats[1].clone().into());
+}
+
+fn rebuild_bs_render_data(ps: &mut PlanningState) {
+    ps.bs_render_data = ps
+        .base_stations
+        .iter()
+        .map(|bs| (bs.pos, bs.rotation_matrix()))
+        .collect();
+}
+
+fn rebuild_anchor_positions(ps: &mut PlanningState) {
+    ps.anchor_positions = ps.anchors.iter().map(|a| a.pos).collect();
+}
+
+
+/// Keep the scene as it is before an edit, for Undo, and mark the scene
+/// unsaved and the coverage out of date. Edits of the same object in a row
+/// are one step; `None` always starts a new one.
+fn checkpoint(ui: &AppWindow, ps: &mut PlanningState, key: Option<EditKey>) {
+    ui.set_planning_scene_dirty(true);
+    ui.set_planning_coverage_stale(true);
+    if key.is_some() && key == ps.last_edit {
+        return;
+    }
+    ps.last_edit = key;
+    ps.undo_stack.push((
+        ps.base_stations.clone(),
+        ps.anchors.clone(),
+        ps.obstacles.clone(),
+        ps.flight_areas.clone(),
+        ps.waypoint_areas.clone(),
+    ));
+    ui.set_planning_undo_count(ps.undo_stack.len() as i32);
+}
+
+fn bs_models(ps: &PlanningState) -> Vec<LhBaseStationData> {
+    ps.base_stations
+        .iter()
+        .map(|bs| LhBaseStationData {
+            x: format!("{:.2}", bs.pos[0]).into(),
+            y: format!("{:.2}", bs.pos[1]).into(),
+            z: format!("{:.2}", bs.pos[2]).into(),
+            azimuth: format!("{:.1}", bs.azimuth_deg).into(),
+            elevation: format!("{:.1}", bs.elevation_deg).into(),
+        })
+        .collect()
+}
+
+fn anchor_models(ps: &PlanningState) -> Vec<Tdoa3AnchorData> {
+    ps.anchors
+        .iter()
+        .map(|a| Tdoa3AnchorData {
+            x: format!("{:.2}", a.pos[0]).into(),
+            y: format!("{:.2}", a.pos[1]).into(),
+            z: format!("{:.2}", a.pos[2]).into(),
+        })
+        .collect()
+}
+
+fn obstacle_models(ps: &PlanningState) -> Vec<PlanObstacleData> {
+    ps.obstacles
+        .iter()
+        .map(|o| PlanObstacleData {
+            kind: match o.kind {
+                planning::ObstacleKind::Box => "Box",
+                planning::ObstacleKind::Cylinder => "Cylinder",
+            }
+            .into(),
+            x: format!("{:.2}", o.pos[0]).into(),
+            y: format!("{:.2}", o.pos[1]).into(),
+            z: format!("{:.2}", o.pos[2]).into(),
+            yaw: format!("{:.1}", o.yaw_deg).into(),
+            width: format!("{:.2}", o.width).into(),
+            depth: format!("{:.2}", o.depth).into(),
+            height: format!("{:.2}", o.height).into(),
+            radius: format!("{:.2}", o.radius).into(),
+            color_r: o.color[0],
+            color_g: o.color[1],
+            color_b: o.color[2],
+            on_floor: o.on_floor,
+        })
+        .collect()
+}
+
+fn model<T: Clone + 'static>(rows: Vec<T>) -> slint::ModelRc<T> {
+    slint::ModelRc::new(slint::VecModel::from(rows))
+}
+
+/// Show the scene's objects in the lists.
+fn show_objects(ui: &AppWindow, ps: &PlanningState) {
+    ui.set_planning_base_stations(model(bs_models(ps)));
+    ui.set_planning_anchors(model(anchor_models(ps)));
+    ui.set_planning_obstacles(model(obstacle_models(ps)));
+    ui.set_planning_flight_areas(model(area_models(&ps.flight_areas)));
+    ui.set_planning_waypoint_areas(model(area_models(&ps.waypoint_areas)));
+    let pads: Vec<PlanPadData> = ps
+        .takeoff_pads
+        .iter()
+        .map(|p| PlanPadData {
+            label: p.label.clone().into(),
+            x: format!("{:.2}", p.x).into(),
+            y: format!("{:.2}", p.y).into(),
+            radius: format!("{:.2}", p.radius).into(),
+        })
+        .collect();
+    ui.set_planning_takeoff_pads(model(pads));
+}
+
+/// Replace what Planning shows with a scene read from a file named `name`.
+pub(crate) fn apply_scene(ui: &AppWindow, ps: &mut PlanningState, scene: &planning::PlanningScene, name: &str) {
+    ps.base_stations = scene.base_stations();
+    ps.anchors = scene.anchors();
+    ps.obstacles = scene.obstacles();
+    ps.flight_areas = scene.flight_areas.clone();
+    ps.waypoint_areas = scene.waypoint_areas.clone();
+    ps.selected_area_kind = 0;
+    ps.selected_area_index = -1;
+    ps.takeoff_pads = scene.takeoff_pads.clone();
+    rebuild_bs_render_data(ps);
+    rebuild_anchor_positions(ps);
+    rebuild_obstacle_meshes(ps);
+    ps.undo_stack.clear();
+    ps.last_edit = None;
+    ui.set_planning_undo_count(0);
+
+    ui.set_planning_room_x(format!("{}", scene.room_x).into());
+    ui.set_planning_room_y(format!("{}", scene.room_y).into());
+    ui.set_planning_room_z(format!("{}", scene.room_z).into());
+    ui.set_planning_resolution(format!("{}", scene.resolution).into());
+    ui.set_planning_center_origin(scene.center_origin);
+    ui.set_planning_room_offset_x(format!("{}", scene.room_offset[0]).into());
+    ui.set_planning_room_offset_y(format!("{}", scene.room_offset[1]).into());
+    ui.set_planning_room_offset_z(format!("{}", scene.room_offset[2]).into());
+    ui.set_planning_receiver_fov_enabled(scene.receiver_fov_enabled);
+    ui.set_planning_max_bs_distance(format!("{}", scene.max_bs_distance).into());
+    ui.set_planning_show_coverage_0(scene.show_coverage[0]);
+    ui.set_planning_show_coverage_1(scene.show_coverage[1]);
+    ui.set_planning_show_coverage_2(scene.show_coverage[2]);
+    ui.set_planning_show_coverage_3(scene.show_coverage[3]);
+    ui.set_planning_show_coverage_4(scene.show_coverage[4]);
+    ui.set_planning_max_range(format!("{}", scene.max_range).into());
+    ui.set_planning_tilt_compensation_enabled(scene.tilt_compensation_enabled);
+    ui.set_planning_max_tilt_angle(format!("{}", scene.max_tilt_angle).into());
+    ps.last_metric = -1;
+
+    let uo = scene.room_offset;
+    ps.room = [scene.room_x, scene.room_y, scene.room_z];
+    ps.room_offset = if scene.center_origin {
+        [-scene.room_x / 2.0 + uo[0], -scene.room_y / 2.0 + uo[1], uo[2]]
+    } else {
+        uo
+    };
+    ps.lh_voxels.clear();
+    ps.tdoa3_voxels.clear();
+    ps.tdoa3_gdop_result = None;
+
+    show_objects(ui, ps);
+    ui.set_planning_selected_area_kind(0);
+    ui.set_planning_selected_area_index(-1);
+    ui.set_planning_selected_type(0);
+    ui.set_planning_selected_index(-1);
+    ui.set_planning_stats_text_1("".into());
+    ui.set_planning_stats_text_2("".into());
+    ui.set_planning_stats_text_3("".into());
+    ui.set_planning_coverage(PlanCoverage::default());
+    ui.set_planning_scene_name(name.into());
+    ui.set_planning_scene_dirty(false);
+}
+
+/// What a coverage computation needs, read from the UI.
+pub(crate) struct CoverageJob {
+    room: [f32; 3],
+    resolution: f32,
+    offset: [f32; 3],
+    max_bs_dist: f32,
+    max_range: f32,
+    receiver_fov: Option<f32>,
+    tilt_reduction: Option<f32>,
+    base_stations: Vec<coverage::BaseStation>,
+    anchors: Vec<tdoa3::Anchor>,
+    obstacles: Vec<planning::Obstacle>,
+    /// Where the headline numbers are counted: the first flight area
+    flight_area: Option<planning::BoxVolume>,
+}
+
+/// The result of a [`CoverageJob`].
+pub(crate) struct CoverageOutput {
+    lh_voxels: Vec<(f32, f32, f32, u8)>,
+    lh_ratio_1: f32,
+    lh_ratio_2: f32,
+    tdoa3_result: tdoa3::GdopResult,
+    gdop_mean: f32,
+    hull_stats: Option<(f32, f32, f32)>,
+    offset: [f32; 3],
+    room: [f32; 3],
+    /// Points in the counted volume by how many base stations see them:
+    /// 0, 1, 2, 3, 4 or more
+    levels: [u32; 5],
+    /// Points in the counted volume each base station sees
+    per_bs: Vec<u32>,
+    area: String,
+    millis: u128,
+}
+
+pub(crate) fn coverage_job(ui: &AppWindow, ps: &PlanningState) -> CoverageJob {
+    let room = [
+        ui.get_planning_room_x().parse().unwrap_or(8.0),
+        ui.get_planning_room_y().parse().unwrap_or(8.0),
+        ui.get_planning_room_z().parse().unwrap_or(3.0),
+    ];
+    let user_offset: [f32; 3] = [
+        ui.get_planning_room_offset_x().parse().unwrap_or(0.0),
+        ui.get_planning_room_offset_y().parse().unwrap_or(0.0),
+        ui.get_planning_room_offset_z().parse().unwrap_or(0.0),
+    ];
+    let offset = if ui.get_planning_center_origin() {
+        [-room[0] / 2.0 + user_offset[0], -room[1] / 2.0 + user_offset[1], user_offset[2]]
+    } else {
+        user_offset
+    };
+    CoverageJob {
+        room,
+        resolution: ui.get_planning_resolution().parse().unwrap_or(5.0),
+        offset,
+        max_bs_dist: ui.get_planning_max_bs_distance().parse().unwrap_or(5.0),
+        max_range: ui.get_planning_max_range().parse().unwrap_or(15.0),
+        receiver_fov: ui.get_planning_receiver_fov_enabled().then_some(170.0),
+        tilt_reduction: ui
+            .get_planning_tilt_compensation_enabled()
+            .then(|| ui.get_planning_max_tilt_angle().parse().unwrap_or(10.0)),
+        base_stations: ps.base_stations.clone(),
+        anchors: ps.anchors.clone(),
+        obstacles: ps.obstacles.clone(),
+        flight_area: ps.flight_areas.first().cloned(),
+    }
+}
+
+/// Compute Lighthouse coverage and the TDoA3 accuracy. Slow: run it off the
+/// UI thread.
+pub(crate) fn run_coverage(job: CoverageJob) -> CoverageOutput {
+    let started = host::task::Instant::now();
+    let [room_x, room_y, room_z] = job.room;
+    let lh = |base_stations: &[coverage::BaseStation]| {
+        planning::compute_coverage_with_obstacles(
+            room_x, room_y, room_z, job.resolution,
+            base_stations, 160.0, 115.0,
+            job.receiver_fov, job.tilt_reduction, job.max_bs_dist, job.offset,
+            &job.obstacles,
+        )
+    };
+    let lh_result = lh(&job.base_stations);
+    let lh_voxels: Vec<(f32, f32, f32, u8)> = lh_result.iter_voxels(job.offset).collect();
+
+    // The headline numbers: in the first flight area, else the whole room
+    let inside = |x: f32, y: f32, z: f32| match &job.flight_area {
+        Some(a) => (a.min[0]..=a.max[0]).contains(&x) && (a.min[1]..=a.max[1]).contains(&y) && (a.min[2]..=a.max[2]).contains(&z),
+        None => true,
+    };
+    let mut levels = [0u32; 5];
+    for &(x, y, z, n) in &lh_voxels {
+        if inside(x, y, z) {
+            levels[(n as usize).min(4)] += 1;
+        }
+    }
+    let per_bs = job
+        .base_stations
+        .iter()
+        .map(|bs| {
+            lh(std::slice::from_ref(bs))
+                .iter_voxels(job.offset)
+                .filter(|&(x, y, z, n)| n > 0 && inside(x, y, z))
+                .count() as u32
+        })
+        .collect();
+    let area = match &job.flight_area {
+        Some(a) => format!(
+            "Flight area 1 · {:.2} × {:.2} × {:.2} m",
+            a.max[0] - a.min[0],
+            a.max[1] - a.min[1],
+            a.max[2] - a.min[2]
+        ),
+        None => format!("The room · {} × {} × {} m", room_x, room_y, room_z),
+    };
+
+    let tdoa3_result = tdoa3::compute_gdop(room_x, room_y, room_z, job.resolution, &job.anchors, job.max_range, job.offset);
+    let (_, _, gdop_mean) = tdoa3_result.stats(tdoa3::METRIC_GDOP);
+    let anchor_positions: Vec<[f32; 3]> = job.anchors.iter().map(|a| a.pos).collect();
+    let hull_stats = tdoa3::ConvexHull::build(&anchor_positions).map(|h| {
+        let (_, _, g) = tdoa3_result.stats_in_hull(tdoa3::METRIC_GDOP, job.offset, &h);
+        let (_, _, hh) = tdoa3_result.stats_in_hull(tdoa3::METRIC_HDOP, job.offset, &h);
+        let (_, _, v) = tdoa3_result.stats_in_hull(tdoa3::METRIC_VDOP, job.offset, &h);
+        (g, hh, v)
+    });
+
+    CoverageOutput {
+        lh_ratio_1: lh_result.coverage_ratio(1),
+        lh_ratio_2: lh_result.coverage_ratio(2),
+        lh_voxels,
+        tdoa3_result,
+        gdop_mean,
+        hull_stats,
+        offset: job.offset,
+        room: job.room,
+        levels,
+        per_bs,
+        area,
+        millis: started.elapsed().as_millis(),
+    }
+}
+
+/// The colour scale of the TDoA3 metric `idx`, when another metric is
+/// shown than the scale was set for.
+fn reset_metric_scale(ui: &AppWindow, ps: &mut PlanningState, idx: i32) {
+    if idx == ps.last_metric {
+        return;
+    }
+    ps.last_metric = idx;
+    // Error metrics (7-11) are in metres; DOP/sensitivity are unitless.
+    let (limit, default_min, default_max) = match idx.max(0) as usize {
+        7..=11 => (2.0_f32, 0.0_f32, 0.5_f32),   // error in metres
+        12..=16 => (2.0_f32, 0.0_f32, 1.0_f32),  // sensitivity
+        5 => (20.0, 0.0, 12.0),                  // anchor pairs (count)
+        6 => (2.0, 0.0, 2.0),                    // pair sensitivity
+        _ => (10.0, 0.0, 5.0),                   // DOP values
+    };
+    ui.set_planning_tdoa3_scale_limit(limit);
+    ui.set_planning_tdoa3_scale_min(default_min);
+    ui.set_planning_tdoa3_scale_max(default_max);
+}
+
+/// Show a finished computation.
+pub(crate) fn apply_coverage(ui: &AppWindow, ps: &mut PlanningState, out: CoverageOutput) {
+    ps.room = out.room;
+    ps.room_offset = out.offset;
+    ps.lh_voxels = out.lh_voxels;
+    ps.lh_ratio_1 = out.lh_ratio_1;
+    ps.lh_ratio_2 = out.lh_ratio_2;
+    ps.gdop_mean = out.gdop_mean;
+    ps.hull_stats = out.hull_stats;
+    ps.tdoa3_gdop_result = Some(out.tdoa3_result);
+    ps.convex_hull = tdoa3::ConvexHull::build(&ps.anchor_positions);
+    reset_metric_scale(ui, ps, ui.get_planning_error_metric_index());
+    refresh_planning_tdoa3(ui, ps);
+
+    let points: u32 = out.levels.iter().sum();
+    let share = |n: u32| if points > 0 { n as f32 / points as f32 } else { 0.0 };
+    let good = share(out.levels[2] + out.levels[3] + out.levels[4]);
+    ui.set_planning_coverage(PlanCoverage {
+        computed: true,
+        area: out.area.into(),
+        good: if points > 0 { format!("{:.1} %", good * 100.0).into() } else { "–".into() },
+        levels: model(out.levels.iter().map(|&n| share(n)).collect()),
+        per_bs: model(out.per_bs.iter().map(|&n| share(n)).collect()),
+        meta: format!(
+            "Computed {} · {} points · {} ms",
+            chrono::Local::now().format("%H:%M"),
+            points,
+            out.millis
+        )
+        .into(),
+        at: chrono::Local::now().format("%H:%M").to_string().into(),
+    });
+    ui.set_planning_computing(false);
+    ui.set_planning_coverage_stale(false);
+}
+
+/// Write the scene to `path` and remember it as the scene's file.
+fn save_scene_to(ui: &AppWindow, ps: &std::sync::Mutex<PlanningState>, viz_scene_state: &std::sync::Mutex<VizSceneState>, path: std::path::PathBuf) {
+    let mut pstate = ps.lock().unwrap();
+    // Areas are kept in sync with the UI list editors via their
+    // update/add/remove callbacks, so just save what's in state.
+    let scene = planning::PlanningScene::new(
+        ui.get_planning_room_x().parse().unwrap_or(8.0),
+        ui.get_planning_room_y().parse().unwrap_or(8.0),
+        ui.get_planning_room_z().parse().unwrap_or(3.0),
+        ui.get_planning_resolution().parse().unwrap_or(5.0),
+        ui.get_planning_center_origin(),
+        [
+            ui.get_planning_room_offset_x().parse().unwrap_or(0.0),
+            ui.get_planning_room_offset_y().parse().unwrap_or(0.0),
+            ui.get_planning_room_offset_z().parse().unwrap_or(0.0),
+        ],
+        &pstate.base_stations,
+        &pstate.anchors,
+        &pstate.obstacles,
+        pstate.flight_areas.clone(),
+        pstate.waypoint_areas.clone(),
+        pstate.takeoff_pads.clone(),
+        ui.get_planning_receiver_fov_enabled(),
+        ui.get_planning_max_bs_distance().parse().unwrap_or(5.0),
+        [
+            ui.get_planning_show_coverage_0(),
+            ui.get_planning_show_coverage_1(),
+            ui.get_planning_show_coverage_2(),
+            ui.get_planning_show_coverage_3(),
+            ui.get_planning_show_coverage_4(),
+        ],
+        ui.get_planning_max_range().parse().unwrap_or(15.0),
+        ui.get_planning_tdoa3_scale_min(),
+        ui.get_planning_tdoa3_scale_max(),
+        ui.get_planning_tilt_compensation_enabled(),
+        ui.get_planning_max_tilt_angle().parse().unwrap_or(10.0),
+    );
+    if let Err(e) = planning::save_scene(&path, &scene) {
+        eprintln!("Failed to save planning scene: {}", e);
+    } else {
+        let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        ui.set_planning_scene_name(name.into());
+        ui.set_planning_scene_dirty(false);
+        let mut settings: AppSettings = host::store::load();
+        settings.last_scene_config = Some(path.to_string_lossy().into_owned());
+        if let Err(e) = host::store::save(&settings) {
+            eprintln!("Failed to persist last_scene_config: {}", e);
+        }
+        // Sync the visualizer overlay so it reflects the saved scene
+        let mut s = viz_scene_state.lock().unwrap();
+        s.flight_areas = pstate.flight_areas.clone();
+        s.waypoint_areas = pstate.waypoint_areas.clone();
+        s.takeoff_pads = pstate.takeoff_pads.clone();
+        s.set_obstacles(&pstate.obstacles);
+    }
+    pstate.scene_path = Some(path);
 }
 
 pub(crate) fn setup(ui: &AppWindow, cx: &AppContext) {
@@ -146,343 +885,59 @@ pub(crate) fn setup(ui: &AppWindow, cx: &AppContext) {
             }).unwrap();
         });
 
-        // Helper: rebuild obstacle meshes in state
-        fn rebuild_obstacle_meshes(ps: &mut PlanningState) {
-            ps.obstacle_triangles = ps.obstacles.iter().map(|o| o.triangulate()).collect();
-            ps.obstacle_wireframes = ps.obstacles.iter().map(|o| o.wireframe()).collect();
-            ps.obstacle_colors = ps.obstacles.iter().map(|o| o.color).collect();
-        }
-
-        // Build the Slint model rows for a list of area box volumes.
-        fn area_models(areas: &[planning::BoxVolume]) -> Vec<PlanBoxVolumeData> {
-            areas
-                .iter()
-                .map(|a| PlanBoxVolumeData {
-                    label: a.label.clone().into(),
-                    min_x: format!("{:.2}", a.min[0]).into(),
-                    min_y: format!("{:.2}", a.min[1]).into(),
-                    min_z: format!("{:.2}", a.min[2]).into(),
-                    max_x: format!("{:.2}", a.max[0]).into(),
-                    max_y: format!("{:.2}", a.max[1]).into(),
-                    max_z: format!("{:.2}", a.max[2]).into(),
-                })
-                .collect()
-        }
-
-        // Parse a Slint area row back into a BoxVolume.
-        fn box_volume_from_model(d: &PlanBoxVolumeData) -> planning::BoxVolume {
-            planning::BoxVolume {
-                min: [
-                    d.min_x.parse().unwrap_or(0.0),
-                    d.min_y.parse().unwrap_or(0.0),
-                    d.min_z.parse().unwrap_or(0.0),
-                ],
-                max: [
-                    d.max_x.parse().unwrap_or(0.0),
-                    d.max_y.parse().unwrap_or(0.0),
-                    d.max_z.parse().unwrap_or(0.0),
-                ],
-                label: d.label.to_string(),
-            }
-        }
-
-        // Compute the displayed TDoA3 voxels + two stats lines for a given metric.
-        // Ported from the standalone TDoA3 Coverage tab so Planning supports the
-        // full set of metrics (DOP / error / sensitivity / pair sensitivity).
-        #[allow(clippy::too_many_arguments)]
-        fn tdoa3_metric_voxels_and_stats(
-            display_metric: usize,
-            gdop_result: Option<&tdoa3::GdopResult>,
-            anchors: &[tdoa3::Anchor],
-            convex_hull: Option<&tdoa3::ConvexHull>,
-            room: [f32; 3],
-            resolution: f32,
-            max_range: f32,
-            offset: [f32; 3],
-            sigma: f32,
-            min_slider: f32,
-            max_slider: f32,
-            show_outside_hull: bool,
-            pair_a: usize,
-            pair_b: usize,
-        ) -> (Vec<(f32, f32, f32, f32)>, [String; 2]) {
-            const DISP_PAIRS: usize = 5;
-            const DISP_PAIR_SENS: usize = 6;
-            const DISP_X_ERR: usize = 7;
-            const DISP_Y_ERR: usize = 8;
-            const DISP_Z_ERR: usize = 9;
-            const DISP_XY_ERR: usize = 10;
-            const DISP_GLOBAL_ERR: usize = 11;
-            const DISP_X_SENS: usize = 12;
-            const DISP_Z_SENS: usize = 14;
-            const DISP_MIN_SENS: usize = 15;
-            const DISP_MIN_XY_SENS: usize = 16;
-
-            let hull_filter = |voxels: Vec<(f32, f32, f32, f32)>| -> Vec<(f32, f32, f32, f32)> {
-                if show_outside_hull {
-                    voxels
-                } else {
-                    voxels.into_iter()
-                        .filter(|(x, y, z, _)| convex_hull.map_or(true, |h| h.contains(&[*x, *y, *z])))
-                        .collect()
-                }
-            };
-
-            // Pair sensitivity (single anchor pair)
-            if display_metric == DISP_PAIR_SENS {
-                if pair_a >= anchors.len() || pair_b >= anchors.len() || pair_a == pair_b {
-                    return (Vec::new(), [
-                        "Select two different valid anchor indices".to_string(),
-                        String::new(),
-                    ]);
-                }
-                let voxels = hull_filter(tdoa3::compute_pair_sensitivity(
-                    room[0], room[1], room[2], resolution,
-                    anchors[pair_a].pos, anchors[pair_b].pos, max_range, offset,
-                ));
-                let (min_v, max_v, avg_v) = tdoa3::voxel_stats(&voxels);
-                return (voxels, [
-                    format!("|h| min: {:.2}  max: {:.2}  avg: {:.2}", min_v, max_v, avg_v),
-                    format!("Pair: anchor {} ↔ anchor {} (0 = degenerate, 2 = ideal)", pair_a, pair_b),
-                ]);
-            }
-
-            // Axis sensitivity (X / Y / Z)
-            if (DISP_X_SENS..=DISP_Z_SENS).contains(&display_metric) {
-                let axis = display_metric - DISP_X_SENS;
-                let axis_name = ["X", "Y", "Z"][axis];
-                let voxels = hull_filter(tdoa3::compute_axis_sensitivity(
-                    room[0], room[1], room[2], resolution, anchors, max_range, offset, axis,
-                ));
-                let (min_v, max_v, avg_v) = tdoa3::voxel_stats(&voxels);
-                return (voxels, [
-                    format!("{} sensitivity: min {:.2}  max {:.2}  avg {:.2}", axis_name, min_v, max_v, avg_v),
-                    "High = measurements respond to movement, low = flat hyperbolas".to_string(),
-                ]);
-            }
-
-            // Min-of-axes sensitivity
-            if display_metric == DISP_MIN_SENS || display_metric == DISP_MIN_XY_SENS {
-                let include_z = display_metric == DISP_MIN_SENS;
-                let voxels = hull_filter(tdoa3::compute_min_axis_sensitivity(
-                    room[0], room[1], room[2], resolution, anchors, max_range, offset, include_z,
-                ));
-                let label = if include_z { "Min XYZ" } else { "Min XY" };
-                let (min_v, max_v, avg_v) = tdoa3::voxel_stats(&voxels);
-                return (voxels, [
-                    format!("{} sensitivity: min {:.2}  max {:.2}  avg {:.2}", label, min_v, max_v, avg_v),
-                    "Weakest axis at each point (low = bottleneck for positioning)".to_string(),
-                ]);
-            }
-
-            // DOP / error metrics from the precomputed GDOP result
-            let Some(result) = gdop_result else {
-                return (Vec::new(), [String::new(), String::new()]);
-            };
-            let (storage_metric, metric_name, sigma_mult) = match display_metric {
-                0 => (tdoa3::METRIC_GDOP, "GDOP", 1.0),
-                1 => (tdoa3::METRIC_HDOP, "HDOP", 1.0),
-                2 => (tdoa3::METRIC_VDOP, "VDOP", 1.0),
-                3 => (tdoa3::METRIC_XDOP, "XDOP", 1.0),
-                4 => (tdoa3::METRIC_YDOP, "YDOP", 1.0),
-                DISP_PAIRS => (tdoa3::METRIC_PAIRS, "Pairs", 1.0),
-                DISP_X_ERR => (tdoa3::METRIC_XDOP, "σ_x", sigma),
-                DISP_Y_ERR => (tdoa3::METRIC_YDOP, "σ_y", sigma),
-                DISP_Z_ERR => (tdoa3::METRIC_VDOP, "σ_z", sigma),
-                DISP_XY_ERR => (tdoa3::METRIC_HDOP, "σ_xy", sigma),
-                DISP_GLOBAL_ERR => (tdoa3::METRIC_GDOP, "σ_xyz", sigma),
-                _ => (tdoa3::METRIC_GDOP, "GDOP", 1.0),
-            };
-
-            let mut voxels: Vec<(f32, f32, f32, f32)> =
-                hull_filter(result.iter_voxels(offset, storage_metric).collect());
-            if sigma_mult != 1.0 {
-                for v in &mut voxels {
-                    if v.3.is_finite() { v.3 *= sigma_mult; }
-                }
-            }
-
-            // Stats over visible voxels within slider range
-            let mut vis_min = f32::INFINITY;
-            let mut vis_max = f32::NEG_INFINITY;
-            let mut vis_sum = 0.0_f64;
-            let mut vis_sum_sq = 0.0_f64;
-            let mut vis_count = 0u32;
-            let mut total_finite = 0u32;
-            for &(_, _, _, v) in &voxels {
-                if v.is_finite() {
-                    total_finite += 1;
-                    if v >= min_slider && v <= max_slider {
-                        vis_min = vis_min.min(v);
-                        vis_max = vis_max.max(v);
-                        vis_sum += v as f64;
-                        vis_sum_sq += (v as f64) * (v as f64);
-                        vis_count += 1;
-                    }
-                }
-            }
-            let vis_mean = if vis_count > 0 { vis_sum / vis_count as f64 } else { 0.0 };
-            let vis_std = if vis_count > 1 {
-                ((vis_sum_sq / vis_count as f64) - vis_mean * vis_mean).max(0.0).sqrt()
-            } else { 0.0 };
-            let ratio = if total_finite > 0 { vis_count as f32 / total_finite as f32 } else { 0.0 };
-
-            let lines = if (DISP_X_ERR..=DISP_GLOBAL_ERR).contains(&display_metric) {
-                let axis = match display_metric {
-                    DISP_X_ERR => "X", DISP_Y_ERR => "Y", DISP_Z_ERR => "Z",
-                    DISP_XY_ERR => "XY", _ => "Global",
-                };
-                [
-                    format!("{} error: min {:.3}m  max {:.3}m  avg {:.3}m  σ {:.3}m",
-                        axis, vis_min, vis_max, vis_mean, vis_std),
-                    format!("{} ∈ [{:.2}, {:.2}]m: {:.1}% (σ_tdoa = {}m)",
-                        metric_name, min_slider, max_slider, ratio * 100.0, sigma),
-                ]
-            } else if display_metric == DISP_PAIRS {
-                [
-                    format!("{} min: {:.0}  max: {:.0}  avg: {:.1}", metric_name,
-                        if vis_min.is_finite() { vis_min } else { 0.0 },
-                        if vis_max.is_finite() { vis_max } else { 0.0 }, vis_mean),
-                    format!("≥3 pairs: {:.1}%  ≥6 pairs: {:.1}%",
-                        result.coverage_ratio_pairs(3.0) * 100.0,
-                        result.coverage_ratio_pairs(6.0) * 100.0),
-                ]
-            } else {
-                [
-                    format!("{} min: {:.3}  max: {:.3}  avg: {:.3}  σ: {:.3}", metric_name,
-                        if vis_min.is_finite() { vis_min } else { 0.0 },
-                        if vis_max.is_finite() { vis_max } else { 0.0 }, vis_mean, vis_std),
-                    format!("{} ∈ [{:.2}, {:.2}]: {:.1}%", metric_name, min_slider, max_slider, ratio * 100.0),
-                ]
-            };
-            (voxels, lines)
-        }
-
-        // Refresh Planning's TDoA3 voxels + stats text for the current metric,
-        // reusing the already-computed GDOP result (no recompute needed).
-        fn refresh_planning_tdoa3(ui: &AppWindow, ps: &mut PlanningState) {
-            let metric = ui.get_planning_error_metric_index().max(0) as usize;
-            let sigma: f32 = ui.get_planning_measurement_noise().parse().unwrap_or(0.15);
-            let resolution: f32 = ui.get_planning_resolution().parse().unwrap_or(5.0);
-            let max_range: f32 = ui.get_planning_max_range().parse().unwrap_or(15.0);
-            let min_slider = ui.get_planning_tdoa3_scale_min();
-            let max_slider = ui.get_planning_tdoa3_scale_max();
-            let show_outside_hull = ui.get_planning_show_outside_hull();
-            let pair_a: usize = ui.get_planning_pair_a().parse().unwrap_or(0);
-            let pair_b: usize = ui.get_planning_pair_b().parse().unwrap_or(1);
-
-            let (voxels, stats) = tdoa3_metric_voxels_and_stats(
-                metric,
-                ps.tdoa3_gdop_result.as_ref(),
-                &ps.anchors,
-                ps.convex_hull.as_ref(),
-                ps.room,
-                resolution,
-                max_range,
-                ps.room_offset,
-                sigma,
-                min_slider,
-                max_slider,
-                show_outside_hull,
-                pair_a,
-                pair_b,
-            );
-            ps.tdoa3_voxels = voxels;
-
-            // Line 1: LH coverage + room global-error glance (+ hull glance if available)
-            let mut line1 = format!(
-                "LH: {:.0}% ≥1BS, {:.0}% ≥2BS  |  Room σ_xyz {:.1}cm",
-                ps.lh_ratio_1 * 100.0, ps.lh_ratio_2 * 100.0, ps.gdop_mean * sigma * 100.0,
-            );
-            if let Some((g, _, _)) = ps.hull_stats {
-                line1 += &format!("  Hull {:.1}cm", g * sigma * 100.0);
-            }
-            ui.set_planning_stats_text_1(line1.into());
-            ui.set_planning_stats_text_2(stats[0].clone().into());
-            ui.set_planning_stats_text_3(stats[1].clone().into());
-        }
-
-        fn rebuild_bs_render_data(ps: &mut PlanningState) {
-            ps.bs_render_data = ps
-                .base_stations
-                .iter()
-                .map(|bs| (bs.pos, bs.rotation_matrix()))
-                .collect();
-        }
-
-        fn rebuild_anchor_positions(ps: &mut PlanningState) {
-            ps.anchor_positions = ps.anchors.iter().map(|a| a.pos).collect();
-        }
-
-        // Save scene
+        // Save the scene: to its file, or ask for one
         let ps = planning_state.clone();
         let uw = ui_weak.clone();
         let viz_scene_state_save = viz_scene_state.clone();
         ui.on_planning_save_scene(move || {
             let Some(ui) = uw.upgrade() else { return };
+            let path = ps.lock().unwrap().scene_path.clone();
+            match path {
+                Some(path) => save_scene_to(&ui, &ps, &viz_scene_state_save, path),
+                None => ui.invoke_planning_save_scene_as(),
+            }
+        });
+
+        // Save the scene to a file the user picks
+        let ps = planning_state.clone();
+        let uw = ui_weak.clone();
+        let viz_scene_state_save = viz_scene_state.clone();
+        ui.on_planning_save_scene_as(move || {
+            let Some(ui) = uw.upgrade() else { return };
             let uw2 = ui.as_weak();
             let ps = ps.clone();
             let viz_scene_state = viz_scene_state_save.clone();
+            let name = ui.get_planning_scene_name();
             slint::spawn_local(async move {
                 let Some(handle) = host::dialog::FileDialog::new()
                     .add_filter("YAML", &["yaml", "yml"])
-                    .set_file_name("planning.yaml")
+                    .set_file_name(if name.is_empty() { "planning.yaml" } else { name.as_str() })
                     .save_file().await
                 else { return };
-                let path = handle.path().to_path_buf();
                 let Some(ui) = uw2.upgrade() else { return };
-
-                let pstate = ps.lock().unwrap();
-                // Areas are kept in sync with the UI list editors via their
-                // update/add/remove callbacks, so just save what's in state.
-                let scene = planning::PlanningScene::new(
-                    ui.get_planning_room_x().parse().unwrap_or(8.0),
-                    ui.get_planning_room_y().parse().unwrap_or(8.0),
-                    ui.get_planning_room_z().parse().unwrap_or(3.0),
-                    ui.get_planning_resolution().parse().unwrap_or(5.0),
-                    ui.get_planning_center_origin(),
-                    [
-                        ui.get_planning_room_offset_x().parse().unwrap_or(0.0),
-                        ui.get_planning_room_offset_y().parse().unwrap_or(0.0),
-                        ui.get_planning_room_offset_z().parse().unwrap_or(0.0),
-                    ],
-                    &pstate.base_stations,
-                    &pstate.anchors,
-                    &pstate.obstacles,
-                    pstate.flight_areas.clone(),
-                    pstate.waypoint_areas.clone(),
-                    pstate.takeoff_pads.clone(),
-                    ui.get_planning_receiver_fov_enabled(),
-                    ui.get_planning_max_bs_distance().parse().unwrap_or(5.0),
-                    [
-                        ui.get_planning_show_coverage_0(),
-                        ui.get_planning_show_coverage_1(),
-                        ui.get_planning_show_coverage_2(),
-                        ui.get_planning_show_coverage_3(),
-                        ui.get_planning_show_coverage_4(),
-                    ],
-                    ui.get_planning_max_range().parse().unwrap_or(15.0),
-                    ui.get_planning_tdoa3_scale_min(),
-                    ui.get_planning_tdoa3_scale_max(),
-                    ui.get_planning_tilt_compensation_enabled(),
-                    ui.get_planning_max_tilt_angle().parse().unwrap_or(10.0),
-                );
-                if let Err(e) = planning::save_scene(&path, &scene) {
-                    eprintln!("Failed to save planning scene: {}", e);
-                } else {
-                    let mut settings: AppSettings = host::store::load();
-                    settings.last_scene_config = Some(path.to_string_lossy().into_owned());
-                    if let Err(e) = host::store::save(&settings) {
-                        eprintln!("Failed to persist last_scene_config: {}", e);
-                    }
-                    // Sync the visualizer overlay so it reflects the saved scene
-                    let mut s = viz_scene_state.lock().unwrap();
-                    s.flight_areas = pstate.flight_areas.clone();
-                    s.waypoint_areas = pstate.waypoint_areas.clone();
-                    s.takeoff_pads = pstate.takeoff_pads.clone();
-                    s.set_obstacles(&pstate.obstacles);
-                }
+                save_scene_to(&ui, &ps, &viz_scene_state, handle.path().to_path_buf());
             }).unwrap();
+        });
+
+        // Select an object: 0 none, 1 base station, 2 anchor, 3 obstacle,
+        // 4 flight area, 5 waypoint area
+        let ps = planning_state.clone();
+        let uw = ui_weak.clone();
+        ui.on_planning_select(move |kind, index| {
+            let Some(ui) = uw.upgrade() else { return };
+            let mut ps = ps.lock().unwrap();
+            ps.last_edit = None;
+            let (object, area) = match kind {
+                1..=3 => ((kind, index), (0, -1)),
+                4 | 5 => ((0, -1), (kind - 3, index)),
+                _ => ((0, -1), (0, -1)),
+            };
+            ps.selected_area_kind = area.0;
+            ps.selected_area_index = area.1;
+            ui.set_planning_selected_area_kind(area.0);
+            ui.set_planning_selected_area_index(area.1);
+            ui.set_planning_selected_type(object.0);
+            ui.set_planning_selected_index(object.1);
         });
 
         // Load scene
@@ -505,14 +960,9 @@ pub(crate) fn setup(ui: &AppWindow, cx: &AppContext) {
                 match planning::load_scene(&path) {
                     Ok(scene) => {
                         let mut ps = ps.lock().unwrap();
-                        ps.base_stations = scene.base_stations();
-                        ps.anchors = scene.anchors();
-                        ps.obstacles = scene.obstacles();
-                        ps.flight_areas = scene.flight_areas.clone();
-                        ps.waypoint_areas = scene.waypoint_areas.clone();
-                        ps.selected_area_kind = 0;
-                        ps.selected_area_index = -1;
-                        ps.takeoff_pads = scene.takeoff_pads.clone();
+                        let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                        apply_scene(&ui, &mut ps, &scene, &name);
+                        ps.scene_path = Some(path.clone());
                         // Sync visualizer overlay
                         {
                             let mut s = viz_scene_state.lock().unwrap();
@@ -521,103 +971,11 @@ pub(crate) fn setup(ui: &AppWindow, cx: &AppContext) {
                             s.takeoff_pads = ps.takeoff_pads.clone();
                             s.set_obstacles(&ps.obstacles);
                         }
-                        rebuild_bs_render_data(&mut ps);
-                        rebuild_anchor_positions(&mut ps);
-                        rebuild_obstacle_meshes(&mut ps);
-                        ps.undo_stack.clear();
-
                         let mut settings: AppSettings = host::store::load();
                         settings.last_scene_config = Some(path.to_string_lossy().into_owned());
                         if let Err(e) = host::store::save(&settings) {
                             eprintln!("Failed to persist last_scene_config: {}", e);
                         }
-
-                        ui.set_planning_room_x(format!("{}", scene.room_x).into());
-                        ui.set_planning_room_y(format!("{}", scene.room_y).into());
-                        ui.set_planning_room_z(format!("{}", scene.room_z).into());
-                        ui.set_planning_resolution(format!("{}", scene.resolution).into());
-                        ui.set_planning_center_origin(scene.center_origin);
-                        ui.set_planning_room_offset_x(format!("{}", scene.room_offset[0]).into());
-                        ui.set_planning_room_offset_y(format!("{}", scene.room_offset[1]).into());
-                        ui.set_planning_room_offset_z(format!("{}", scene.room_offset[2]).into());
-                        ui.set_planning_receiver_fov_enabled(scene.receiver_fov_enabled);
-                        ui.set_planning_max_bs_distance(format!("{}", scene.max_bs_distance).into());
-                        ui.set_planning_show_coverage_0(scene.show_coverage[0]);
-                        ui.set_planning_show_coverage_1(scene.show_coverage[1]);
-                        ui.set_planning_show_coverage_2(scene.show_coverage[2]);
-                        ui.set_planning_show_coverage_3(scene.show_coverage[3]);
-                        ui.set_planning_show_coverage_4(scene.show_coverage[4]);
-                        ui.set_planning_max_range(format!("{}", scene.max_range).into());
-                        ui.set_planning_tilt_compensation_enabled(scene.tilt_compensation_enabled);
-                        ui.set_planning_max_tilt_angle(format!("{}", scene.max_tilt_angle).into());
-
-                        // Compute coverage
-                        let uo = scene.room_offset;
-                        let offset = if scene.center_origin {
-                            [-scene.room_x / 2.0 + uo[0], -scene.room_y / 2.0 + uo[1], uo[2]]
-                        } else {
-                            [uo[0], uo[1], uo[2]]
-                        };
-                        ps.room = [scene.room_x, scene.room_y, scene.room_z];
-                        ps.room_offset = offset;
-                        ps.lh_voxels.clear();
-                        ps.tdoa3_voxels.clear();
-                        ps.tdoa3_gdop_result = None;
-
-                        ui.set_planning_tdoa3_scale_min(scene.tdoa3_scale_min);
-                        ui.set_planning_tdoa3_scale_max(scene.tdoa3_scale_max);
-
-                        let bs_model: Vec<LhBaseStationData> = ps.base_stations.iter().map(|bs| LhBaseStationData {
-                            x: format!("{:.2}", bs.pos[0]).into(),
-                            y: format!("{:.2}", bs.pos[1]).into(),
-                            z: format!("{:.2}", bs.pos[2]).into(),
-                            azimuth: format!("{:.1}", bs.azimuth_deg).into(),
-                            elevation: format!("{:.1}", bs.elevation_deg).into(),
-                        }).collect();
-                        ui.set_planning_base_stations(slint::ModelRc::new(slint::VecModel::from(bs_model)));
-
-                        let anchor_model: Vec<Tdoa3AnchorData> = ps.anchors.iter().map(|a| Tdoa3AnchorData {
-                            x: format!("{:.2}", a.pos[0]).into(),
-                            y: format!("{:.2}", a.pos[1]).into(),
-                            z: format!("{:.2}", a.pos[2]).into(),
-                        }).collect();
-                        ui.set_planning_anchors(slint::ModelRc::new(slint::VecModel::from(anchor_model)));
-
-                        let obs_model: Vec<PlanObstacleData> = ps.obstacles.iter().map(|o| PlanObstacleData {
-                            kind: match o.kind { planning::ObstacleKind::Box => "Box", planning::ObstacleKind::Cylinder => "Cylinder" }.into(),
-                            x: format!("{:.2}", o.pos[0]).into(),
-                            y: format!("{:.2}", o.pos[1]).into(),
-                            z: format!("{:.2}", o.pos[2]).into(),
-                            yaw: format!("{:.1}", o.yaw_deg).into(),
-                            width: format!("{:.2}", o.width).into(),
-                            depth: format!("{:.2}", o.depth).into(),
-                            height: format!("{:.2}", o.height).into(),
-                            radius: format!("{:.2}", o.radius).into(),
-                            color_r: o.color[0], color_g: o.color[1], color_b: o.color[2],
-                            on_floor: o.on_floor,
-                        }).collect();
-                        ui.set_planning_obstacles(slint::ModelRc::new(slint::VecModel::from(obs_model)));
-
-                        // Flight + waypoint areas
-                        ui.set_planning_flight_areas(slint::ModelRc::new(slint::VecModel::from(area_models(&ps.flight_areas))));
-                        ui.set_planning_waypoint_areas(slint::ModelRc::new(slint::VecModel::from(area_models(&ps.waypoint_areas))));
-                        ui.set_planning_selected_area_kind(0);
-                        ui.set_planning_selected_area_index(-1);
-
-                        // Takeoff pads (read-only display)
-                        let pads_model: Vec<PlanPadData> = ps.takeoff_pads.iter().map(|p| PlanPadData {
-                            label: p.label.clone().into(),
-                            x: format!("{:.2}", p.x).into(),
-                            y: format!("{:.2}", p.y).into(),
-                            radius: format!("{:.2}", p.radius).into(),
-                        }).collect();
-                        ui.set_planning_takeoff_pads(slint::ModelRc::new(slint::VecModel::from(pads_model)));
-
-                        ui.set_planning_selected_type(0);
-                        ui.set_planning_selected_index(-1);
-                        ui.set_planning_stats_text_1("".into());
-                        ui.set_planning_stats_text_2("".into());
-                        ui.set_planning_stats_text_3("".into());
 
                         // Drop the lock before triggering recompute (which also locks)
                         drop(ps);
@@ -719,6 +1077,7 @@ pub(crate) fn setup(ui: &AppWindow, cx: &AppContext) {
             });
             ui.set_planning_base_stations(slint::ModelRc::new(slint::VecModel::from(model)));
             let mut ps = ps.lock().unwrap();
+            checkpoint(&ui, &mut ps, None);
             ps.base_stations.push(coverage::BaseStation {
                 pos: [4.0, 4.0, 3.0], azimuth_deg: 0.0, elevation_deg: 45.0,
             });
@@ -738,6 +1097,7 @@ pub(crate) fn setup(ui: &AppWindow, cx: &AppContext) {
             if idx < model.len() { model.remove(idx); }
             ui.set_planning_base_stations(slint::ModelRc::new(slint::VecModel::from(model)));
             let mut ps = ps.lock().unwrap();
+            checkpoint(&ui, &mut ps, None);
             if idx < ps.base_stations.len() { ps.base_stations.remove(idx); }
             rebuild_bs_render_data(&mut ps);
         });
@@ -750,6 +1110,7 @@ pub(crate) fn setup(ui: &AppWindow, cx: &AppContext) {
             let idx = idx as usize;
             let mut ps = ps.lock().unwrap();
             if idx < ps.base_stations.len() {
+                checkpoint(&ui, &mut ps, None);
                 let mut bs = ps.base_stations[idx].clone();
                 bs.pos[0] += 0.5; // offset so it's visible
                 ps.base_stations.push(bs);
@@ -773,10 +1134,14 @@ pub(crate) fn setup(ui: &AppWindow, cx: &AppContext) {
 
         // Update base station
         let ps = planning_state.clone();
+        let uw = ui_weak.clone();
         ui.on_planning_update_bs(move |idx, data| {
+            let Some(ui) = uw.upgrade() else { return };
             let idx = idx as usize;
             let mut ps = ps.lock().unwrap();
             if idx < ps.base_stations.len() {
+                checkpoint(&ui, &mut ps, Some(EditKey::BaseStation(idx)));
+                ui.get_planning_base_stations().set_row_data(idx, data.clone());
                 ps.base_stations[idx] = coverage::BaseStation {
                     pos: [
                         data.x.parse().unwrap_or(0.0),
@@ -804,6 +1169,7 @@ pub(crate) fn setup(ui: &AppWindow, cx: &AppContext) {
             });
             ui.set_planning_anchors(slint::ModelRc::new(slint::VecModel::from(model)));
             let mut ps = ps.lock().unwrap();
+            checkpoint(&ui, &mut ps, None);
             ps.anchors.push(tdoa3::Anchor { pos: [0.0, 0.0, 2.5] });
             rebuild_anchor_positions(&mut ps);
         });
@@ -821,6 +1187,7 @@ pub(crate) fn setup(ui: &AppWindow, cx: &AppContext) {
             if idx < model.len() { model.remove(idx); }
             ui.set_planning_anchors(slint::ModelRc::new(slint::VecModel::from(model)));
             let mut ps = ps.lock().unwrap();
+            checkpoint(&ui, &mut ps, None);
             if idx < ps.anchors.len() { ps.anchors.remove(idx); }
             rebuild_anchor_positions(&mut ps);
         });
@@ -833,6 +1200,7 @@ pub(crate) fn setup(ui: &AppWindow, cx: &AppContext) {
             let idx = idx as usize;
             let mut ps = ps.lock().unwrap();
             if idx < ps.anchors.len() {
+                checkpoint(&ui, &mut ps, None);
                 let mut a = ps.anchors[idx].clone();
                 a.pos[0] += 0.5;
                 ps.anchors.push(a);
@@ -854,10 +1222,14 @@ pub(crate) fn setup(ui: &AppWindow, cx: &AppContext) {
 
         // Update anchor
         let ps = planning_state.clone();
+        let uw = ui_weak.clone();
         ui.on_planning_update_anchor(move |idx, data| {
+            let Some(ui) = uw.upgrade() else { return };
             let idx = idx as usize;
             let mut ps = ps.lock().unwrap();
             if idx < ps.anchors.len() {
+                checkpoint(&ui, &mut ps, Some(EditKey::Anchor(idx)));
+                ui.get_planning_anchors().set_row_data(idx, data.clone());
                 ps.anchors[idx] = tdoa3::Anchor {
                     pos: [
                         data.x.parse().unwrap_or(0.0),
@@ -896,6 +1268,7 @@ pub(crate) fn setup(ui: &AppWindow, cx: &AppContext) {
             });
             ui.set_planning_obstacles(slint::ModelRc::new(slint::VecModel::from(model)));
             let mut ps = ps.lock().unwrap();
+            checkpoint(&ui, &mut ps, None);
             ps.obstacles.push(obs);
             rebuild_obstacle_meshes(&mut ps);
         });
@@ -926,6 +1299,7 @@ pub(crate) fn setup(ui: &AppWindow, cx: &AppContext) {
             });
             ui.set_planning_obstacles(slint::ModelRc::new(slint::VecModel::from(model)));
             let mut ps = ps.lock().unwrap();
+            checkpoint(&ui, &mut ps, None);
             ps.obstacles.push(obs);
             rebuild_obstacle_meshes(&mut ps);
         });
@@ -943,6 +1317,7 @@ pub(crate) fn setup(ui: &AppWindow, cx: &AppContext) {
             if idx < model.len() { model.remove(idx); }
             ui.set_planning_obstacles(slint::ModelRc::new(slint::VecModel::from(model)));
             let mut ps = ps.lock().unwrap();
+            checkpoint(&ui, &mut ps, None);
             if idx < ps.obstacles.len() { ps.obstacles.remove(idx); }
             rebuild_obstacle_meshes(&mut ps);
         });
@@ -955,6 +1330,7 @@ pub(crate) fn setup(ui: &AppWindow, cx: &AppContext) {
             let idx = idx as usize;
             let mut ps = ps.lock().unwrap();
             if idx < ps.obstacles.len() {
+                checkpoint(&ui, &mut ps, None);
                 let mut o = ps.obstacles[idx].clone();
                 o.pos[0] += 0.5;
                 ps.obstacles.push(o);
@@ -985,10 +1361,13 @@ pub(crate) fn setup(ui: &AppWindow, cx: &AppContext) {
         // Update obstacle
         let ps = planning_state.clone();
         let _uw = ui_weak.clone();
+        let uw = ui_weak.clone();
         ui.on_planning_update_obstacle(move |idx, data| {
+            let Some(ui) = uw.upgrade() else { return };
             let idx = idx as usize;
             let mut ps = ps.lock().unwrap();
             if idx < ps.obstacles.len() {
+                checkpoint(&ui, &mut ps, Some(EditKey::Obstacle(idx)));
                 let kind = if data.kind.as_str() == "Cylinder" {
                     planning::ObstacleKind::Cylinder
                 } else {
@@ -1018,53 +1397,36 @@ pub(crate) fn setup(ui: &AppWindow, cx: &AppContext) {
                     on_floor: data.on_floor,
                 };
                 rebuild_obstacle_meshes(&mut ps);
+                if let Some(row) = obstacle_models(&ps).into_iter().nth(idx) {
+                    ui.get_planning_obstacles().set_row_data(idx, row);
+                }
             }
         });
 
         // Undo
         let ps = planning_state.clone();
         let uw = ui_weak.clone();
+        let vss = viz_scene_state.clone();
         ui.on_planning_undo(move || {
             let Some(ui) = uw.upgrade() else { return };
             let mut ps = ps.lock().unwrap();
-            if let Some((prev_bs, prev_anchors, prev_obs)) = ps.undo_stack.pop() {
-                ps.base_stations = prev_bs;
-                ps.anchors = prev_anchors;
-                ps.obstacles = prev_obs;
+            if let Some((bs, anchors, obstacles, flight, waypoints)) = ps.undo_stack.pop() {
+                ps.base_stations = bs;
+                ps.anchors = anchors;
+                ps.obstacles = obstacles;
+                ps.flight_areas = flight;
+                ps.waypoint_areas = waypoints;
+                ps.last_edit = None;
                 rebuild_bs_render_data(&mut ps);
                 rebuild_anchor_positions(&mut ps);
                 rebuild_obstacle_meshes(&mut ps);
-
-                let bs_model: Vec<LhBaseStationData> = ps.base_stations.iter().map(|bs| LhBaseStationData {
-                    x: format!("{:.2}", bs.pos[0]).into(),
-                    y: format!("{:.2}", bs.pos[1]).into(),
-                    z: format!("{:.2}", bs.pos[2]).into(),
-                    azimuth: format!("{:.1}", bs.azimuth_deg).into(),
-                    elevation: format!("{:.1}", bs.elevation_deg).into(),
-                }).collect();
-                ui.set_planning_base_stations(slint::ModelRc::new(slint::VecModel::from(bs_model)));
-
-                let anchor_model: Vec<Tdoa3AnchorData> = ps.anchors.iter().map(|a| Tdoa3AnchorData {
-                    x: format!("{:.2}", a.pos[0]).into(),
-                    y: format!("{:.2}", a.pos[1]).into(),
-                    z: format!("{:.2}", a.pos[2]).into(),
-                }).collect();
-                ui.set_planning_anchors(slint::ModelRc::new(slint::VecModel::from(anchor_model)));
-
-                let obs_model: Vec<PlanObstacleData> = ps.obstacles.iter().map(|o| PlanObstacleData {
-                    kind: match o.kind { planning::ObstacleKind::Box => "Box", planning::ObstacleKind::Cylinder => "Cylinder" }.into(),
-                    x: format!("{:.2}", o.pos[0]).into(),
-                    y: format!("{:.2}", o.pos[1]).into(),
-                    z: format!("{:.2}", o.pos[2]).into(),
-                    yaw: format!("{:.1}", o.yaw_deg).into(),
-                    width: format!("{:.2}", o.width).into(),
-                    depth: format!("{:.2}", o.depth).into(),
-                    height: format!("{:.2}", o.height).into(),
-                    radius: format!("{:.2}", o.radius).into(),
-                    color_r: o.color[0], color_g: o.color[1], color_b: o.color[2],
-                    on_floor: o.on_floor,
-                }).collect();
-                ui.set_planning_obstacles(slint::ModelRc::new(slint::VecModel::from(obs_model)));
+                show_objects(&ui, &ps);
+                ui.set_planning_undo_count(ps.undo_stack.len() as i32);
+                ui.set_planning_coverage_stale(true);
+                let mut s = vss.lock().unwrap();
+                s.flight_areas = ps.flight_areas.clone();
+                s.waypoint_areas = ps.waypoint_areas.clone();
+                s.set_obstacles(&ps.obstacles);
             }
         });
 
@@ -1081,6 +1443,7 @@ pub(crate) fn setup(ui: &AppWindow, cx: &AppContext) {
         ui.on_planning_add_flight_area(move || {
             let Some(ui) = uw.upgrade() else { return };
             let mut ps = ps.lock().unwrap();
+            checkpoint(&ui, &mut ps, None);
             ps.flight_areas.push(default_area());
             ui.set_planning_flight_areas(slint::ModelRc::new(slint::VecModel::from(area_models(&ps.flight_areas))));
             vss.lock().unwrap().flight_areas = ps.flight_areas.clone();
@@ -1094,6 +1457,7 @@ pub(crate) fn setup(ui: &AppWindow, cx: &AppContext) {
             let Some(ui) = uw.upgrade() else { return };
             let mut ps = ps.lock().unwrap();
             if (idx as usize) < ps.flight_areas.len() {
+                checkpoint(&ui, &mut ps, None);
                 ps.flight_areas.remove(idx as usize);
                 if ps.selected_area_kind == 1 {
                     ps.selected_area_kind = 0;
@@ -1109,8 +1473,14 @@ pub(crate) fn setup(ui: &AppWindow, cx: &AppContext) {
         // Update flight area
         let ps = planning_state.clone();
         let vss = viz_scene_state.clone();
+        let uw = ui_weak.clone();
         ui.on_planning_update_flight_area(move |idx, data| {
+            let Some(ui) = uw.upgrade() else { return };
             let mut ps = ps.lock().unwrap();
+            if (idx as usize) < ps.flight_areas.len() {
+                checkpoint(&ui, &mut ps, Some(EditKey::FlightArea(idx as usize)));
+                ui.get_planning_flight_areas().set_row_data(idx as usize, data.clone());
+            }
             if let Some(area) = ps.flight_areas.get_mut(idx as usize) {
                 *area = box_volume_from_model(&data);
                 vss.lock().unwrap().flight_areas = ps.flight_areas.clone();
@@ -1142,6 +1512,7 @@ pub(crate) fn setup(ui: &AppWindow, cx: &AppContext) {
         ui.on_planning_add_waypoint_area(move || {
             let Some(ui) = uw.upgrade() else { return };
             let mut ps = ps.lock().unwrap();
+            checkpoint(&ui, &mut ps, None);
             ps.waypoint_areas.push(default_area());
             ui.set_planning_waypoint_areas(slint::ModelRc::new(slint::VecModel::from(area_models(&ps.waypoint_areas))));
             vss.lock().unwrap().waypoint_areas = ps.waypoint_areas.clone();
@@ -1155,6 +1526,7 @@ pub(crate) fn setup(ui: &AppWindow, cx: &AppContext) {
             let Some(ui) = uw.upgrade() else { return };
             let mut ps = ps.lock().unwrap();
             if (idx as usize) < ps.waypoint_areas.len() {
+                checkpoint(&ui, &mut ps, None);
                 ps.waypoint_areas.remove(idx as usize);
                 if ps.selected_area_kind == 2 {
                     ps.selected_area_kind = 0;
@@ -1170,8 +1542,14 @@ pub(crate) fn setup(ui: &AppWindow, cx: &AppContext) {
         // Update waypoint area
         let ps = planning_state.clone();
         let vss = viz_scene_state.clone();
+        let uw = ui_weak.clone();
         ui.on_planning_update_waypoint_area(move |idx, data| {
+            let Some(ui) = uw.upgrade() else { return };
             let mut ps = ps.lock().unwrap();
+            if (idx as usize) < ps.waypoint_areas.len() {
+                checkpoint(&ui, &mut ps, Some(EditKey::WaypointArea(idx as usize)));
+                ui.get_planning_waypoint_areas().set_row_data(idx as usize, data.clone());
+            }
             if let Some(area) = ps.waypoint_areas.get_mut(idx as usize) {
                 *area = box_volume_from_model(&data);
                 vss.lock().unwrap().waypoint_areas = ps.waypoint_areas.clone();
@@ -1197,19 +1575,10 @@ pub(crate) fn setup(ui: &AppWindow, cx: &AppContext) {
         });
 
         // Recompute coverage (background thread with timer polling)
-        type CoverageComputeResult = (
-            Vec<(f32, f32, f32, u8)>,   // lh_voxels
-            f32, f32,                    // lh_ratio_1, lh_ratio_2
-            tdoa3::GdopResult,           // tdoa3_result
-            f32, f32, f32,              // gdop_mean, hdop_mean, vdop_mean
-            Option<(f32, f32, f32)>,    // hull_stats
-            [f32; 3], [f32; 3],         // offset, room
-        );
-
         let ps = planning_state.clone();
         let uw = ui_weak.clone();
         // Shared receiver for background computation results
-        let compute_rx: std::rc::Rc<std::cell::RefCell<Option<std::sync::mpsc::Receiver<CoverageComputeResult>>>> =
+        let compute_rx: std::rc::Rc<std::cell::RefCell<Option<std::sync::mpsc::Receiver<CoverageOutput>>>> =
             std::rc::Rc::new(std::cell::RefCell::new(None));
         let compute_rx_timer = compute_rx.clone();
         let compute_timer = slint::Timer::default();
@@ -1221,27 +1590,8 @@ pub(crate) fn setup(ui: &AppWindow, cx: &AppContext) {
             let mut rx_opt = compute_rx_timer.borrow_mut();
             let Some(ref rx) = *rx_opt else { return };
             let Ok(result) = rx.try_recv() else { return };
-
-            // Result received — update state and UI
-            let (lh_voxels, lh_ratio_1, lh_ratio_2, tdoa3_result, gdop_mean, _hdop_mean, _vdop_mean, hull_stats, offset, room) = result;
-
             let Some(ui) = uw_timer.upgrade() else { return };
-
-            let mut pstate = ps_timer.lock().unwrap();
-            pstate.room = room;
-            pstate.room_offset = offset;
-            pstate.lh_voxels = lh_voxels;
-            pstate.lh_ratio_1 = lh_ratio_1;
-            pstate.lh_ratio_2 = lh_ratio_2;
-            pstate.gdop_mean = gdop_mean;
-            pstate.hull_stats = hull_stats;
-            pstate.tdoa3_gdop_result = Some(tdoa3_result);
-            let hull = tdoa3::ConvexHull::build(&pstate.anchor_positions);
-            pstate.convex_hull = hull;
-            refresh_planning_tdoa3(&ui, &mut pstate);
-            drop(pstate);
-
-            ui.set_planning_computing(false);
+            apply_coverage(&ui, &mut ps_timer.lock().unwrap(), result);
             *rx_opt = None; // clear receiver
         });
 
@@ -1249,67 +1599,11 @@ pub(crate) fn setup(ui: &AppWindow, cx: &AppContext) {
             let Some(ui) = uw.upgrade() else { return };
             if ui.get_planning_computing() { return; }
             ui.set_planning_computing(true);
-
-            let room_x: f32 = ui.get_planning_room_x().parse().unwrap_or(8.0);
-            let room_y: f32 = ui.get_planning_room_y().parse().unwrap_or(8.0);
-            let room_z: f32 = ui.get_planning_room_z().parse().unwrap_or(3.0);
-            let resolution: f32 = ui.get_planning_resolution().parse().unwrap_or(5.0);
-            let center = ui.get_planning_center_origin();
-            let max_bs_dist: f32 = ui.get_planning_max_bs_distance().parse().unwrap_or(5.0);
-            let max_range: f32 = ui.get_planning_max_range().parse().unwrap_or(15.0);
-            let receiver_fov = if ui.get_planning_receiver_fov_enabled() { Some(170.0) } else { None };
-            let tilt_reduction = if ui.get_planning_tilt_compensation_enabled() {
-                Some(ui.get_planning_max_tilt_angle().parse().unwrap_or(10.0))
-            } else { None };
-
-            let user_offset_x: f32 = ui.get_planning_room_offset_x().parse().unwrap_or(0.0);
-            let user_offset_y: f32 = ui.get_planning_room_offset_y().parse().unwrap_or(0.0);
-            let user_offset_z: f32 = ui.get_planning_room_offset_z().parse().unwrap_or(0.0);
-            let offset = if center {
-                [-room_x / 2.0 + user_offset_x, -room_y / 2.0 + user_offset_y, user_offset_z]
-            } else {
-                [user_offset_x, user_offset_y, user_offset_z]
-            };
-
-            let (base_stations, anchors, obstacles) = {
-                let pstate = ps.lock().unwrap();
-                (pstate.base_stations.clone(), pstate.anchors.clone(), pstate.obstacles.clone())
-            };
-
+            let job = coverage_job(&ui, &ps.lock().unwrap());
             let (tx, rx) = std::sync::mpsc::channel();
             *compute_rx.borrow_mut() = Some(rx);
-
             host::spawn_thread(move || {
-                let lh_result = planning::compute_coverage_with_obstacles(
-                    room_x, room_y, room_z, resolution,
-                    &base_stations, 160.0, 115.0,
-                    receiver_fov, tilt_reduction, max_bs_dist, offset,
-                    &obstacles,
-                );
-                let lh_ratio_1 = lh_result.coverage_ratio(1);
-                let lh_ratio_2 = lh_result.coverage_ratio(2);
-                let lh_voxels: Vec<(f32, f32, f32, u8)> = lh_result.iter_voxels(offset).collect();
-
-                let tdoa3_result = tdoa3::compute_gdop(
-                    room_x, room_y, room_z, resolution,
-                    &anchors, max_range, offset,
-                );
-                let (_, _, gdop_mean) = tdoa3_result.stats(tdoa3::METRIC_GDOP);
-                let (_, _, hdop_mean) = tdoa3_result.stats(tdoa3::METRIC_HDOP);
-                let (_, _, vdop_mean) = tdoa3_result.stats(tdoa3::METRIC_VDOP);
-
-                let anchor_positions: Vec<[f32; 3]> = anchors.iter().map(|a| a.pos).collect();
-                let hull = tdoa3::ConvexHull::build(&anchor_positions);
-                let hull_stats = hull.as_ref().map(|h| {
-                    let (_, _, g) = tdoa3_result.stats_in_hull(tdoa3::METRIC_GDOP, offset, h);
-                    let (_, _, hh) = tdoa3_result.stats_in_hull(tdoa3::METRIC_HDOP, offset, h);
-                    let (_, _, v) = tdoa3_result.stats_in_hull(tdoa3::METRIC_VDOP, offset, h);
-                    (g, hh, v)
-                });
-
-                let _ = tx.send((lh_voxels, lh_ratio_1, lh_ratio_2, tdoa3_result,
-                    gdop_mean, hdop_mean, vdop_mean, hull_stats,
-                    offset, [room_x, room_y, room_z]));
+                let _ = tx.send(run_coverage(job));
             });
         });
 
@@ -1325,20 +1619,7 @@ pub(crate) fn setup(ui: &AppWindow, cx: &AppContext) {
         ui.on_planning_error_metric_changed(move |idx| {
             let Some(ui) = uw.upgrade() else { return };
             let mut ps = ps.lock().unwrap();
-            if idx != ps.last_metric {
-                ps.last_metric = idx;
-                // Error metrics (7-11) are in metres; DOP/sensitivity are unitless.
-                let (limit, default_min, default_max) = match idx.max(0) as usize {
-                    7..=11 => (2.0_f32, 0.0_f32, 0.5_f32),   // error in metres
-                    12..=16 => (2.0_f32, 0.0_f32, 1.0_f32),  // sensitivity
-                    5 => (20.0, 0.0, 12.0),                  // anchor pairs (count)
-                    6 => (2.0, 0.0, 2.0),                    // pair sensitivity
-                    _ => (10.0, 0.0, 5.0),                   // DOP values
-                };
-                ui.set_planning_tdoa3_scale_limit(limit);
-                ui.set_planning_tdoa3_scale_min(default_min);
-                ui.set_planning_tdoa3_scale_max(default_max);
-            }
+            reset_metric_scale(&ui, &mut ps, idx);
             refresh_planning_tdoa3(&ui, &mut ps);
         });
 
@@ -1358,7 +1639,7 @@ pub(crate) fn setup(ui: &AppWindow, cx: &AppContext) {
             let pan_y = ui.get_planning_cam_pan_y();
             let mvp = renderer::compute_mvp(yaw, pitch, dist, pan_x, pan_y, pw as f32 / ph as f32);
 
-            let ps_lock = ps.lock().unwrap();
+            let mut ps_lock = ps.lock().unwrap();
             let sel_type = ui.get_planning_selected_type();
             let sel_idx = ui.get_planning_selected_index();
 
@@ -1403,6 +1684,7 @@ pub(crate) fn setup(ui: &AppWindow, cx: &AppContext) {
                                 gs.area_world_per_px = 0.5 / len;
                                 gs.drag_start_screen = [mx, my];
                                 ui.set_planning_handle_active(true);
+                                checkpoint(&ui, &mut ps_lock, None);
                                 return;
                             }
                         }
@@ -1498,9 +1780,18 @@ pub(crate) fn setup(ui: &AppWindow, cx: &AppContext) {
                         }
                         _ => {}
                     }
+                    drop(gs);
+                    checkpoint(&ui, &mut ps_lock, None);
                     return;
                 }
             }
+
+            // A click away from the selected area's handles picks something
+            // else: the area is no longer selected
+            ps_lock.selected_area_kind = 0;
+            ps_lock.selected_area_index = -1;
+            ui.set_planning_selected_area_kind(0);
+            ui.set_planning_selected_area_index(-1);
 
             // Hit test all objects
             // Check BS

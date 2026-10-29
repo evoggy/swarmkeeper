@@ -46,6 +46,26 @@ export global Theme {
     // Popups and floating cards
     out property <color> shadow: dark ? #0000008C : #1018283D;
 
+    // The 3D scene, drawn in OpenGL (host/renderer.rs) and by the labels on it
+    out property <color> scene: dark ? #0F1216 : #EDF0F4;
+    out property <color> grid: dark ? #1C2229 : #D9DEE5;
+    out property <color> grid-major: dark ? #2A323B : #C2C9D2;
+    // Flight areas, dashed
+    out property <color> area: dark ? #D49A26 : #C98400;
+    out property <color> waypoint-area: dark ? #199e70 : #1baf7a;
+    // Takeoff pads
+    out property <color> pad: dark ? #38414B : #B6BEC8;
+    // Lines from units and base stations down to the floor
+    out property <color> drop: dark ? #4C5662 : #97A1AD;
+    out property <color> base-station: dark ? #C9CFD7 : #3C434D;
+    out property <color> axis-x: dark ? #E86464 : #D84B4B;
+    out property <color> axis-y: dark ? #3DBB76 : #23955A;
+    out property <color> axis-z: dark ? #5B97FF : #2F7BF0;
+    // The walls of the planned room
+    out property <color> room: dark ? #4A535E : #A7AFB9;
+    // Coverage: points seen by 0, 1, 2, 3, 4 or more base stations
+    out property <[color]> coverage: dark ? [#D03B3B, #E8A20F, #256abf, #5598e7, #9ec5f4] : [#D03B3B, #E8A20F, #86b6ef, #2a78d6, #184f95];
+
     // Type. Live numbers use a monospaced font so they don't jump around.
     out property <string> font-mono: "DejaVu Sans Mono";
     out property <length> font-body: 13px;

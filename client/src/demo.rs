@@ -2,9 +2,15 @@
 //! Crazyflies (see `host::screenshot`). The same swarm as in the design
 //! mockups: a few units need attention, the rest are ready or charging.
 
+use std::sync::Arc;
+
 use slint::{ModelRc, VecModel};
 
+use crate::host::rendering::SceneSources;
+use crate::loco::PositioningData;
+use crate::planning;
 use crate::units::rebuild_table_rows;
+use crate::view3d::VizSceneState;
 use crate::{AppWindow, UnitData, UnitState};
 
 /// Supervisor bits, as in `units::supervisor_text`.
@@ -49,6 +55,12 @@ pub(crate) fn units() -> Vec<UnitData> {
                 radio: (i - 1) % 4,
                 ..Default::default()
             };
+            if i >= 41 {
+                // On a charger, in a row beside the grid
+                u.pos_x = 2.5;
+                u.pos_y = (i - 45) as f32 * 0.5;
+            }
+            u.pos_z = 0.01 + rng.next() * 0.02;
             match i {
                 12 => {
                     u.battery_voltage = 3.52;
@@ -92,11 +104,53 @@ pub(crate) fn units() -> Vec<UnitData> {
         .collect()
 }
 
-/// Show the demo swarm, connected, in `ui`.
-pub(crate) fn show(ui: &AppWindow) {
+/// The room the demo swarm stands in, as in the design: a 4 × 4 m flight
+/// area, a pad under every unit of the grid and four base stations.
+pub(crate) fn scene() -> SceneSources {
+    let mut positioning = PositioningData::default();
+    positioning.lighthouse_bs = vec![
+        (0, [-2.8, -2.8, 2.6]),
+        (1, [2.8, -2.8, 2.6]),
+        (2, [2.8, 2.8, 2.6]),
+        (3, [-2.8, 2.8, 2.6]),
+    ];
+    positioning.lighthouse_active = 0b1111;
+    let room = VizSceneState {
+        flight_areas: vec![planning::BoxVolume::new([-2.0, -2.0, 0.0], [2.0, 2.0, 2.2])],
+        takeoff_pads: (0..49)
+            .map(|i| planning::TakeoffPad {
+                x: (i % 7) as f32 * 0.5 - 1.5,
+                y: (i / 7) as f32 * 0.5 - 1.5,
+                radius: 0.14,
+                label: String::new(),
+            })
+            .collect(),
+        ..Default::default()
+    };
+    SceneSources {
+        positioning_data: Arc::new(tokio::sync::Mutex::new(positioning)),
+        trajectory_data: Default::default(),
+        goto_targets: Default::default(),
+        viz_scene_state: Arc::new(std::sync::Mutex::new(room)),
+    }
+}
+
+/// Show the demo swarm, connected, in `ui`. When `flying`, the units that
+/// are ready fly in three layers, as in the design.
+pub(crate) fn show(ui: &AppWindow, flying: bool) {
     ui.set_swarm_name("49-unit swarm".into());
     ui.set_swarm_source("default.yaml".into());
-    ui.set_units(ModelRc::new(VecModel::from(units())));
+    let mut units = units();
+    if flying {
+        for (i, u) in units.iter_mut().enumerate() {
+            if u.state == UnitState::Connected && u.selftest_passed && u.supervisor_info == 0 && u.pm_state == "Battery" {
+                u.state = UnitState::Flying;
+                u.pos_z = 0.9 + (i / 7 % 3) as f32 * 0.3;
+                u.battery_voltage -= 0.17;
+            }
+        }
+    }
+    ui.set_units(ModelRc::new(VecModel::from(units)));
     ui.set_swarm_connected(true);
     ui.set_drives_radios(true);
     ui.set_connection_mode("shared".into());

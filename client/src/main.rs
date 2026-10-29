@@ -225,34 +225,7 @@ async fn main() {
         drag_start_pos: [0.0; 3],
     }));
 
-    let planning_state = std::sync::Arc::new(std::sync::Mutex::new(PlanningState {
-        base_stations: Vec::new(),
-        anchors: Vec::new(),
-        obstacles: Vec::new(),
-        lh_voxels: Vec::new(),
-        tdoa3_voxels: Vec::new(),
-        tdoa3_gdop_result: None,
-        bs_render_data: Vec::new(),
-        anchor_positions: Vec::new(),
-        obstacle_triangles: Vec::new(),
-        obstacle_wireframes: Vec::new(),
-        obstacle_colors: Vec::new(),
-        room: [8.0, 8.0, 3.0],
-        room_offset: [0.0; 3],
-        flight_areas: Vec::new(),
-        waypoint_areas: Vec::new(),
-        selected_area_kind: 0,
-        selected_area_index: -1,
-        takeoff_pads: Vec::new(),
-        undo_stack: Vec::new(),
-        convex_hull: None,
-        trajectories: Vec::new(),
-        lh_ratio_1: 0.0,
-        lh_ratio_2: 0.0,
-        gdop_mean: 0.0,
-        hull_stats: None,
-        last_metric: -1,
-    }));
+    let planning_state = std::sync::Arc::new(std::sync::Mutex::new(PlanningState::default()));
 
     let planning_gizmo_state = std::sync::Arc::new(std::sync::Mutex::new(PlanningGizmoState {
         drag_start_screen: [0.0, 0.0],

@@ -3,13 +3,173 @@ import { UnitSidebar, UnitActionPopups } from "units.slint";
 import { UnitData, JournalEntryData, ConsoleLineData } from "unit-card.slint";
 import { PlotPanel, PlotBridge } from "plot.slint";
 import { ViewSettings } from "view-settings.slint";
-import { Theme, Icons, Icon, Card, KButton, IconButton, Dot } from "kit.slint";
+import { Theme, Icons, Icon, Card, KButton, IconButton, Dot, Pill, Meter, LinkBars, Segmented, Switch, MenuPanel, MenuRow } from "kit.slint";
 import { UnitRow, Health, HealthColors } from "units-table.slint";
 
 export struct VizLabel {
     text: string,
     screen-x: float,
     screen-y: float,
+}
+
+// A unit's name next to it in the 3D view
+export struct UnitLabel {
+    text: string,
+    x: float,
+    y: float,
+    tone: Health,
+    selected: bool,
+}
+
+// The unit under the pointer
+export struct SceneTip {
+    shown: bool,
+    name: string,
+    line1: string,
+    line2: string,
+    x: float,
+    y: float,
+}
+
+// What the 3D view shows, counted for the legend
+export struct SceneLegend {
+    ready: int,
+    flying: int,
+    charger: int,
+    warn: int,
+    fault: int,
+    // Units without a position: not connected
+    hidden: int,
+    base-stations: int,
+    anchors: int,
+    pads: int,
+    areas: int,
+}
+
+// A switch in the Layers panel
+component LayerRow inherits Rectangle {
+    in property <string> text;
+    in property <string> note;
+    in property <bool> enabled: true;
+    in-out property <bool> checked;
+    height: 34px;
+    HorizontalLayout {
+        spacing: 10px;
+        VerticalLayout {
+            horizontal-stretch: 1;
+            alignment: center;
+            Text {
+                text: root.text;
+                font-size: 12.5px;
+                color: root.enabled ? Theme.text : Theme.text3;
+            }
+            if root.note != "": Text {
+                text: root.note;
+                font-size: 11px;
+                color: Theme.text3;
+            }
+        }
+        Switch {
+            y: (parent.height - self.height) / 2;
+            checked <=> root.checked;
+            enabled: root.enabled;
+        }
+    }
+}
+
+component LayerTitle inherits Text {
+    font-size: 11px;
+    font-weight: 600;
+    color: Theme.text3;
+    letter-spacing: 0.5px;
+    height: 28px;
+    vertical-alignment: bottom;
+}
+
+// A floating card over the scene
+component Float inherits Rectangle {
+    background: Theme.surface;
+    border-radius: 12px;
+    drop-shadow-blur: 16px;
+    drop-shadow-color: Theme.shadow;
+    drop-shadow-offset-y: 4px;
+}
+
+// A button on the scene: Fit, Layers
+component SceneButton inherits Float {
+    in property <string> text;
+    in property <image> icon;
+    in property <bool> on;
+    callback clicked();
+    height: 38px;
+    width: btn-layout.preferred-width;
+    border-radius: 10px;
+    background: root.on ? Theme.accent-tint : touch.has-hover ? Theme.hover : Theme.surface;
+    btn-layout := HorizontalLayout {
+        padding-left: 12px;
+        padding-right: 12px;
+        spacing: 7px;
+        Icon {
+            y: (parent.height - self.height) / 2;
+            source: root.icon;
+            width: 16px;
+            height: 16px;
+            color: root.on ? Theme.accent-text : Theme.text;
+        }
+        Text {
+            text: root.text;
+            font-size: 12.5px;
+            font-weight: 500;
+            color: root.on ? Theme.accent-text : Theme.text;
+            vertical-alignment: center;
+        }
+    }
+    touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+}
+
+// "Geometry from", "Scene": a setting that opens a menu
+component SourceRow inherits Rectangle {
+    in property <string> label;
+    in property <string> value;
+    callback clicked();
+    height: 36px;
+    border-radius: 8px;
+    background: touch.has-hover ? Theme.hover : transparent;
+    HorizontalLayout {
+        padding-left: 8px;
+        padding-right: 8px;
+        spacing: 8px;
+        Text {
+            width: 92px;
+            text: root.label;
+            font-size: Theme.font-small;
+            color: Theme.text3;
+            vertical-alignment: center;
+        }
+        Text {
+            horizontal-stretch: 1;
+            text: root.value;
+            font-size: 12.5px;
+            font-weight: 500;
+            color: Theme.text;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+        Icon {
+            y: (parent.height - self.height) / 2;
+            source: Icons.chevron-down;
+            width: 14px;
+            height: 14px;
+            color: Theme.text3;
+        }
+    }
+    touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
 }
 
 export component VisualizationContent inherits Rectangle {
@@ -27,7 +187,6 @@ export component VisualizationContent inherits Rectangle {
     in-out property <float> cam-pan-y <=> ViewSettings.cam-pan-y;
 
     // Label toggle states (persisted)
-    in-out property <bool> show-cf-labels <=> ViewSettings.show-cf-labels;
     in-out property <bool> show-lh-labels <=> ViewSettings.show-lh-labels;
     in-out property <bool> show-loco-labels <=> ViewSettings.show-loco-labels;
     in-out property <bool> show-axis-labels <=> ViewSettings.show-axis-labels;
@@ -59,7 +218,9 @@ export component VisualizationContent inherits Rectangle {
     callback load-scene();
 
     // Label data (set from Rust)
-    in-out property <[VizLabel]> cf-labels;
+    in-out property <[UnitLabel]> unit-labels;
+    in-out property <SceneTip> tip;
+    in-out property <SceneLegend> legend;
     in-out property <[VizLabel]> lh-labels;
     in-out property <[VizLabel]> loco-labels;
     in-out property <[VizLabel]> axis-labels;
@@ -90,6 +251,11 @@ export component VisualizationContent inherits Rectangle {
 
     // Fired on a left-click that wasn't a drag; Rust hit-tests and sets selected-unit.
     callback viz-unit-clicked(/* x */ float, /* y */ float);
+    // The pointer moved over the scene, (-1, -1) when it left: Rust shows
+    // the tooltip of the unit under it.
+    callback hover(/* x */ float, /* y */ float);
+    // Bring the units into view, from the angle the camera has
+    callback fit();
 
     // Sidebar action callbacks (row index into sorted-units) — mapped to the
     // same shared AppWindow callbacks the Units tab uses.
@@ -127,6 +293,16 @@ export component VisualizationContent inherits Rectangle {
     callback syson-requested(/* row index */ int);
     callback clear-tlv-requested(/* row index */ int);
 
+    // Perspective, Top, Front, Side: the angle, then Fit for the rest
+    function view-from(preset: int) {
+        ViewSettings.view-preset = preset;
+        if (preset == 0) { root.cam-yaw = -2.05; root.cam-pitch = 0.58; }
+        if (preset == 1) { root.cam-yaw = -1.5708; root.cam-pitch = 1.55; }
+        if (preset == 2) { root.cam-yaw = -1.5708; root.cam-pitch = 0.1; }
+        if (preset == 3) { root.cam-yaw = 0; root.cam-pitch = 0.1; }
+        root.fit();
+    }
+
     private property <bool> journal-open: false;
     private property <bool> console-open: false;
     private property <bool> assert-open: false;
@@ -149,68 +325,91 @@ export component VisualizationContent inherits Rectangle {
         image-fit: fill;
     }
 
-    // Label overlays
-    if show-cf-labels && show-units: Rectangle {
-        width: 100%;
-        height: 100%;
-        for label in root.cf-labels: Text {
-            x: label.screen-x * 1px;
-            y: label.screen-y * 1px;
+    // Grid distances, axis names, base station and anchor IDs
+    if show-grid-labels && show-grid: Rectangle {
+        for label in root.grid-labels: Text {
+            x: label.screen-x * 1px - self.width / 2;
+            y: label.screen-y * 1px - self.height / 2;
             text: label.text;
-            font-size: 11px;
-            font-weight: 500;
-            color: Theme.text;
+            font-family: Theme.font-mono;
+            font-size: 10.5px;
+            color: Theme.text3;
         }
     }
-
-    if show-lh-labels && show-lh-stations: Rectangle {
-        width: 100%;
-        height: 100%;
-        for label in root.lh-labels: Text {
-            x: label.screen-x * 1px;
-            y: label.screen-y * 1px;
-            text: label.text;
-            font-size: 10px;
-            color: #f04545;
-        }
-    }
-
-    if show-loco-labels && show-loco-anchors: Rectangle {
-        width: 100%;
-        height: 100%;
-        for label in root.loco-labels: Text {
-            x: label.screen-x * 1px;
-            y: label.screen-y * 1px;
-            text: label.text;
-            font-size: 10px;
-            color: #ffd900;
-        }
-    }
-
     if show-axis-labels && show-axes: Rectangle {
-        width: 100%;
-        height: 100%;
         for label in root.axis-labels: Text {
-            x: label.screen-x * 1px;
-            y: label.screen-y * 1px;
+            x: label.screen-x * 1px - self.width / 2;
+            y: label.screen-y * 1px - self.height / 2;
             text: label.text;
             font-size: 12px;
             font-weight: 700;
-            color: label.text == "X" ? #f04545
-                 : label.text == "Y" ? #4ad980
-                 : #61a6fb;
+            color: label.text == "X" ? Theme.axis-x : label.text == "Y" ? Theme.axis-y : Theme.axis-z;
+        }
+    }
+    if show-lh-labels && show-lh-stations: Rectangle {
+        for label in root.lh-labels: Rectangle {
+            x: label.screen-x * 1px;
+            y: label.screen-y * 1px;
+            width: id-text.preferred-width + 10px;
+            height: id-text.preferred-height + 2px;
+            border-radius: 4px;
+            background: Theme.surface;
+            border-width: 1px;
+            border-color: Theme.border;
+            id-text := Text {
+                text: label.text;
+                font-size: 11px;
+                font-weight: 500;
+                color: Theme.text2;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+        }
+    }
+    if show-loco-labels && show-loco-anchors: Rectangle {
+        for label in root.loco-labels: Rectangle {
+            x: label.screen-x * 1px;
+            y: label.screen-y * 1px;
+            width: anchor-text.preferred-width + 10px;
+            height: anchor-text.preferred-height + 2px;
+            border-radius: 4px;
+            background: Theme.surface;
+            border-width: 1px;
+            border-color: Theme.border;
+            anchor-text := Text {
+                text: label.text;
+                font-size: 11px;
+                font-weight: 500;
+                color: Theme.text2;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
         }
     }
 
-    if show-grid-labels && show-grid: Rectangle {
-        width: 100%;
-        height: 100%;
-        for label in root.grid-labels: Text {
-            x: label.screen-x * 1px;
-            y: label.screen-y * 1px;
-            text: label.text;
-            font-size: 9px;
-            color: Palette.foreground.transparentize(0.5);
+    // Unit names: the ones with a problem, the selected one and the one
+    // under the pointer (Layers › Crazyflie names)
+    if show-units: Rectangle {
+        for label in root.unit-labels: Rectangle {
+            x: label.x * 1px;
+            y: label.y * 1px;
+            width: name-text.preferred-width + 10px;
+            height: name-text.preferred-height + 2px;
+            border-radius: 4px;
+            background: label.selected ? Theme.accent-button : Theme.surface;
+            border-width: label.selected ? 0px : 1px;
+            border-color: Theme.border;
+            name-text := Text {
+                text: label.text;
+                font-size: 11.5px;
+                font-weight: 600;
+                color: label.selected ? #ffffff
+                    : label.tone == Health.fault ? Theme.crit-text
+                    : label.tone == Health.warn ? Theme.warn-text
+                    : Theme.text;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
         }
     }
 
@@ -224,11 +423,21 @@ export component VisualizationContent inherits Rectangle {
 
         scroll-event(e) => {
             if (e.delta-y > 0) {
-                root.cam-distance = max(1.0, root.cam-distance - 0.5);
+                root.cam-distance = max(1.0, root.cam-distance * 0.92);
             } else if (e.delta-y < 0) {
-                root.cam-distance = min(80.0, root.cam-distance + 0.5);
+                root.cam-distance = min(80.0, root.cam-distance / 0.92);
             }
             accept
+        }
+
+        changed mouse-x => {
+            if (!self.dragging) { root.hover(self.mouse-x / 1px, self.mouse-y / 1px); }
+        }
+        changed mouse-y => {
+            if (!self.dragging) { root.hover(self.mouse-x / 1px, self.mouse-y / 1px); }
+        }
+        changed has-hover => {
+            if (!self.has-hover) { root.hover(-1, -1); }
         }
 
         pointer-event(e) => {
@@ -245,7 +454,7 @@ export component VisualizationContent inherits Rectangle {
                 }
             } else if (e.kind == PointerEventKind.up) {
                 if (e.button == PointerEventButton.right && !self.right-click-moved) {
-                    context-menu.show();
+                    layers.show();
                 }
                 if (e.button == PointerEventButton.left && !self.left-click-moved) {
                     root.viz-unit-clicked(self.mouse-x / 1px, self.mouse-y / 1px);
@@ -259,6 +468,7 @@ export component VisualizationContent inherits Rectangle {
             // (and mouse-x/-y) fire for any grabbed button. So we gate on `dragging`, not
             // `pressed`, otherwise middle/right-button panning would never run.
             if (self.dragging) {
+                ViewSettings.view-preset = -1;
                 if (self.right-button) {
                     self.right-click-moved = true;
                     // The camera orbits by yaw, so a screen-space drag must be projected onto
@@ -271,7 +481,7 @@ export component VisualizationContent inherits Rectangle {
                 } else {
                     self.left-click-moved = true;
                     root.cam-yaw -= (self.mouse-x / 1px - self.prev-x) * 0.01;
-                    root.cam-pitch = clamp(root.cam-pitch + (self.mouse-y / 1px - self.prev-y) * 0.01, 0.1, 1.5);
+                    root.cam-pitch = clamp(root.cam-pitch + (self.mouse-y / 1px - self.prev-y) * 0.01, 0.1, 1.55);
                 }
                 self.prev-x = self.mouse-x / 1px;
                 self.prev-y = self.mouse-y / 1px;
@@ -279,324 +489,453 @@ export component VisualizationContent inherits Rectangle {
         }
     }
 
-    context-menu := PopupWindow {
-        x: 10px;
-        y: 10px;
-        width: 460px;
-        // Stay open while several objects are switched on and off; a click in
-        // the 3D view (or one of the buttons below) dismisses it.
-        close-policy: close-on-click-outside;
-
-        Rectangle {
-            width: 460px;
-            background: Palette.background;
-            border-width: 1px;
-            border-color: Palette.border;
-            border-radius: 4px;
-
-            HorizontalLayout {
-                padding: 8px;
-                spacing: 12px;
-
-                // Left column: what gets drawn in the 3D scene.
-                VerticalLayout {
-                    spacing: 4px;
-                    alignment: start;
-
-                    Text {
-                        text: "Show Objects";
-                        font-size: 12px;
-                        font-weight: 600;
-                        color: Palette.foreground.transparentize(0.3);
-                    }
-
-                    CheckBox {
-                        text: "Crazyflies";
-                        checked <=> root.show-units;
-                    }
-
-                    CheckBox {
-                        text: "Legend";
-                        checked <=> ViewSettings.show-legend;
-                    }
-
-                    CheckBox {
-                        text: "Ground drop lines";
-                        checked <=> root.show-drop-lines;
-                    }
-
-                    CheckBox {
-                        text: "Trajectories";
-                        checked <=> root.show-trajectories;
-                    }
-
-                    CheckBox {
-                        text: "Goto targets";
-                        checked <=> root.show-goto-targets;
-                    }
-
-                    CheckBox {
-                        text: "Lighthouse base stations";
-                        checked <=> root.show-lh-stations;
-                    }
-
-                    CheckBox {
-                        text: "Loco anchors";
-                        checked <=> root.show-loco-anchors;
-                    }
-
-                    Rectangle {
-                        height: 1px;
-                        background: Palette.border.transparentize(0.5);
-                    }
-
-                    CheckBox {
-                        text: "Ground grid";
-                        checked <=> root.show-grid;
-                    }
-
-                    CheckBox {
-                        text: "Axes (X, Y, Z)";
-                        checked <=> root.show-axes;
-                    }
-                }
-
-                Rectangle {
-                    width: 1px;
-                    background: Palette.border.transparentize(0.5);
-                }
-
-                // Right column: text overlays and the loaded scene.
-                VerticalLayout {
-                    spacing: 4px;
-                    alignment: start;
-
-                    Text {
-                        text: "Show Labels";
-                        font-size: 12px;
-                        font-weight: 600;
-                        color: Palette.foreground.transparentize(0.3);
-                    }
-
-                    CheckBox {
-                        text: "Crazyflie names";
-                        checked <=> root.show-cf-labels;
-                        enabled: root.show-units;
-                    }
-
-                    CheckBox {
-                        text: "Lighthouse base station IDs";
-                        checked <=> root.show-lh-labels;
-                        enabled: root.show-lh-stations;
-                    }
-
-                    CheckBox {
-                        text: "Loco node IDs";
-                        checked <=> root.show-loco-labels;
-                        enabled: root.show-loco-anchors;
-                    }
-
-                    CheckBox {
-                        text: "Axis labels (X, Y, Z)";
-                        checked <=> root.show-axis-labels;
-                        enabled: root.show-axes;
-                    }
-
-                    CheckBox {
-                        text: "Grid measurements (m)";
-                        checked <=> root.show-grid-labels;
-                        enabled: root.show-grid;
-                    }
-
-                    Rectangle {
-                        height: 1px;
-                        background: Palette.border.transparentize(0.5);
-                    }
-
-                    Text {
-                        text: "Scene";
-                        font-size: 12px;
-                        font-weight: 600;
-                        color: Palette.foreground.transparentize(0.3);
-                    }
-
-                    CheckBox {
-                        text: "Show scene overlay";
-                        checked <=> root.show-scene-overlay;
-                    }
-
-                    CheckBox {
-                        text: "Flight / waypoint areas";
-                        checked <=> root.show-areas;
-                        enabled: root.show-scene-overlay;
-                    }
-
-                    CheckBox {
-                        text: "Takeoff pads";
-                        checked <=> root.show-pads;
-                        enabled: root.show-scene-overlay;
-                    }
-
-                    CheckBox {
-                        text: "Obstacles";
-                        checked <=> root.show-obstacles;
-                        enabled: root.show-scene-overlay;
-                    }
-
-                    Text {
-                        text: root.loaded-scene-name == "" ? "(no scene loaded)" : root.loaded-scene-name;
-                        font-size: 10px;
-                        color: Palette.foreground.transparentize(0.5);
-                        overflow: elide;
-                    }
-
-                    Button {
-                        text: "Load Scene…";
-                        clicked => { context-menu.close(); root.load-scene(); }
-                    }
-
-                    Button {
-                        text: "Save Pad Positions";
-                        clicked => { context-menu.close(); root.save-pads(); }
-                    }
-                }
-            }
-        }
-    }
-
-    // Positioning source dropdown (must be after TouchArea to receive events)
-    Rectangle {
-        x: 12px;
-        y: 12px;
-        width: 220px;
-        height: 34px;
-
-        HorizontalLayout {
-            spacing: 6px;
-            alignment: start;
-
-            Text {
-                text: "Source:";
-                font-size: 12px;
-                color: Palette.foreground.transparentize(0.3);
-                vertical-alignment: center;
-            }
-
-            ComboBox {
-                width: 160px;
-                model: root.positioning-source-names;
-                current-index <=> root.positioning-source-index;
-                selected(value) => {
-                    root.positioning-source-changed(self.current-index);
-                }
-            }
-        }
-    }
-
-    // Layers, next to the positioning source
-    HorizontalLayout {
-        x: 244px;
-        y: 12px;
-        width: self.preferred-width;
-        height: 34px;
-        spacing: 8px;
-        KButton {
-            text: "Layers";
-            icon: Icons.layers;
-            clicked => { context-menu.show(); }
-        }
-    }
-
-    // What the unit colours mean, bottom left
-    if ViewSettings.show-legend && root.show-units: Card {
-        x: 12px;
-        y: parent.height - self.height - 12px;
-        width: legend-layout.preferred-width;
-        height: legend-layout.preferred-height;
-        drop-shadow-blur: 12px;
-        drop-shadow-color: Theme.shadow;
-        legend-layout := VerticalLayout {
-            padding: 12px;
+    // The unit under the pointer
+    if root.tip.shown: Float {
+        x: root.tip.x * 1px;
+        y: root.tip.y * 1px;
+        width: max(170px, tip-layout.preferred-width);
+        height: tip-layout.preferred-height;
+        border-radius: 9px;
+        drop-shadow-blur: 24px;
+        drop-shadow-offset-y: 8px;
+        tip-layout := VerticalLayout {
+            padding-left: 10px;
+            padding-right: 10px;
             padding-top: 8px;
-            spacing: 6px;
+            padding-bottom: 8px;
+            Text { text: root.tip.name; font-size: 12.5px; font-weight: 600; color: Theme.text; }
+            Text { text: root.tip.line1; font-size: Theme.font-small; color: Theme.text2; }
+            Text { text: root.tip.line2; font-size: Theme.font-small; color: Theme.text2; }
+        }
+    }
+
+    // What the colours mean, and how much of each there is
+    if ViewSettings.show-legend: Float {
+        x: 16px;
+        y: 16px;
+        width: 240px;
+        height: legend-layout.preferred-height;
+        TouchArea { }
+        legend-layout := VerticalLayout {
+            padding: 10px;
+            spacing: 2px;
             HorizontalLayout {
-                spacing: 12px;
+                padding-left: 4px;
+                padding-bottom: 4px;
                 Text {
                     horizontal-stretch: 1;
-                    text: "Units";
-                    font-size: Theme.font-small;
+                    text: "LEGEND";
+                    font-size: 11px;
                     font-weight: 600;
-                    color: Theme.text;
+                    letter-spacing: 0.5px;
+                    color: Theme.text3;
                     vertical-alignment: center;
                 }
                 IconButton {
                     icon: Icons.close;
-                    size: 22px;
+                    size: 24px;
                     icon-size: 14px;
                     clicked => { ViewSettings.show-legend = false; }
                 }
             }
             for item in [
-                { label: "Ready, charged", tint: Theme.good },
-                { label: "Flying", tint: Theme.flying },
-                { label: "Charging, needs a look", tint: Theme.warn },
-                { label: "Fault", tint: Theme.crit },
-                { label: "Not connected", tint: Theme.off },
+                { label: root.legend.flying > 0 ? "Flying" : "Connected", tint: root.legend.flying > 0 ? Theme.flying : Theme.good, n: root.legend.flying + root.legend.ready, hollow: false },
+                { label: "On a charger", tint: Theme.text3, n: root.legend.charger, hollow: true },
+                { label: "Warning", tint: Theme.warn, n: root.legend.warn, hollow: false },
+                { label: "Fault", tint: Theme.crit, n: root.legend.fault, hollow: false },
             ]: HorizontalLayout {
+                padding-left: 4px;
+                padding-right: 4px;
+                height: 24px;
                 spacing: 8px;
-                Dot {
+                Rectangle {
                     y: (parent.height - self.height) / 2;
-                    tint: item.tint;
+                    width: 10px;
+                    height: 10px;
+                    border-radius: 5px;
+                    background: item.hollow ? transparent : item.tint;
+                    border-width: item.hollow ? 2px : 0px;
+                    border-color: item.tint;
                 }
-                Text {
-                    text: item.label;
-                    font-size: Theme.font-small;
-                    color: Theme.text2;
+                Text { horizontal-stretch: 1; text: item.label; font-size: 12.5px; color: Theme.text; vertical-alignment: center; }
+                Text { text: item.n; font-size: 12.5px; color: Theme.text3; vertical-alignment: center; }
+            }
+            if root.legend.hidden > 0: Text {
+                text: root.legend.hidden + " not shown: not connected";
+                font-size: 11.5px;
+                color: Theme.text3;
+                x: 4px;
+            }
+            if root.legend.base-stations + root.legend.anchors + root.legend.pads + root.legend.areas > 0: Rectangle {
+                height: 9px;
+                Rectangle { height: 1px; background: Theme.border; }
+            }
+            if root.legend.base-stations > 0: HorizontalLayout {
+                padding-left: 4px;
+                padding-right: 4px;
+                height: 24px;
+                spacing: 8px;
+                Rectangle {
+                    y: (parent.height - self.height) / 2;
+                    width: 12px;
+                    height: 12px;
+                    border-radius: 3px;
+                    border-width: 2px;
+                    border-color: Theme.base-station;
+                }
+                Text { horizontal-stretch: 1; text: "Base station"; font-size: 12.5px; color: Theme.text; vertical-alignment: center; }
+                Text { text: root.legend.base-stations; font-size: 12.5px; color: Theme.text3; vertical-alignment: center; }
+            }
+            if root.legend.anchors > 0: HorizontalLayout {
+                padding-left: 4px;
+                padding-right: 4px;
+                height: 24px;
+                spacing: 8px;
+                Rectangle {
+                    y: (parent.height - self.height) / 2;
+                    width: 12px;
+                    height: 12px;
+                    border-radius: 3px;
+                    border-width: 2px;
+                    border-color: Theme.base-station;
+                }
+                Text { horizontal-stretch: 1; text: "Loco anchor"; font-size: 12.5px; color: Theme.text; vertical-alignment: center; }
+                Text { text: root.legend.anchors; font-size: 12.5px; color: Theme.text3; vertical-alignment: center; }
+            }
+            if root.legend.pads > 0: HorizontalLayout {
+                padding-left: 4px;
+                padding-right: 4px;
+                height: 24px;
+                spacing: 8px;
+                Rectangle {
+                    y: (parent.height - self.height) / 2;
+                    width: 12px;
+                    height: 12px;
+                    border-radius: 6px;
+                    border-width: 1.5px;
+                    border-color: Theme.pad;
+                }
+                Text { horizontal-stretch: 1; text: "Takeoff pad"; font-size: 12.5px; color: Theme.text; vertical-alignment: center; }
+                Text { text: root.legend.pads; font-size: 12.5px; color: Theme.text3; vertical-alignment: center; }
+            }
+            if root.legend.areas > 0: HorizontalLayout {
+                padding-left: 4px;
+                padding-right: 4px;
+                height: 24px;
+                spacing: 8px;
+                HorizontalLayout {
+                    y: (parent.height - 2px) / 2;
+                    width: 14px;
+                    height: 2px;
+                    spacing: 2px;
+                    for i in 3: Rectangle { width: 3.33px; background: Theme.area; }
+                }
+                Text { horizontal-stretch: 1; text: "Flight area"; font-size: 12.5px; color: Theme.text; vertical-alignment: center; }
+                Text { text: root.legend.areas; font-size: 12.5px; color: Theme.text3; vertical-alignment: center; }
+            }
+        }
+    }
+
+    // View presets, Fit and Layers, top right
+    tools := HorizontalLayout {
+        x: parent.width - self.preferred-width - 16px;
+        y: 16px;
+        width: self.preferred-width;
+        height: 38px;
+        spacing: 6px;
+        Float {
+            width: presets.min-width + 2px;
+            border-radius: 10px;
+            presets := Segmented {
+                x: 1px;
+                y: 1px;
+                height: parent.height - 2px;
+                background: Theme.surface;
+                border-width: 0px;
+                items: [{ label: "Perspective" }, { label: "Top" }, { label: "Front" }, { label: "Side" }];
+                current <=> ViewSettings.view-preset;
+                selected(i) => { root.view-from(i); }
+            }
+        }
+        SceneButton {
+            text: "Fit";
+            icon: Icons.fit;
+            clicked => { root.fit(); }
+        }
+        SceneButton {
+            text: "Layers";
+            icon: Icons.layers;
+            clicked => { layers.show(); }
+        }
+    }
+
+    // What the scene's base stations and anchors are read from, and the
+    // scene file, bottom left
+    Float {
+        x: 16px;
+        y: parent.height - self.height - 16px;
+        width: 264px;
+        height: source-layout.preferred-height;
+        TouchArea { }
+        source-layout := VerticalLayout {
+            padding: 6px;
+            spacing: 2px;
+            SourceRow {
+                label: "Geometry from";
+                value: root.positioning-source-names.length == 0 ? "No unit connected"
+                    : root.positioning-source-names[root.positioning-source-index];
+                clicked => { source-menu.show(); }
+            }
+            SourceRow {
+                label: "Scene";
+                value: root.loaded-scene-name == "" ? "None" : root.loaded-scene-name;
+                clicked => { scene-menu.show(); }
+            }
+        }
+        source-menu := PopupWindow {
+            x: 0;
+            y: -self.height - 6px;
+            width: 264px;
+            MenuPanel {
+                height: source-list.preferred-height;
+                source-list := VerticalLayout {
+                    padding: 6px;
+                    if root.positioning-source-names.length == 0: MenuRow { text: "No unit connected"; enabled: false; }
+                    for name[i] in root.positioning-source-names: MenuRow {
+                        text: name;
+                        checked: i == root.positioning-source-index;
+                        clicked => {
+                            root.positioning-source-index = i;
+                            root.positioning-source-changed(i);
+                            source-menu.close();
+                        }
+                    }
+                }
+            }
+        }
+        scene-menu := PopupWindow {
+            x: 0;
+            y: -self.height - 6px;
+            width: 264px;
+            MenuPanel {
+                height: scene-list.preferred-height;
+                scene-list := VerticalLayout {
+                    padding: 6px;
+                    MenuRow { text: "Load scene…"; icon: Icons.folder; clicked => { root.load-scene(); scene-menu.close(); } }
+                    MenuRow { text: "Save pad positions"; icon: Icons.download; clicked => { root.save-pads(); scene-menu.close(); } }
                 }
             }
         }
     }
 
-    // The selected unit as a card over the view
-    if root.has-unit && !root.docked: Card {
-        x: parent.width - self.width - 12px;
-        y: 12px;
-        width: 300px;
+    // Which way is which, and the zoom, bottom right
+    Float {
+        x: parent.width - self.width - 16px;
+        y: parent.height - self.height - 16px;
+        width: 76px;
+        height: zoom-layout.preferred-height;
+        TouchArea { }
+        // Where the axes point on screen (as in the renderer's camera)
+        property <float> rx: -Math.sin(root.cam-yaw * 1rad);
+        property <float> ry: Math.cos(root.cam-yaw * 1rad);
+        property <float> ux: -Math.cos(root.cam-yaw * 1rad) * Math.sin(root.cam-pitch * 1rad);
+        property <float> uy: -Math.sin(root.cam-yaw * 1rad) * Math.sin(root.cam-pitch * 1rad);
+        property <float> uz: Math.cos(root.cam-pitch * 1rad);
+        zoom-layout := VerticalLayout {
+            padding: 6px;
+            spacing: 2px;
+            alignment: start;
+            Rectangle {
+                height: 64px;
+                for axis in [
+                    { name: "X", dx: rx, dy: -ux, tint: Theme.axis-x, preset: 3 },
+                    { name: "Y", dx: ry, dy: -uy, tint: Theme.axis-y, preset: 2 },
+                    { name: "Z", dx: 0, dy: -uz, tint: Theme.axis-z, preset: 1 },
+                ]: Rectangle {
+                    Path {
+                        x: 0;
+                        y: 0;
+                        width: 64px;
+                        height: 64px;
+                        viewbox-width: 64;
+                        viewbox-height: 64;
+                        stroke: axis.tint;
+                        stroke-width: 2px;
+                        MoveTo { x: 32; y: 32; }
+                        LineTo { x: 32 + axis.dx * 20; y: 32 + axis.dy * 20; }
+                    }
+                    Rectangle {
+                        x: (32 + axis.dx * 28.4) * 1px - self.width / 2;
+                        y: (32 + axis.dy * 28.4) * 1px - self.height / 2;
+                        width: 16px;
+                        height: 16px;
+                        border-radius: 4px;
+                        background: axis-touch.has-hover ? Theme.hover : transparent;
+                        Text {
+                            text: axis.name;
+                            font-size: 10.5px;
+                            font-weight: 700;
+                            color: axis.tint;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                        axis-touch := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { root.view-from(axis.preset); }
+                        }
+                    }
+                }
+            }
+            Rectangle {
+                height: 9px;
+                Rectangle { height: 1px; width: 40px; background: Theme.border; }
+            }
+            HorizontalLayout {
+                alignment: center;
+                IconButton { icon: Icons.plus; clicked => { root.cam-distance = max(1.0, root.cam-distance * 0.8); } }
+            }
+            HorizontalLayout {
+                alignment: center;
+                IconButton { icon: Icons.minus; clicked => { root.cam-distance = min(80.0, root.cam-distance * 1.25); } }
+            }
+            HorizontalLayout {
+                alignment: center;
+                IconButton { icon: Icons.fit; clicked => { root.fit(); } }
+            }
+        }
+    }
+
+    // How to move around, bottom middle
+    Float {
+        x: (parent.width - self.width) / 2;
+        y: parent.height - self.height - 16px;
+        width: hint-text.preferred-width + 24px;
+        height: hint-text.preferred-height + 12px;
+        border-radius: self.height / 2;
+        visible: parent.width > 900px;
+        hint-text := Text {
+            text: "Drag to orbit · Right-drag to pan · Scroll to zoom";
+            font-size: Theme.font-small;
+            color: Theme.text3;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+    }
+
+    // Layers: what the scene shows
+    layers := PopupWindow {
+        x: parent.width - 516px;
+        y: 62px;
+        width: 500px;
+        // Stay open while several objects are switched on and off; a click in
+        // the 3D view (or one of the buttons below) dismisses it.
+        close-policy: close-on-click-outside;
+        MenuPanel {
+            height: layers-layout.preferred-height;
+            layers-layout := VerticalLayout {
+                padding: 12px;
+                padding-top: 4px;
+                spacing: 8px;
+                HorizontalLayout {
+                    spacing: 16px;
+                    VerticalLayout {
+                        horizontal-stretch: 1;
+                        alignment: start;
+                        LayerTitle { text: "OBJECTS"; }
+                        LayerRow { text: "Crazyflies"; checked <=> root.show-units; }
+                        LayerRow { text: "Drop lines to the floor"; checked <=> root.show-drop-lines; }
+                        LayerRow { text: "Trajectories"; checked <=> root.show-trajectories; }
+                        LayerRow { text: "Go-to targets"; checked <=> root.show-goto-targets; }
+                        LayerRow { text: "Lighthouse base stations"; checked <=> root.show-lh-stations; }
+                        LayerRow { text: "Loco anchors"; checked <=> root.show-loco-anchors; }
+                        LayerRow { text: "Floor grid"; checked <=> root.show-grid; }
+                        LayerRow { text: "Axes"; checked <=> root.show-axes; }
+                    }
+                    VerticalLayout {
+                        horizontal-stretch: 1;
+                        alignment: start;
+                        LayerTitle { text: "CRAZYFLIE NAMES"; }
+                        Segmented {
+                            fill: true;
+                            items: [{ label: "Problems" }, { label: "All" }, { label: "Selected" }];
+                            current <=> ViewSettings.label-mode;
+                        }
+                        LayerTitle { text: "OTHER LABELS"; }
+                        LayerRow { text: "Base station IDs"; checked <=> root.show-lh-labels; enabled: root.show-lh-stations; }
+                        LayerRow { text: "Anchor IDs"; checked <=> root.show-loco-labels; enabled: root.show-loco-anchors; }
+                        LayerRow { text: "Axis names"; checked <=> root.show-axis-labels; enabled: root.show-axes; }
+                        LayerRow { text: "Grid distances (m)"; checked <=> root.show-grid-labels; enabled: root.show-grid; }
+                        LayerTitle { text: "SCENE"; }
+                        LayerRow { text: "Flight areas"; checked <=> root.show-areas; enabled: root.show-scene-overlay; }
+                        LayerRow { text: "Takeoff pads"; checked <=> root.show-pads; enabled: root.show-scene-overlay; }
+                        LayerRow { text: "Obstacles"; checked <=> root.show-obstacles; enabled: root.show-scene-overlay; }
+                        LayerTitle { text: "ON SCREEN"; }
+                        LayerRow { text: "Legend"; checked <=> ViewSettings.show-legend; }
+                    }
+                }
+                Rectangle { height: 1px; background: Theme.border; }
+                HorizontalLayout {
+                    spacing: 8px;
+                    Text {
+                        horizontal-stretch: 1;
+                        text: root.loaded-scene-name == "" ? "No scene loaded" : "Scene: " + root.loaded-scene-name;
+                        font-size: Theme.font-small;
+                        color: Theme.text2;
+                        vertical-alignment: center;
+                        overflow: elide;
+                    }
+                    KButton { small: true; text: "Load scene…"; clicked => { layers.close(); root.load-scene(); } }
+                    KButton { small: true; text: "Save pad positions"; clicked => { layers.close(); root.save-pads(); } }
+                }
+            }
+        }
+    }
+
+    // The selected unit as a card over the view, under the tools
+    if root.has-unit && !root.docked: Float {
+        property <UnitData> unit: root.sorted-units[root.selected-unit];
+        property <Health> health: root.unit-info.health;
+        property <bool> live: root.unit-info.battery != "";
+        x: parent.width - self.width - 16px;
+        y: 68px;
+        width: 312px;
         height: card-layout.preferred-height;
-        drop-shadow-blur: 24px;
-        drop-shadow-color: Theme.shadow;
-        drop-shadow-offset-y: 8px;
 
         // Absorb clicks so they don't reach the camera.
         TouchArea { }
 
         card-layout := VerticalLayout {
             padding: 14px;
-            spacing: 10px;
+            spacing: 12px;
             HorizontalLayout {
-                spacing: 4px;
+                spacing: 10px;
                 VerticalLayout {
                     horizontal-stretch: 1;
                     spacing: 3px;
-                    Text {
-                        text: root.sorted-units[root.selected-unit].name;
-                        font-size: 15px;
-                        font-weight: 600;
-                        color: Theme.text;
-                    }
                     HorizontalLayout {
-                        spacing: 6px;
+                        spacing: 8px;
                         alignment: start;
-                        Dot {
-                            y: (parent.height - self.height) / 2;
-                            tint: HealthColors.dot(root.unit-info.health);
-                            hollow: root.unit-info.health == Health.off;
-                        }
                         Text {
-                            text: root.unit-info.status;
-                            font-size: Theme.font-small;
-                            color: HealthColors.label(root.unit-info.health);
+                            text: unit.name;
+                            font-size: 16px;
+                            font-weight: 600;
+                            color: Theme.text;
+                            vertical-alignment: center;
                         }
+                        Pill {
+                            height: 24px;
+                            has-dot: true;
+                            dot: HealthColors.dot(health);
+                            hollow: health == Health.off;
+                            fg: HealthColors.label(health);
+                            text: root.unit-info.status;
+                        }
+                    }
+                    Text {
+                        text: root.unit-info.radio + " · " + root.unit-info.address;
+                        font-size: Theme.font-small;
+                        color: Theme.text2;
+                        overflow: elide;
                     }
                 }
                 IconButton {
@@ -605,47 +944,151 @@ export component VisualizationContent inherits Rectangle {
                     clicked => { root.selected-unit = -1; }
                 }
             }
-            if root.unit-info.detail != "": Text {
-                text: root.unit-info.detail;
-                font-size: Theme.font-small;
-                color: Theme.text2;
-                wrap: word-wrap;
-            }
-            HorizontalLayout {
-                spacing: 12px;
-                for fact in [
-                    { label: "Battery", value: root.unit-info.battery == "" ? "–" : root.unit-info.battery },
-                    { label: "Link", value: root.unit-info.link == "" ? "–" : root.unit-info.link },
-                    { label: "Radio", value: root.unit-info.radio },
-                ]: VerticalLayout {
-                    horizontal-stretch: 1;
-                    Text { text: fact.label; font-size: Theme.font-tiny; color: Theme.text3; }
-                    Text { text: fact.value; font-family: Theme.font-mono; font-size: Theme.font-small; color: Theme.text; }
+            // Why it needs a look
+            if root.unit-info.detail != "": Rectangle {
+                height: alert-layout.preferred-height;
+                border-radius: 9px;
+                background: health == Health.fault ? Theme.crit-tint : Theme.warn-tint;
+                alert-layout := HorizontalLayout {
+                    padding-left: 10px;
+                    padding-right: 10px;
+                    padding-top: 9px;
+                    padding-bottom: 9px;
+                    spacing: 8px;
+                    Icon {
+                        source: Icons.warning;
+                        width: 16px;
+                        height: 16px;
+                        color: health == Health.fault ? Theme.crit-text : Theme.warn-text;
+                    }
+                    Text {
+                        horizontal-stretch: 1;
+                        text: root.unit-info.detail;
+                        font-size: 12.5px;
+                        color: health == Health.fault ? Theme.crit-text : Theme.warn-text;
+                        wrap: word-wrap;
+                    }
                 }
-            }
-            VerticalLayout {
-                Text { text: "Position (m)"; font-size: Theme.font-tiny; color: Theme.text3; }
-                Text { text: root.unit-info.position; font-family: Theme.font-mono; font-size: Theme.font-small; color: Theme.text; }
             }
             HorizontalLayout {
                 spacing: 8px;
+                Rectangle {
+                    // Half each
+                    width: (parent.width - 8px) / 2;
+                    height: battery-box.preferred-height;
+                    border-radius: 9px;
+                    background: Theme.surface2;
+                    border-width: 1px;
+                    border-color: Theme.border;
+                    battery-box := VerticalLayout {
+                        padding-left: 10px;
+                        padding-right: 10px;
+                        padding-top: 8px;
+                        padding-bottom: 8px;
+                        spacing: 5px;
+                        Text { text: "Battery"; font-size: Theme.font-small; color: Theme.text3; }
+                        Text { text: live ? root.unit-info.battery : "–"; font-family: Theme.font-mono; font-size: 15px; font-weight: 600; color: Theme.text; }
+                        Meter { value: live ? root.unit-info.battery-level : 0; tint: HealthColors.battery(root.unit-info.battery-level); }
+                    }
+                }
+                Rectangle {
+                    // Half each
+                    width: (parent.width - 8px) / 2;
+                    height: link-box.preferred-height;
+                    border-radius: 9px;
+                    background: Theme.surface2;
+                    border-width: 1px;
+                    border-color: Theme.border;
+                    link-box := VerticalLayout {
+                        padding-left: 10px;
+                        padding-right: 10px;
+                        padding-top: 8px;
+                        padding-bottom: 8px;
+                        spacing: 5px;
+                        Text { text: "Link"; font-size: Theme.font-small; color: Theme.text3; }
+                        Text { text: root.unit-info.link == "" ? "–" : root.unit-info.link; font-family: Theme.font-mono; font-size: 15px; font-weight: 600; color: Theme.text; }
+                        LinkBars { quality: unit.link-quality; connected: live; }
+                    }
+                }
+            }
+            HorizontalLayout {
+                padding-left: 2px;
+                padding-right: 2px;
+                for axis in [{ k: "x", v: unit.pos-x }, { k: "y", v: unit.pos-y }, { k: "z", v: unit.pos-z }]: HorizontalLayout {
+                    horizontal-stretch: 1;
+                    spacing: 6px;
+                    alignment: axis.k == "x" ? start : axis.k == "y" ? center : end;
+                    Text { text: axis.k; font-family: Theme.font-mono; font-size: 12.5px; color: Theme.text3; }
+                    Text { text: live ? axis.v.to-fixed(2) : "–"; font-family: Theme.font-mono; font-size: 12.5px; color: Theme.text; }
+                }
+            }
+            HorizontalLayout {
+                spacing: 6px;
                 KButton {
+                    horizontal-stretch: 1;
                     small: true;
                     text: "Identify";
-                    icon: Icons.identify;
                     clicked => { root.identify-requested(root.selected-unit); }
                 }
-                if root.unit-info.health == Health.off || (root.unit-info.health == Health.fault && root.unit-info.link == ""): KButton {
+                if !live: KButton {
+                    horizontal-stretch: 1;
                     small: true;
                     text: "Connect";
                     clicked => { root.connect-unit-requested(root.selected-unit); }
                 }
-                Rectangle { horizontal-stretch: 1; }
+                if live && health != Health.flying: KButton {
+                    horizontal-stretch: 1;
+                    small: true;
+                    text: "Take off";
+                    clicked => {
+                        root.takeoff-requested(root.selected-unit, ViewSettings.takeoff-height, ViewSettings.takeoff-yaw,
+                            ViewSettings.takeoff-time, ViewSettings.takeoff-relative);
+                    }
+                }
+                if live && health == Health.flying: KButton {
+                    horizontal-stretch: 1;
+                    small: true;
+                    text: "Land";
+                    clicked => { root.land-requested(root.selected-unit); }
+                }
+                KButton {
+                    horizontal-stretch: 1;
+                    small: true;
+                    text: "Go to…";
+                    enabled: live;
+                    // The Flight tab of the full panel has the go-to fields
+                    clicked => {
+                        ViewSettings.unit-tab = 1;
+                        root.docked = true;
+                    }
+                }
             }
-            KButton {
-                text: "Dock to the side for all details";
-                icon: Icons.dock;
-                clicked => { root.docked = true; }
+            Rectangle {
+                height: 32px;
+                border-radius: 8px;
+                background: dock-touch.has-hover ? Theme.accent-tint : transparent;
+                HorizontalLayout {
+                    alignment: center;
+                    spacing: 6px;
+                    Icon {
+                        y: (parent.height - self.height) / 2;
+                        source: Icons.dock;
+                        width: 14px;
+                        height: 14px;
+                        color: Theme.accent-text;
+                    }
+                    Text {
+                        text: "Dock to the side for all details";
+                        font-size: 12.5px;
+                        font-weight: 500;
+                        color: Theme.accent-text;
+                        vertical-alignment: center;
+                    }
+                }
+                dock-touch := TouchArea {
+                    mouse-cursor: pointer;
+                    clicked => { root.docked = true; }
+                }
             }
         }
     }

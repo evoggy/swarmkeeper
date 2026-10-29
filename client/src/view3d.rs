@@ -4,7 +4,7 @@ use slint::{ComponentHandle, Model};
 
 use crate::app::AppContext;
 use crate::settings::AppSettings;
-use crate::units::{fetch_unit_details, sort_unit_indices};
+use crate::units::{fetch_unit_details, has_position, sort_unit_indices};
 use crate::{AppWindow, planning, host::renderer, ViewSettings};
 use crate::host;
 
@@ -166,46 +166,8 @@ pub(crate) fn setup(ui: &AppWindow, cx: &AppContext) {
         ui.on_viz_unit_clicked(move |click_x, click_y| {
             let Some(ui) = ui_weak.upgrade() else { return };
 
-            let width = ui.get_viz_width() as u32;
-            let height = ui.get_viz_height() as u32;
-            if width == 0 || height == 0 {
-                return;
-            }
-
-            let aspect = width as f32 / height as f32;
-            let mvp = renderer::compute_mvp(
-                ui.get_cam_yaw(),
-                ui.get_cam_pitch(),
-                ui.get_cam_distance(),
-                ui.get_cam_pan_x(),
-                ui.get_cam_pan_y(),
-                aspect,
-            );
-
-            // Nothing to pick while the Crazyflies are switched off in the view.
-            if !ui.global::<ViewSettings>().get_show_units() {
-                return;
-            }
-
-            // Pick the nearest unit whose projected position is within the radius.
-            let sorted = ui.get_sorted_units();
-            let pick_radius = 18.0_f32;
-            let mut best: Option<(i32, f32)> = None;
-            for row in 0..sorted.row_count() {
-                let Some(u) = sorted.row_data(row) else { continue };
-                let Some((sx, sy)) = renderer::project_to_screen(
-                    [u.pos_x, u.pos_y, u.pos_z], &mvp, width, height,
-                ) else { continue };
-                let dx = sx - click_x;
-                let dy = sy - click_y;
-                let dist = (dx * dx + dy * dy).sqrt();
-                if dist <= pick_radius && best.map_or(true, |(_, d)| dist < d) {
-                    best = Some((row as i32, dist));
-                }
-            }
-
-            match best {
-                Some((row, _)) => {
+            match unit_at(&ui, click_x, click_y) {
+                Some(row) => {
                     ui.set_viz_selected_unit(row);
                     let indices = sort_unit_indices(&ui.get_units(), ui.get_sort_column(), ui.get_sort_ascending());
                     *plot_selected_index.lock().unwrap() = indices.get(row as usize).copied();
@@ -218,4 +180,85 @@ pub(crate) fn setup(ui: &AppWindow, cx: &AppContext) {
             }
         });
     }
+
+    // The unit under the pointer, for its tooltip
+    {
+        let ui_weak = ui.as_weak();
+        ui.on_viz_hover(move |x, y| {
+            let Some(ui) = ui_weak.upgrade() else { return };
+            let row = if x < 0.0 { -1 } else { unit_at(&ui, x, y).unwrap_or(-1) };
+            if ui.get_viz_hover_unit() != row {
+                ui.set_viz_hover_unit(row);
+            }
+        });
+    }
+
+    // Fit: the units in view, from the angle the camera has
+    {
+        let ui_weak = ui.as_weak();
+        ui.on_viz_fit(move || {
+            let Some(ui) = ui_weak.upgrade() else { return };
+            fit(&ui);
+        });
+    }
+}
+
+/// The sorted-units row of the unit drawn at (`x`, `y`) in the 3D view: the
+/// nearest one whose dot, with a margin around it, is there.
+fn unit_at(ui: &AppWindow, x: f32, y: f32) -> Option<i32> {
+    let (width, height) = (ui.get_viz_width(), ui.get_viz_height());
+    // Nothing to pick while the Crazyflies are switched off in the view.
+    if width < 1.0 || height < 1.0 || !ui.global::<ViewSettings>().get_show_units() {
+        return None;
+    }
+    let mvp = renderer::compute_mvp(
+        ui.get_cam_yaw(),
+        ui.get_cam_pitch(),
+        ui.get_cam_distance(),
+        ui.get_cam_pan_x(),
+        ui.get_cam_pan_y(),
+        width / height,
+    );
+    let sorted = ui.get_sorted_units();
+    let mut best: Option<(i32, f32)> = None;
+    for row in 0..sorted.row_count() {
+        let Some(u) = sorted.row_data(row) else { continue };
+        if !has_position(u.state) {
+            continue;
+        }
+        let p = [u.pos_x, u.pos_y, u.pos_z];
+        let Some((sx, sy)) = renderer::project_to_screen(p, &mvp, width as u32, height as u32) else { continue };
+        let reach = renderer::unit_diameter(renderer::clip_w(p, &mvp), height) / 2.0 + 7.0;
+        let dist = ((sx - x).powi(2) + (sy - y).powi(2)).sqrt();
+        if dist <= reach && best.is_none_or(|(_, d)| dist < d) {
+            best = Some((row as i32, dist));
+        }
+    }
+    best.map(|(row, _)| row)
+}
+
+/// Point the camera at the middle of the units and back off until they all
+/// fit, keeping its angle.
+pub(crate) fn fit(ui: &AppWindow) {
+    let units = ui.get_units();
+    let (mut min, mut max) = ([f32::MAX; 2], [f32::MIN; 2]);
+    for u in units.iter().filter(|u| has_position(u.state)) {
+        min = [min[0].min(u.pos_x), min[1].min(u.pos_y)];
+        max = [max[0].max(u.pos_x), max[1].max(u.pos_y)];
+    }
+    // Nothing to fit: the middle of the room
+    if min[0] > max[0] {
+        (min, max) = ([-2.0, -2.0], [2.0, 2.0]);
+    }
+    let center = [(min[0] + max[0]) / 2.0, (min[1] + max[1]) / 2.0];
+    let radius = ((max[0] - min[0]).hypot(max[1] - min[1]) / 2.0 + 0.5).max(1.5);
+    let (width, height) = (ui.get_viz_width().max(1.0), ui.get_viz_height().max(1.0));
+    let half_v = renderer::FOV_DEG.to_radians() / 2.0;
+    let half_h = (half_v.tan() * width / height).atan();
+    // A little more, for the cards over the edges of the view
+    let distance = radius / half_v.min(half_h).sin() * 1.15;
+    let view = ui.global::<ViewSettings>();
+    view.set_cam_pan_x(center[0]);
+    view.set_cam_pan_y(center[1]);
+    view.set_cam_distance(distance.clamp(2.5, 80.0));
 }

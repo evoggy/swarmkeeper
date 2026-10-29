@@ -121,14 +121,121 @@ impl Drop for RenderTexture {
     }
 }
 
-#[derive(Clone, Copy)]
+/// A Crazyflie in the main 3D view.
+#[derive(Clone, Copy, Default)]
 pub struct UnitPos {
     pub x: f32,
     pub y: f32,
     pub z: f32,
     pub color: [f32; 3],
     pub selected: bool,
+    pub hovered: bool,
+    /// Drawn as a ring: on a pad, charging or charged.
+    pub hollow: bool,
 }
+
+/// A Lighthouse base station or a Loco anchor.
+#[derive(Clone, Copy)]
+pub struct FixedPoint {
+    pub pos: [f32; 3],
+    /// Seen by the units right now. The others are drawn faded.
+    pub active: bool,
+}
+
+/// The colours of the main 3D view, from `Theme` (theme.slint), and the
+/// size of a logical pixel.
+#[derive(Clone, Copy)]
+pub struct SceneStyle {
+    pub scene: [f32; 3],
+    pub grid: [f32; 3],
+    pub grid_major: [f32; 3],
+    pub area: [f32; 3],
+    pub waypoint_area: [f32; 3],
+    pub pad: [f32; 3],
+    pub drop: [f32; 3],
+    pub base_station: [f32; 3],
+    pub surface: [f32; 3],
+    pub axes: [[f32; 3]; 3],
+    pub accent: [f32; 3],
+    pub accent_tint: [f32; 3],
+    /// Rings: the hover ring and the ring of a unit on a pad
+    pub muted: [f32; 3],
+    /// The walls of a planned room
+    pub room: [f32; 3],
+    /// Coverage: seen by 0, 1, 2, 3, 4 or more base stations
+    pub coverage: [[f32; 3]; 5],
+    /// Physical pixels per logical pixel
+    pub scale: f32,
+}
+
+/// Where the main 3D view looks from (the `cam-*` properties).
+#[derive(Clone, Copy)]
+pub struct Camera {
+    pub yaw: f32,
+    pub pitch: f32,
+    pub distance: f32,
+    pub pan_x: f32,
+    pub pan_y: f32,
+}
+
+/// Everything the main 3D view draws.
+pub struct MainScene<'a> {
+    pub units: &'a [UnitPos],
+    pub base_stations: &'a [FixedPoint],
+    pub anchors: &'a [FixedPoint],
+    pub trajectory_lines: &'a [f32],
+    pub flight_areas: &'a [FlightAreaBox],
+    pub waypoint_areas: &'a [FlightAreaBox],
+    pub pads: &'a [PadCircle],
+    pub obstacle_triangles: &'a [Vec<f32>],
+    pub obstacle_wireframes: &'a [Vec<f32>],
+    pub obstacle_colors: &'a [[f32; 3]],
+    pub goto_points: &'a [[f32; 3]],
+    pub goto_lines: &'a [f32],
+    /// Half the side of the floor grid, in metres
+    pub grid_half: f32,
+}
+
+/// Everything the Planning view draws.
+pub struct PlanScene<'a> {
+    pub room: [f32; 3],
+    pub room_offset: [f32; 3],
+    /// Position and rotation
+    pub base_stations: &'a [([f32; 3], [[f32; 3]; 3])],
+    pub anchors: &'a [[f32; 3]],
+    pub obstacle_triangles: &'a [Vec<f32>],
+    pub obstacle_wireframes: &'a [Vec<f32>],
+    pub obstacle_colors: &'a [[f32; 3]],
+    pub flight_areas: &'a [FlightAreaBox],
+    pub waypoint_areas: &'a [FlightAreaBox],
+    pub pads: &'a [PadCircle],
+    pub trajectories: &'a [Vec<[f32; 3]>],
+    /// The coverage slice: cells (x, y, colour) at `slice_z`, `cell` wide
+    pub slice: &'a [(f32, f32, [f32; 3])],
+    pub slice_z: f32,
+    pub cell: f32,
+    /// 0 none, 1 base station, 2 anchor, 3 obstacle
+    pub selected_type: i32,
+    pub selected_index: i32,
+    pub active_handle: i32,
+    /// 0 none, 1 flight area, 2 waypoint area
+    pub selected_area_kind: i32,
+    pub selected_area_index: i32,
+}
+
+/// A unit's diameter on screen, in logical pixels, at `w` (clip-space w,
+/// the distance along the view direction): 7.5 cm across, kept between
+/// 7 and 16 px as in the design.
+pub fn unit_diameter(w: f32, height: f32) -> f32 {
+    let focal = (height / 2.0) / (FOV_DEG.to_radians() / 2.0).tan();
+    (focal * UNIT_SIZE / w).clamp(UNIT_MIN_PX, UNIT_MAX_PX)
+}
+
+/// The vertical field of view
+pub const FOV_DEG: f32 = 45.0;
+const UNIT_SIZE: f32 = 0.075;
+const UNIT_MIN_PX: f32 = 7.0;
+const UNIT_MAX_PX: f32 = 16.0;
 
 #[derive(Clone, Copy)]
 pub struct PadCircle {
@@ -179,10 +286,6 @@ impl Default for VizVisibility {
     }
 }
 
-/// Wireframe color for flight areas (geofence): amber.
-pub const FLIGHT_AREA_COLOR: [f32; 3] = [0.95, 0.85, 0.20];
-/// Wireframe color for waypoint areas: green.
-pub const WAYPOINT_AREA_COLOR: [f32; 3] = [0.20, 0.85, 0.40];
 
 pub struct Scene3DRenderer {
     gl: Rc<glow::Context>,
@@ -193,8 +296,84 @@ pub struct Scene3DRenderer {
     u_color: glow::UniformLocation,
     u_point_size: glow::UniformLocation,
     u_alpha: glow::UniformLocation,
+    marker: MarkerProgram,
+    /// Samples for antialiasing, 0 without (OpenGL ES 2)
+    samples: i32,
+    msaa: Option<MsaaTarget>,
     displayed_texture: RenderTexture,
     next_texture: RenderTexture,
+}
+
+/// Round units and square base stations, drawn as point sprites: a fill,
+/// an inset ring and up to three rings around it (MARKER_FRAGMENT_SHADER).
+struct MarkerProgram {
+    program: glow::Program,
+    u_mvp: glow::UniformLocation,
+    u_size_k: glow::UniformLocation,
+    u_size_min: glow::UniformLocation,
+    u_size_max: glow::UniformLocation,
+    u_pad: glow::UniformLocation,
+    u_fill: glow::UniformLocation,
+    u_inner: glow::UniformLocation,
+    u_inner_w: glow::UniformLocation,
+    u_rings: [(glow::UniformLocation, glow::UniformLocation); 3],
+    u_shape: glow::UniformLocation,
+    u_corner: glow::UniformLocation,
+    u_dot: glow::UniformLocation,
+    u_alpha: glow::UniformLocation,
+}
+
+/// One marker: what MARKER_FRAGMENT_SHADER draws, sizes in physical pixels.
+struct Marker {
+    pos: [f32; 3],
+    /// Fixed diameter, or None to size it by distance like a unit
+    size: Option<f32>,
+    fill: [f32; 3],
+    inner: ([f32; 3], f32),
+    rings: [([f32; 3], f32); 3],
+    square: bool,
+    alpha: f32,
+}
+
+/// A multisampled colour and depth buffer, resolved into the texture.
+struct MsaaTarget {
+    fbo: glow::Framebuffer,
+    color: glow::Renderbuffer,
+    depth: glow::Renderbuffer,
+    width: u32,
+    height: u32,
+    gl: Rc<glow::Context>,
+}
+
+impl MsaaTarget {
+    unsafe fn new(gl: &Rc<glow::Context>, width: u32, height: u32, samples: i32) -> Self {
+        unsafe {
+            let fbo = gl.create_framebuffer().expect("Unable to create framebuffer");
+            let color = gl.create_renderbuffer().expect("Unable to create renderbuffer");
+            let depth = gl.create_renderbuffer().expect("Unable to create renderbuffer");
+            let saved_rb = NonZeroU32::new(gl.get_parameter_i32(glow::RENDERBUFFER_BINDING) as u32).map(glow::NativeRenderbuffer);
+            gl.bind_renderbuffer(glow::RENDERBUFFER, Some(color));
+            gl.renderbuffer_storage_multisample(glow::RENDERBUFFER, samples, glow::RGBA8, width as i32, height as i32);
+            gl.bind_renderbuffer(glow::RENDERBUFFER, Some(depth));
+            gl.renderbuffer_storage_multisample(glow::RENDERBUFFER, samples, glow::DEPTH_COMPONENT24, width as i32, height as i32);
+            gl.bind_renderbuffer(glow::RENDERBUFFER, saved_rb);
+            let _saved_fbo = ScopedFrameBufferBinding::new(gl, Some(fbo));
+            gl.framebuffer_renderbuffer(glow::FRAMEBUFFER, glow::COLOR_ATTACHMENT0, glow::RENDERBUFFER, Some(color));
+            gl.framebuffer_renderbuffer(glow::FRAMEBUFFER, glow::DEPTH_ATTACHMENT, glow::RENDERBUFFER, Some(depth));
+            debug_assert_eq!(gl.check_framebuffer_status(glow::FRAMEBUFFER), glow::FRAMEBUFFER_COMPLETE);
+            Self { fbo, color, depth, width, height, gl: gl.clone() }
+        }
+    }
+}
+
+impl Drop for MsaaTarget {
+    fn drop(&mut self) {
+        unsafe {
+            self.gl.delete_framebuffer(self.fbo);
+            self.gl.delete_renderbuffer(self.color);
+            self.gl.delete_renderbuffer(self.depth);
+        }
+    }
 }
 
 const VERTEX_SHADER: &str = r#"#version 100
@@ -216,37 +395,134 @@ void main() {
 }
 "#;
 
+const MARKER_VERTEX_SHADER: &str = r#"#version 100
+attribute vec3 position;
+uniform mat4 u_mvp;
+uniform float u_size_k;
+uniform float u_size_min;
+uniform float u_size_max;
+// The fragment shader reads it too, at its default precision
+uniform mediump float u_pad;
+varying mediump float v_r;
+void main() {
+    gl_Position = u_mvp * vec4(position, 1.0);
+    float d = clamp(u_size_k / gl_Position.w, u_size_min, u_size_max);
+    v_r = d * 0.5;
+    gl_PointSize = d + 2.0 * u_pad;
+}
+"#;
+
+// From the outside in: three rings (halo, selection, the gap to the scene),
+// then the marker with an inset ring, and for a base station a dot.
+const MARKER_FRAGMENT_SHADER: &str = r#"#version 100
+precision mediump float;
+uniform vec3 u_fill;
+uniform vec3 u_inner;
+uniform float u_inner_w;
+uniform vec3 u_ring1;
+uniform float u_ring1_w;
+uniform vec3 u_ring2;
+uniform float u_ring2_w;
+uniform vec3 u_ring3;
+uniform float u_ring3_w;
+uniform float u_shape;
+uniform float u_corner;
+uniform float u_dot;
+uniform float u_pad;
+uniform float u_alpha;
+varying mediump float v_r;
+float inside(float d, float edge) {
+    return 1.0 - smoothstep(edge - 0.5, edge + 0.5, d);
+}
+void main() {
+    float size = 2.0 * (v_r + u_pad);
+    vec2 p = (gl_PointCoord - 0.5) * size;
+    float d;
+    if (u_shape < 0.5) {
+        d = length(p) - v_r;
+    } else {
+        vec2 q = abs(p) - vec2(v_r - u_corner);
+        d = length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - u_corner;
+    }
+    float e1 = u_ring1_w;
+    float e2 = e1 + u_ring2_w;
+    float e3 = e2 + u_ring3_w;
+    float a = inside(d, e3);
+    if (a <= 0.0) discard;
+    vec3 c = u_ring3;
+    c = mix(c, u_ring2, inside(d, e2));
+    c = mix(c, u_ring1, inside(d, e1));
+    c = mix(c, u_inner, inside(d, 0.0));
+    c = mix(c, u_fill, inside(d, -u_inner_w));
+    if (u_shape > 0.5) {
+        vec2 q = abs(p);
+        c = mix(c, u_inner, inside(max(q.x, q.y), u_dot));
+    }
+    gl_FragColor = vec4(c, a * u_alpha);
+}
+"#;
+
+unsafe fn compile_program(gl: &glow::Context, vertex: &str, fragment: &str) -> glow::Program {
+    unsafe {
+        let program = gl.create_program().expect("Cannot create program");
+        let mut shaders = Vec::new();
+        for (shader_type, src) in [(glow::VERTEX_SHADER, vertex), (glow::FRAGMENT_SHADER, fragment)] {
+            let shader = gl.create_shader(shader_type).expect("Cannot create shader");
+            gl.shader_source(shader, src);
+            gl.compile_shader(shader);
+            if !gl.get_shader_compile_status(shader) {
+                panic!("Shader compile error: {}", gl.get_shader_info_log(shader));
+            }
+            gl.attach_shader(program, shader);
+            shaders.push(shader);
+        }
+        // Both programs read the vertices from the same VAO.
+        gl.bind_attrib_location(program, 0, "position");
+        gl.link_program(program);
+        if !gl.get_program_link_status(program) {
+            panic!("Program link error: {}", gl.get_program_info_log(program));
+        }
+        for s in shaders {
+            gl.detach_shader(program, s);
+            gl.delete_shader(s);
+        }
+        program
+    }
+}
+
+impl MarkerProgram {
+    unsafe fn new(gl: &glow::Context) -> Self {
+        unsafe {
+            let program = compile_program(gl, MARKER_VERTEX_SHADER, MARKER_FRAGMENT_SHADER);
+            let u = |name: &str| gl.get_uniform_location(program, name).unwrap_or_else(|| panic!("no uniform {}", name));
+            Self {
+                program,
+                u_mvp: u("u_mvp"),
+                u_size_k: u("u_size_k"),
+                u_size_min: u("u_size_min"),
+                u_size_max: u("u_size_max"),
+                u_pad: u("u_pad"),
+                u_fill: u("u_fill"),
+                u_inner: u("u_inner"),
+                u_inner_w: u("u_inner_w"),
+                u_rings: [(u("u_ring1"), u("u_ring1_w")), (u("u_ring2"), u("u_ring2_w")), (u("u_ring3"), u("u_ring3_w"))],
+                u_shape: u("u_shape"),
+                u_corner: u("u_corner"),
+                u_dot: u("u_dot"),
+                u_alpha: u("u_alpha"),
+            }
+        }
+    }
+}
+
 impl Scene3DRenderer {
     pub fn new(gl: glow::Context) -> Self {
         let gl = Rc::new(gl);
         unsafe {
-            let program = gl.create_program().expect("Cannot create program");
-
-            let shaders_src = [
-                (glow::VERTEX_SHADER, VERTEX_SHADER),
-                (glow::FRAGMENT_SHADER, FRAGMENT_SHADER),
-            ];
-
-            let mut shaders = Vec::new();
-            for (shader_type, src) in &shaders_src {
-                let shader = gl.create_shader(*shader_type).expect("Cannot create shader");
-                gl.shader_source(shader, src);
-                gl.compile_shader(shader);
-                if !gl.get_shader_compile_status(shader) {
-                    panic!("Shader compile error: {}", gl.get_shader_info_log(shader));
-                }
-                gl.attach_shader(program, shader);
-                shaders.push(shader);
-            }
-
-            gl.link_program(program);
-            if !gl.get_program_link_status(program) {
-                panic!("Program link error: {}", gl.get_program_info_log(program));
-            }
-            for s in shaders {
-                gl.detach_shader(program, s);
-                gl.delete_shader(s);
-            }
+            let program = compile_program(&gl, VERTEX_SHADER, FRAGMENT_SHADER);
+            let marker = MarkerProgram::new(&gl);
+            // Antialiasing needs OpenGL ES 3
+            let samples = if gl.version().major >= 3 { gl.get_parameter_i32(glow::MAX_SAMPLES).min(4) } else { 0 };
 
             let u_mvp = gl.get_uniform_location(program, "u_mvp").unwrap();
             let u_color = gl.get_uniform_location(program, "u_color").unwrap();
@@ -256,7 +532,7 @@ impl Scene3DRenderer {
             let vbo = gl.create_buffer().expect("Cannot create buffer");
             let vao = gl.create_vertex_array().expect("Cannot create VAO");
 
-            let pos_loc = gl.get_attrib_location(program, "position").unwrap();
+            let pos_loc = 0;
             gl.bind_vertex_array(Some(vao));
             gl.bind_buffer(glow::ARRAY_BUFFER, Some(vbo));
             gl.enable_vertex_attrib_array(pos_loc);
@@ -269,321 +545,241 @@ impl Scene3DRenderer {
 
             Self {
                 gl, program, vbo, vao, u_mvp, u_color, u_point_size, u_alpha,
+                marker, samples, msaa: None,
                 displayed_texture, next_texture,
             }
         }
     }
 
-    /// Draw an axis-aligned box as a 12-edge wireframe in the given color.
-    /// Must be called inside an active render pass (with `gl` bound).
-    unsafe fn draw_box_wireframe(
-        &self,
-        gl: &glow::Context,
-        min: [f32; 3],
-        max: [f32; 3],
-        color: [f32; 3],
-    ) {
-        let [x0, y0, z0] = min;
-        let [x1, y1, z1] = max;
-        let edges: [f32; 72] = [
-            // bottom rectangle (z0)
-            x0, y0, z0,  x1, y0, z0,
-            x1, y0, z0,  x1, y1, z0,
-            x1, y1, z0,  x0, y1, z0,
-            x0, y1, z0,  x0, y0, z0,
-            // top rectangle (z1)
-            x0, y0, z1,  x1, y0, z1,
-            x1, y0, z1,  x1, y1, z1,
-            x1, y1, z1,  x0, y1, z1,
-            x0, y1, z1,  x0, y0, z1,
-            // verticals
-            x0, y0, z0,  x0, y0, z1,
-            x1, y0, z0,  x1, y0, z1,
-            x1, y1, z0,  x1, y1, z1,
-            x0, y1, z0,  x0, y1, z1,
-        ];
-        unsafe {
-            gl.uniform_3_f32(Some(&self.u_color), color[0], color[1], color[2]);
-            gl.uniform_1_f32(Some(&self.u_point_size), 1.0);
-            upload_and_draw(gl, self.vbo, &edges, glow::LINES);
-            gl.draw_arrays(glow::LINES, 0, (edges.len() / 3) as i32);
-        }
-    }
-
+    /// Draw the main 3D view at `width` × `height` physical pixels.
     pub fn render(
         &mut self,
         width: u32,
         height: u32,
-        yaw: f32,
-        pitch: f32,
-        distance: f32,
-        pan_x: f32,
-        pan_y: f32,
-        units: &[UnitPos],
-        fixed_points: &[UnitPos],
-        trajectory_lines: &[f32],
-        flight_areas: &[FlightAreaBox],
-        waypoint_areas: &[FlightAreaBox],
-        pads: &[PadCircle],
-        obstacle_triangles: &[Vec<f32>],
-        obstacle_wireframes: &[Vec<f32>],
-        obstacle_colors: &[[f32; 3]],
-        goto_points: &[UnitPos],
-        goto_lines: &[f32],
+        camera: Camera,
+        scene: &MainScene,
         vis: VizVisibility,
+        style: &SceneStyle,
     ) -> slint::Image {
         let width = width.max(1);
         let height = height.max(1);
-
-        // A switched-off object class simply has nothing left to draw. The grid,
-        // the axes and the drop lines are generated further down and so are
-        // gated inline instead.
-        let units: &[UnitPos] = if vis.units { units } else { &[] };
-        let trajectory_lines: &[f32] = if vis.trajectories { trajectory_lines } else { &[] };
-        let flight_areas: &[FlightAreaBox] = if vis.areas { flight_areas } else { &[] };
-        let waypoint_areas: &[FlightAreaBox] = if vis.areas { waypoint_areas } else { &[] };
-        let pads: &[PadCircle] = if vis.pads { pads } else { &[] };
-        let obstacle_triangles: &[Vec<f32>] = if vis.obstacles { obstacle_triangles } else { &[] };
-        let obstacle_wireframes: &[Vec<f32>] = if vis.obstacles { obstacle_wireframes } else { &[] };
-        let goto_points: &[UnitPos] = if vis.goto_targets { goto_points } else { &[] };
-        let goto_lines: &[f32] = if vis.goto_targets { goto_lines } else { &[] };
+        let px = style.scale;
 
         unsafe {
-            let gl = &self.gl;
+            let gl = self.gl.clone();
+            let gl = &gl;
 
             if self.next_texture.width != width || self.next_texture.height != height {
                 let mut new_tex = RenderTexture::new(gl, width, height);
                 std::mem::swap(&mut self.next_texture, &mut new_tex);
             }
+            if self.samples > 0 && self.msaa.as_ref().is_none_or(|m| m.width != width || m.height != height) {
+                self.msaa = Some(MsaaTarget::new(gl, width, height, self.samples));
+            }
+            let target = self.msaa.as_ref().map_or(self.next_texture.fbo, |m| m.fbo);
 
-            let _saved_fbo = ScopedFrameBufferBinding::new(gl, Some(self.next_texture.fbo));
+            let saved_read_fbo = NonZeroU32::new(gl.get_parameter_i32(glow::READ_FRAMEBUFFER_BINDING) as u32).map(glow::NativeFramebuffer);
+            let _saved_fbo = ScopedFrameBufferBinding::new(gl, Some(target));
             let mut saved_viewport = [0i32; 4];
             gl.get_parameter_i32_slice(glow::VIEWPORT, &mut saved_viewport);
             gl.viewport(0, 0, width as _, height as _);
 
-            gl.clear_color(0.12, 0.12, 0.15, 1.0);
+            let [r, g, b] = style.scene;
+            gl.clear_color(r, g, b, 1.0);
+            gl.depth_mask(true);
             gl.clear(glow::COLOR_BUFFER_BIT | glow::DEPTH_BUFFER_BIT);
-            gl.enable(glow::DEPTH_TEST);
+            // Like the design: the floor, the lines and then the markers on
+            // top, in that order. Only obstacles hide what is behind them.
+            gl.disable(glow::DEPTH_TEST);
+            gl.enable(glow::BLEND);
+            gl.blend_func(glow::SRC_ALPHA, glow::ONE_MINUS_SRC_ALPHA);
 
             gl.use_program(Some(self.program));
             gl.uniform_1_f32(Some(&self.u_alpha), 1.0);
+            gl.uniform_1_f32(Some(&self.u_point_size), 1.0);
 
             let _saved_vao = ScopedVAOBinding::new(gl, Some(self.vao));
             let _saved_vbo = ScopedVBOBinding::new(gl, Some(self.vbo));
 
             let aspect = width as f32 / height as f32;
-            let mvp = build_mvp(yaw, pitch, distance, pan_x, pan_y, aspect);
+            let mvp = build_mvp(camera.yaw, camera.pitch, camera.distance, camera.pan_x, camera.pan_y, aspect);
             gl.uniform_matrix_4_f32_slice(Some(&self.u_mvp), false, &mvp);
-            gl.uniform_1_f32(Some(&self.u_point_size), 1.0);
 
-            // Draw ground grid
+            let lines = |verts: &[f32], color: [f32; 3], line_width: f32, alpha: f32| {
+                if verts.is_empty() {
+                    return;
+                }
+                gl.uniform_3_f32(Some(&self.u_color), color[0], color[1], color[2]);
+                gl.uniform_1_f32(Some(&self.u_alpha), alpha);
+                gl.line_width(line_width * px);
+                upload_and_draw(gl, self.vbo, verts, glow::LINES);
+                gl.draw_arrays(glow::LINES, 0, verts.len() as i32 / 3);
+            };
+
+            // Floor grid: 0.5 m, every metre stronger
             if vis.grid {
-                let mut grid_verts = Vec::new();
-                let grid_range = 5;
-                for i in -grid_range..=grid_range {
-                    let v = i as f32;
-                    // Line parallel to Y axis
-                    grid_verts.extend_from_slice(&[v, -(grid_range as f32), 0.0, v, grid_range as f32, 0.0]);
-                    // Line parallel to X axis
-                    grid_verts.extend_from_slice(&[-(grid_range as f32), v, 0.0, grid_range as f32, v, 0.0]);
+                let half = scene.grid_half.ceil();
+                let steps = (half * 2.0) as i32;
+                let (mut minor, mut major) = (Vec::new(), Vec::new());
+                for k in -steps..=steps {
+                    let v = k as f32 * 0.5;
+                    let out = if k % 2 == 0 { &mut major } else { &mut minor };
+                    out.extend_from_slice(&[v, -half, 0.0, v, half, 0.0, -half, v, 0.0, half, v, 0.0]);
                 }
-                upload_and_draw(gl, self.vbo, &grid_verts, glow::LINES);
-                gl.uniform_3_f32(Some(&self.u_color), 0.3, 0.3, 0.35);
-                gl.draw_arrays(glow::LINES, 0, grid_verts.len() as i32 / 3);
+                lines(&minor, style.grid, 1.0, 1.0);
+                lines(&major, style.grid_major, 1.0, 1.0);
             }
 
-            // Draw axes (2m each)
+            if vis.pads {
+                let mut verts = Vec::new();
+                for pad in scene.pads {
+                    circle_segments(&mut verts, [pad.x, pad.y, 0.0], pad.radius, 32);
+                }
+                lines(&verts, style.pad, 1.25, 1.0);
+            }
+
+            if vis.areas {
+                let mut verts = Vec::new();
+                for fa in scene.flight_areas {
+                    box_edges(&mut verts, fa.min, fa.max, Some((0.10, 0.07)));
+                }
+                lines(&verts, style.area, 1.5, 1.0);
+                verts.clear();
+                for wa in scene.waypoint_areas {
+                    box_edges(&mut verts, wa.min, wa.max, Some((0.10, 0.07)));
+                }
+                lines(&verts, style.waypoint_area, 1.5, 1.0);
+            }
+
+            if vis.drop_lines {
+                let mut verts = Vec::new();
+                for fixed in scene.base_stations.iter().chain(scene.anchors) {
+                    let [x, y, z] = fixed.pos;
+                    dashed(&mut verts, [x, y, z], [x, y, 0.0], 0.04, 0.08);
+                }
+                lines(&verts, style.drop, 1.0, 1.0);
+            }
+
+            // Units off the floor: a line down and a small shadow under them
+            if vis.units && vis.drop_lines {
+                let airborne: Vec<&UnitPos> = scene.units.iter().filter(|u| u.z > 0.15).collect();
+                let mut shadows = Vec::new();
+                for u in &airborne {
+                    disc_triangles(&mut shadows, [u.x, u.y, 0.0], 0.05, 12);
+                }
+                if !shadows.is_empty() {
+                    gl.uniform_3_f32(Some(&self.u_color), style.drop[0], style.drop[1], style.drop[2]);
+                    gl.uniform_1_f32(Some(&self.u_alpha), 0.35);
+                    upload_and_draw(gl, self.vbo, &shadows, glow::TRIANGLES);
+                    gl.draw_arrays(glow::TRIANGLES, 0, shadows.len() as i32 / 3);
+                }
+                let drops: Vec<f32> = airborne.iter().flat_map(|u| [u.x, u.y, u.z, u.x, u.y, 0.0]).collect();
+                lines(&drops, style.drop, 1.0, 1.0);
+            }
+
             if vis.axes {
-                // X axis - red
-                gl.uniform_3_f32(Some(&self.u_color), 0.94, 0.27, 0.27);
-                let x_axis = [0.0, 0.0, 0.0, 2.0, 0.0, 0.0];
-                upload_and_draw(gl, self.vbo, &x_axis, glow::LINES);
-                gl.draw_arrays(glow::LINES, 0, 2);
-
-                // Y axis - green
-                gl.uniform_3_f32(Some(&self.u_color), 0.29, 0.85, 0.50);
-                let y_axis = [0.0, 0.0, 0.0, 0.0, 2.0, 0.0];
-                upload_and_draw(gl, self.vbo, &y_axis, glow::LINES);
-                gl.draw_arrays(glow::LINES, 0, 2);
-
-                // Z axis - blue
-                gl.uniform_3_f32(Some(&self.u_color), 0.38, 0.65, 0.98);
-                let z_axis = [0.0, 0.0, 0.0, 0.0, 0.0, 2.0];
-                upload_and_draw(gl, self.vbo, &z_axis, glow::LINES);
-                gl.draw_arrays(glow::LINES, 0, 2);
-            }
-
-            // Draw units as points
-            gl.uniform_1_f32(Some(&self.u_point_size), 10.0);
-            for unit in units {
-                let pos = [unit.x, unit.y, unit.z];
-
-                // Highlight halo behind the selected unit (larger white point).
-                if unit.selected {
-                    gl.uniform_3_f32(Some(&self.u_color), 1.0, 1.0, 1.0);
-                    gl.uniform_1_f32(Some(&self.u_point_size), 20.0);
-                    upload_and_draw(gl, self.vbo, &pos, glow::POINTS);
-                    gl.draw_arrays(glow::POINTS, 0, 1);
-                    gl.uniform_1_f32(Some(&self.u_point_size), 10.0);
-                }
-
-                gl.uniform_3_f32(Some(&self.u_color), unit.color[0], unit.color[1], unit.color[2]);
-                upload_and_draw(gl, self.vbo, &pos, glow::POINTS);
-                gl.draw_arrays(glow::POINTS, 0, 1);
-
-                // Vertical line from unit to ground
-                if vis.drop_lines {
-                    gl.uniform_3_f32(
-                        Some(&self.u_color),
-                        unit.color[0] * 0.4,
-                        unit.color[1] * 0.4,
-                        unit.color[2] * 0.4,
-                    );
-                    gl.uniform_1_f32(Some(&self.u_point_size), 1.0);
-                    let drop_line = [unit.x, unit.y, unit.z, unit.x, unit.y, 0.0];
-                    upload_and_draw(gl, self.vbo, &drop_line, glow::LINES);
-                    gl.draw_arrays(glow::LINES, 0, 2);
-                    gl.uniform_1_f32(Some(&self.u_point_size), 10.0);
+                for (axis, color) in style.axes.iter().enumerate() {
+                    let mut end = [0.0; 3];
+                    end[axis] = 1.0;
+                    lines(&[0.0, 0.0, 0.0, end[0], end[1], end[2]], *color, 2.0, 1.0);
                 }
             }
 
-            // Draw fixed points (base stations / anchors)
-            gl.uniform_1_f32(Some(&self.u_point_size), 8.0);
-            for pt in fixed_points {
-                gl.uniform_3_f32(Some(&self.u_color), pt.color[0], pt.color[1], pt.color[2]);
-                let pos = [pt.x, pt.y, pt.z];
-                upload_and_draw(gl, self.vbo, &pos, glow::POINTS);
-                gl.draw_arrays(glow::POINTS, 0, 1);
-
-                // Drop line to ground
-                if vis.drop_lines {
-                    gl.uniform_3_f32(
-                        Some(&self.u_color),
-                        pt.color[0] * 0.4,
-                        pt.color[1] * 0.4,
-                        pt.color[2] * 0.4,
-                    );
-                    gl.uniform_1_f32(Some(&self.u_point_size), 1.0);
-                    let drop_line = [pt.x, pt.y, pt.z, pt.x, pt.y, 0.0];
-                    upload_and_draw(gl, self.vbo, &drop_line, glow::LINES);
-                    gl.draw_arrays(glow::LINES, 0, 2);
-                    gl.uniform_1_f32(Some(&self.u_point_size), 8.0);
-                }
-            }
-
-            // Draw trajectory path
-            if trajectory_lines.len() >= 6 {
-                gl.uniform_3_f32(Some(&self.u_color), 0.0, 0.9, 0.9); // cyan
-                gl.uniform_1_f32(Some(&self.u_point_size), 1.0);
-                upload_and_draw(gl, self.vbo, trajectory_lines, glow::LINE_STRIP);
-                gl.draw_arrays(glow::LINE_STRIP, 0, (trajectory_lines.len() / 3) as i32);
-            }
-
-            // Draw obstacles (solid triangles + wireframe edges)
-            if !obstacle_triangles.is_empty() {
-                gl.enable(glow::BLEND);
-                gl.blend_func(glow::SRC_ALPHA, glow::ONE_MINUS_SRC_ALPHA);
-                for (i, tris) in obstacle_triangles.iter().enumerate() {
+            // Obstacles hide what is behind them, so they need the depth test
+            if vis.obstacles && !scene.obstacle_triangles.is_empty() {
+                gl.enable(glow::DEPTH_TEST);
+                for (i, tris) in scene.obstacle_triangles.iter().enumerate() {
                     if !tris.is_empty() {
-                        let c = obstacle_colors.get(i).copied().unwrap_or([0.45, 0.45, 0.50]);
+                        let c = scene.obstacle_colors.get(i).copied().unwrap_or([0.45, 0.45, 0.50]);
                         gl.uniform_3_f32(Some(&self.u_color), c[0], c[1], c[2]);
                         gl.uniform_1_f32(Some(&self.u_alpha), 0.75);
                         upload_and_draw(gl, self.vbo, tris, glow::TRIANGLES);
                         gl.draw_arrays(glow::TRIANGLES, 0, tris.len() as i32 / 3);
                     }
                 }
-                gl.disable(glow::BLEND);
                 // LEQUAL so front coplanar edges show, edges behind stay hidden.
                 gl.depth_func(glow::LEQUAL);
-                for (i, wire) in obstacle_wireframes.iter().enumerate() {
-                    if !wire.is_empty() {
-                        let c = obstacle_colors.get(i).copied().unwrap_or([0.45, 0.45, 0.50]);
-                        gl.uniform_3_f32(
-                            Some(&self.u_color),
-                            (c[0] + 0.2).min(1.0),
-                            (c[1] + 0.2).min(1.0),
-                            (c[2] + 0.2).min(1.0),
-                        );
-                        gl.uniform_1_f32(Some(&self.u_alpha), 1.0);
-                        upload_and_draw(gl, self.vbo, wire, glow::LINES);
-                        gl.draw_arrays(glow::LINES, 0, wire.len() as i32 / 3);
-                    }
+                for (i, wire) in scene.obstacle_wireframes.iter().enumerate() {
+                    let c = scene.obstacle_colors.get(i).copied().unwrap_or([0.45, 0.45, 0.50]);
+                    lines(wire, [(c[0] + 0.2).min(1.0), (c[1] + 0.2).min(1.0), (c[2] + 0.2).min(1.0)], 1.0, 1.0);
                 }
                 gl.depth_func(glow::LESS);
+                gl.disable(glow::DEPTH_TEST);
+            }
+
+            if vis.trajectories && scene.trajectory_lines.len() >= 6 {
+                let t = scene.trajectory_lines;
+                gl.uniform_3_f32(Some(&self.u_color), style.accent[0], style.accent[1], style.accent[2]);
                 gl.uniform_1_f32(Some(&self.u_alpha), 1.0);
+                gl.line_width(2.0 * px);
+                upload_and_draw(gl, self.vbo, t, glow::LINE_STRIP);
+                gl.draw_arrays(glow::LINE_STRIP, 0, (t.len() / 3) as i32);
             }
 
-            // Draw flight areas (amber) and waypoint areas (green) as wireframe boxes
-            for fa in flight_areas {
-                self.draw_box_wireframe(gl, fa.min, fa.max, FLIGHT_AREA_COLOR);
-            }
-            for wa in waypoint_areas {
-                self.draw_box_wireframe(gl, wa.min, wa.max, WAYPOINT_AREA_COLOR);
-            }
-
-            // Draw takeoff pads as circles on the floor
-            if !pads.is_empty() {
-                gl.uniform_3_f32(Some(&self.u_color), 0.20, 0.85, 0.95); // light cyan
-                gl.uniform_1_f32(Some(&self.u_point_size), 1.0);
-                let segments = 32;
-                let mut verts: Vec<f32> = Vec::with_capacity(pads.len() * (segments + 1) * 3);
-                for pad in pads {
-                    for i in 0..=segments {
-                        let theta = (i as f32) / (segments as f32) * std::f32::consts::TAU;
-                        verts.push(pad.x + pad.radius * theta.cos());
-                        verts.push(pad.y + pad.radius * theta.sin());
-                        verts.push(0.0);
+            // Go-to targets: a dashed line from the unit, a cross at the target
+            if vis.goto_targets {
+                let mut verts = Vec::new();
+                for seg in scene.goto_lines.chunks_exact(6) {
+                    dashed(&mut verts, [seg[0], seg[1], seg[2]], [seg[3], seg[4], seg[5]], 0.06, 0.05);
+                }
+                for t in scene.goto_points {
+                    let a = 0.12;
+                    verts.extend_from_slice(&[
+                        t[0] - a, t[1], t[2], t[0] + a, t[1], t[2],
+                        t[0], t[1] - a, t[2], t[0], t[1] + a, t[2],
+                        t[0], t[1], t[2] - a, t[0], t[1], t[2] + a,
+                    ]);
+                    if vis.drop_lines {
+                        dashed(&mut verts, *t, [t[0], t[1], 0.0], 0.04, 0.08);
                     }
                 }
-                if !verts.is_empty() {
-                    upload_and_draw(gl, self.vbo, &verts, glow::LINES);
-                    let per_pad = (segments + 1) as i32;
-                    for (idx, _) in pads.iter().enumerate() {
-                        gl.draw_arrays(glow::LINE_STRIP, idx as i32 * per_pad, per_pad);
-                    }
+                lines(&verts, style.accent, 1.5, 1.0);
+            }
+
+            // Markers, far ones first
+            let no_ring = ([0.0; 3], 0.0);
+            let mut markers: Vec<Marker> = Vec::new();
+            let fixed = |p: &FixedPoint| Marker {
+                pos: p.pos,
+                size: Some(16.0 * px),
+                fill: style.surface,
+                inner: (style.base_station, 2.0 * px),
+                rings: [no_ring; 3],
+                square: true,
+                alpha: if p.active { 1.0 } else { 0.5 },
+            };
+            markers.extend(scene.base_stations.iter().chain(scene.anchors).map(fixed));
+            let mut units: Vec<Marker> = Vec::new();
+            if vis.units {
+                for u in scene.units {
+                    let (fill, inner) = if u.hollow { (style.scene, (style.muted, 2.0 * px)) } else { (u.color, no_ring) };
+                    let rings = if u.selected {
+                        [(style.scene, 2.0 * px), (style.accent, 2.5 * px), (style.accent_tint, 4.5 * px)]
+                    } else if u.hovered {
+                        [(style.scene, 2.0 * px), (style.muted, 2.0 * px), no_ring]
+                    } else {
+                        [(style.scene, 2.0 * px), no_ring, no_ring]
+                    };
+                    units.push(Marker { pos: [u.x, u.y, u.z], size: None, fill, inner, rings, square: false, alpha: 1.0 });
                 }
             }
-
-            // Draw goto targets: faint connecting line from unit to target, a marker
-            // point, a 3D crosshair, and a drop line to the ground.
-            if !goto_lines.is_empty() {
-                gl.uniform_3_f32(Some(&self.u_color), 0.6, 0.15, 0.55);
-                gl.uniform_1_f32(Some(&self.u_point_size), 1.0);
-                upload_and_draw(gl, self.vbo, goto_lines, glow::LINES);
-                gl.draw_arrays(glow::LINES, 0, goto_lines.len() as i32 / 3);
-            }
-            for pt in goto_points {
-                let c = pt.color;
-                gl.uniform_3_f32(Some(&self.u_color), c[0], c[1], c[2]);
-
-                // Marker point
-                gl.uniform_1_f32(Some(&self.u_point_size), 9.0);
-                let pos = [pt.x, pt.y, pt.z];
-                upload_and_draw(gl, self.vbo, &pos, glow::POINTS);
-                gl.draw_arrays(glow::POINTS, 0, 1);
-
-                // 3D crosshair through the target (0.15m arms on each axis)
-                let a = 0.15;
-                let cross = [
-                    pt.x - a, pt.y, pt.z, pt.x + a, pt.y, pt.z,
-                    pt.x, pt.y - a, pt.z, pt.x, pt.y + a, pt.z,
-                    pt.x, pt.y, pt.z - a, pt.x, pt.y, pt.z + a,
-                ];
-                gl.uniform_1_f32(Some(&self.u_point_size), 1.0);
-                upload_and_draw(gl, self.vbo, &cross, glow::LINES);
-                gl.draw_arrays(glow::LINES, 0, 6);
-
-                // Drop line to ground
-                if vis.drop_lines {
-                    gl.uniform_3_f32(Some(&self.u_color), c[0] * 0.4, c[1] * 0.4, c[2] * 0.4);
-                    let drop_line = [pt.x, pt.y, pt.z, pt.x, pt.y, 0.0];
-                    upload_and_draw(gl, self.vbo, &drop_line, glow::LINES);
-                    gl.draw_arrays(glow::LINES, 0, 2);
-                }
-            }
+            let depth = |m: &Marker| clip_w(m.pos, &mvp);
+            markers.sort_by(|a, b| depth(b).total_cmp(&depth(a)));
+            units.sort_by(|a, b| depth(b).total_cmp(&depth(a)));
+            markers.extend(units);
+            self.draw_markers(gl, &markers, &mvp, height as f32, px);
 
             gl.use_program(None);
-            gl.disable(glow::DEPTH_TEST);
+            gl.line_width(1.0);
+            gl.disable(glow::BLEND);
+
+            // Resolve the samples into the texture
+            if let Some(msaa) = &self.msaa {
+                gl.bind_framebuffer(glow::READ_FRAMEBUFFER, Some(msaa.fbo));
+                gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, Some(self.next_texture.fbo));
+                gl.blit_framebuffer(0, 0, width as i32, height as i32, 0, 0, width as i32, height as i32, glow::COLOR_BUFFER_BIT, glow::NEAREST);
+            }
+            gl.bind_framebuffer(glow::READ_FRAMEBUFFER, saved_read_fbo);
             gl.viewport(saved_viewport[0], saved_viewport[1], saved_viewport[2], saved_viewport[3]);
         }
 
@@ -597,6 +793,57 @@ impl Scene3DRenderer {
 
         std::mem::swap(&mut self.next_texture, &mut self.displayed_texture);
         result
+    }
+
+    unsafe fn draw_markers(&self, gl: &glow::Context, markers: &[Marker], mvp: &[f32; 16], height: f32, px: f32) {
+        let m = &self.marker;
+        unsafe {
+            gl.use_program(Some(m.program));
+            gl.uniform_matrix_4_f32_slice(Some(&m.u_mvp), false, mvp);
+            let focal = (height / 2.0) / (FOV_DEG.to_radians() / 2.0).tan();
+            gl.uniform_1_f32(Some(&m.u_corner), 4.0 * px);
+            gl.uniform_1_f32(Some(&m.u_dot), 2.0 * px);
+            for marker in markers {
+                let (k, min, max) = match marker.size {
+                    Some(size) => (0.0, size, size),
+                    None => (focal * UNIT_SIZE, UNIT_MIN_PX * px, UNIT_MAX_PX * px),
+                };
+                gl.uniform_1_f32(Some(&m.u_size_k), k);
+                gl.uniform_1_f32(Some(&m.u_size_min), min);
+                gl.uniform_1_f32(Some(&m.u_size_max), max);
+                let pad: f32 = marker.rings.iter().map(|r| r.1).sum::<f32>() + 1.0;
+                gl.uniform_1_f32(Some(&m.u_pad), pad);
+                let [r, g, b] = marker.fill;
+                gl.uniform_3_f32(Some(&m.u_fill), r, g, b);
+                let ([r, g, b], w) = marker.inner;
+                gl.uniform_3_f32(Some(&m.u_inner), r, g, b);
+                gl.uniform_1_f32(Some(&m.u_inner_w), w);
+                for ((u_color, u_width), ([r, g, b], w)) in m.u_rings.iter().zip(marker.rings) {
+                    gl.uniform_3_f32(Some(u_color), r, g, b);
+                    gl.uniform_1_f32(Some(u_width), w);
+                }
+                gl.uniform_1_f32(Some(&m.u_shape), if marker.square { 1.0 } else { 0.0 });
+                gl.uniform_1_f32(Some(&m.u_alpha), marker.alpha);
+                upload_and_draw(gl, self.vbo, &marker.pos, glow::POINTS);
+                gl.draw_arrays(glow::POINTS, 0, 1);
+            }
+        }
+    }
+
+    /// The last frame `render` drew, as pixels: for screenshots.
+    pub fn read_pixels(&self) -> slint::SharedPixelBuffer<slint::Rgba8Pixel> {
+        let tex = &self.displayed_texture;
+        let mut buffer = slint::SharedPixelBuffer::<slint::Rgba8Pixel>::new(tex.width, tex.height);
+        unsafe {
+            let gl = &self.gl;
+            gl.bind_framebuffer(glow::READ_FRAMEBUFFER, Some(tex.fbo));
+            gl.read_pixels(
+                0, 0, tex.width as i32, tex.height as i32, glow::RGBA, glow::UNSIGNED_BYTE,
+                glow::PixelPackData::Slice(Some(buffer.make_mut_bytes())),
+            );
+            gl.bind_framebuffer(glow::READ_FRAMEBUFFER, None);
+        }
+        buffer
     }
 
     /// Render the lighthouse coverage scene.
@@ -1514,544 +1761,336 @@ impl Scene3DRenderer {
         result
     }
 
-    /// Render the planning scene: BS, anchors, obstacles, and combined coverage.
-    #[allow(clippy::too_many_arguments)]
-    pub fn render_planning(
-        &mut self,
-        width: u32,
-        height: u32,
-        yaw: f32,
-        pitch: f32,
-        distance: f32,
-        pan_x: f32,
-        pan_y: f32,
-        room: [f32; 3],
-        room_offset: [f32; 3],
-        // LH data
-        base_stations: &[([f32; 3], [[f32; 3]; 3])],
-        lh_voxels: &[(f32, f32, f32, u8)],
-        show_lh_coverage: &[bool; 5],
-        // TDoA3 data
-        anchors: &[[f32; 3]],
-        tdoa3_voxels: &[(f32, f32, f32, f32)],
-        min_scale: f32,
-        max_scale: f32,
-        show_tdoa3_voxels: bool,
-        // Obstacles (each is a list of triangle verts + wireframe verts + color)
-        obstacle_triangles: &[Vec<f32>],
-        obstacle_wireframes: &[Vec<f32>],
-        obstacle_colors: &[[f32; 3]],
-        // Selection
-        selected_type: i32,  // 0=none, 1=BS, 2=anchor, 3=obstacle
-        selected_index: i32,
-        active_handle: i32,
-        // LH trajectory overlay
-        trajectories: &[Vec<[f32; 3]>],
-        // Area wireframes
-        flight_areas: &[FlightAreaBox],
-        waypoint_areas: &[FlightAreaBox],
-        // Selected area for handle editing: kind 0=none, 1=flight, 2=waypoint
-        selected_area_kind: i32,
-        selected_area_index: i32,
-    ) -> slint::Image {
+    /// Draw the Planning view at `width` × `height` physical pixels.
+    pub fn render_plan(&mut self, width: u32, height: u32, camera: Camera, scene: &PlanScene, style: &SceneStyle) -> slint::Image {
         let width = width.max(1);
         let height = height.max(1);
+        let px = style.scale;
 
         unsafe {
-            let gl = &self.gl;
+            let gl = self.gl.clone();
+            let gl = &gl;
 
             if self.next_texture.width != width || self.next_texture.height != height {
                 let mut new_tex = RenderTexture::new(gl, width, height);
                 std::mem::swap(&mut self.next_texture, &mut new_tex);
             }
+            if self.samples > 0 && self.msaa.as_ref().is_none_or(|m| m.width != width || m.height != height) {
+                self.msaa = Some(MsaaTarget::new(gl, width, height, self.samples));
+            }
+            let target = self.msaa.as_ref().map_or(self.next_texture.fbo, |m| m.fbo);
 
-            let _saved_fbo = ScopedFrameBufferBinding::new(gl, Some(self.next_texture.fbo));
+            let saved_read_fbo = NonZeroU32::new(gl.get_parameter_i32(glow::READ_FRAMEBUFFER_BINDING) as u32).map(glow::NativeFramebuffer);
+            let _saved_fbo = ScopedFrameBufferBinding::new(gl, Some(target));
             let mut saved_viewport = [0i32; 4];
             gl.get_parameter_i32_slice(glow::VIEWPORT, &mut saved_viewport);
             gl.viewport(0, 0, width as _, height as _);
 
-            gl.clear_color(0.12, 0.12, 0.15, 1.0);
+            let [r, g, b] = style.scene;
+            gl.clear_color(r, g, b, 1.0);
+            gl.depth_mask(true);
             gl.clear(glow::COLOR_BUFFER_BIT | glow::DEPTH_BUFFER_BIT);
-            gl.enable(glow::DEPTH_TEST);
+            gl.disable(glow::DEPTH_TEST);
+            gl.enable(glow::BLEND);
+            gl.blend_func(glow::SRC_ALPHA, glow::ONE_MINUS_SRC_ALPHA);
 
             gl.use_program(Some(self.program));
-            gl.uniform_1_f32(Some(&self.u_alpha), 1.0);
-
+            gl.uniform_1_f32(Some(&self.u_point_size), 1.0);
             let _saved_vao = ScopedVAOBinding::new(gl, Some(self.vao));
             let _saved_vbo = ScopedVBOBinding::new(gl, Some(self.vbo));
 
             let aspect = width as f32 / height as f32;
-            let mvp = build_mvp(yaw, pitch, distance, pan_x, pan_y, aspect);
+            let mvp = build_mvp(camera.yaw, camera.pitch, camera.distance, camera.pan_x, camera.pan_y, aspect);
             gl.uniform_matrix_4_f32_slice(Some(&self.u_mvp), false, &mvp);
-            gl.uniform_1_f32(Some(&self.u_point_size), 1.0);
 
-            // --- Ground grid ---
-            let ox = room_offset[0];
-            let oy = room_offset[1];
-            let oz = room_offset[2];
-            let mut grid_verts = Vec::new();
-            let gx = room[0].ceil() as i32;
-            let gy = room[1].ceil() as i32;
-            for i in 0..=gx {
-                let v = i as f32 + ox;
-                grid_verts.extend_from_slice(&[v, oy, oz, v, room[1] + oy, oz]);
-            }
-            for i in 0..=gy {
-                let v = i as f32 + oy;
-                grid_verts.extend_from_slice(&[ox, v, oz, room[0] + ox, v, oz]);
-            }
-            gl.uniform_3_f32(Some(&self.u_color), 0.3, 0.3, 0.35);
-            upload_and_draw(gl, self.vbo, &grid_verts, glow::LINES);
-            gl.draw_arrays(glow::LINES, 0, grid_verts.len() as i32 / 3);
-
-            // --- Room box outline ---
-            let (x0, y0, z0) = (ox, oy, oz);
-            let (x1, y1, z1) = (room[0] + ox, room[1] + oy, room[2] + oz);
-            #[rustfmt::skip]
-            let box_verts = [
-                x0, y0, z0,  x1, y0, z0,
-                x1, y0, z0,  x1, y1, z0,
-                x1, y1, z0,  x0, y1, z0,
-                x0, y1, z0,  x0, y0, z0,
-                x0, y0, z1,  x1, y0, z1,
-                x1, y0, z1,  x1, y1, z1,
-                x1, y1, z1,  x0, y1, z1,
-                x0, y1, z1,  x0, y0, z1,
-                x0, y0, z0,  x0, y0, z1,
-                x1, y0, z0,  x1, y0, z1,
-                x1, y1, z0,  x1, y1, z1,
-                x0, y1, z0,  x0, y1, z1,
-            ];
-            gl.uniform_3_f32(Some(&self.u_color), 0.5, 0.5, 0.55);
-            upload_and_draw(gl, self.vbo, &box_verts, glow::LINES);
-            gl.draw_arrays(glow::LINES, 0, box_verts.len() as i32 / 3);
-
-            // --- Trajectories (LH overlay) ---
-            if !trajectories.is_empty() {
-                for (i, traj) in trajectories.iter().enumerate() {
-                    if traj.len() < 2 {
-                        continue;
-                    }
-                    let hue = (i as f32 * 0.618033988) % 1.0; // golden ratio hue rotation
-                    let (r, g, b) = hue_to_rgb(hue);
-                    gl.uniform_3_f32(Some(&self.u_color), r, g, b);
-                    let verts: Vec<f32> = traj.iter().flat_map(|p| p.iter().copied()).collect();
-                    upload_and_draw(gl, self.vbo, &verts, glow::LINE_STRIP);
-                    gl.draw_arrays(glow::LINE_STRIP, 0, traj.len() as i32);
+            let draw = |verts: &[f32], mode: u32, color: [f32; 3], line_width: f32, alpha: f32| {
+                if verts.is_empty() {
+                    return;
                 }
-                // Start positions as larger dots
-                gl.uniform_1_f32(Some(&self.u_point_size), 6.0);
-                for (i, traj) in trajectories.iter().enumerate() {
-                    if let Some(start) = traj.first() {
-                        let hue = (i as f32 * 0.618033988) % 1.0;
-                        let (r, g, b) = hue_to_rgb(hue);
-                        gl.uniform_3_f32(Some(&self.u_color), r, g, b);
-                        upload_and_draw(gl, self.vbo, start, glow::POINTS);
-                        gl.draw_arrays(glow::POINTS, 0, 1);
-                    }
+                gl.uniform_3_f32(Some(&self.u_color), color[0], color[1], color[2]);
+                gl.uniform_1_f32(Some(&self.u_alpha), alpha);
+                gl.line_width(line_width * px);
+                upload_and_draw(gl, self.vbo, verts, mode);
+                gl.draw_arrays(mode, 0, verts.len() as i32 / 3);
+            };
+            let lines = |verts: &[f32], color: [f32; 3], line_width: f32| draw(verts, glow::LINES, color, line_width, 1.0);
+
+            let [ox, oy, oz] = scene.room_offset;
+            let [rw, rd, rh] = scene.room;
+
+            // Floor grid inside the room: 0.5 m, every metre stronger
+            let (mut minor, mut major) = (Vec::new(), Vec::new());
+            let mut k = 0;
+            while k as f32 * 0.5 <= rw + 1e-3 {
+                let x = ox + k as f32 * 0.5;
+                let out = if k % 2 == 0 { &mut major } else { &mut minor };
+                out.extend_from_slice(&[x, oy, oz, x, oy + rd, oz]);
+                k += 1;
+            }
+            k = 0;
+            while k as f32 * 0.5 <= rd + 1e-3 {
+                let y = oy + k as f32 * 0.5;
+                let out = if k % 2 == 0 { &mut major } else { &mut minor };
+                out.extend_from_slice(&[ox, y, oz, ox + rw, y, oz]);
+                k += 1;
+            }
+            lines(&minor, style.grid, 1.0);
+            lines(&major, style.grid_major, 1.0);
+
+            // The coverage slice: a cell per point, coloured by its count
+            if !scene.slice.is_empty() {
+                let h = scene.cell / 2.0;
+                let z = scene.slice_z;
+                let mut by_color: Vec<([f32; 3], Vec<f32>)> = Vec::new();
+                for &(x, y, color) in scene.slice {
+                    let verts = match by_color.iter_mut().find(|(c, _)| *c == color) {
+                        Some((_, v)) => v,
+                        None => {
+                            by_color.push((color, Vec::new()));
+                            &mut by_color.last_mut().unwrap().1
+                        }
+                    };
+                    verts.extend_from_slice(&[
+                        x - h, y - h, z, x + h, y - h, z, x + h, y + h, z,
+                        x - h, y - h, z, x + h, y + h, z, x - h, y + h, z,
+                    ]);
                 }
-                gl.uniform_1_f32(Some(&self.u_point_size), 1.0);
+                for (color, verts) in &by_color {
+                    draw(verts, glow::TRIANGLES, *color, 1.0, 0.62);
+                }
             }
 
-            // --- Obstacles (opaque solid triangles + wireframe) ---
-            for (i, tris) in obstacle_triangles.iter().enumerate() {
-                if !tris.is_empty() {
-                    let is_selected = selected_type == 3 && selected_index == i as i32;
-                    let c = obstacle_colors.get(i).copied().unwrap_or([0.45, 0.45, 0.50]);
-                    if is_selected {
-                        gl.uniform_3_f32(Some(&self.u_color), (c[0] + 0.15).min(1.0), (c[1] + 0.15).min(1.0), (c[2] + 0.15).min(1.0));
+            let mut pads = Vec::new();
+            for pad in scene.pads {
+                circle_segments(&mut pads, [pad.x, pad.y, oz], pad.radius, 32);
+            }
+            lines(&pads, style.pad, 1.2);
+
+            let mut room = Vec::new();
+            box_edges(&mut room, [ox, oy, oz], [ox + rw, oy + rd, oz + rh], None);
+            lines(&room, style.room, 1.0);
+
+            // Obstacles: see-through, hiding each other
+            if !scene.obstacle_triangles.is_empty() {
+                gl.enable(glow::DEPTH_TEST);
+                for (i, tris) in scene.obstacle_triangles.iter().enumerate() {
+                    let c = scene.obstacle_colors.get(i).copied().unwrap_or([0.45, 0.45, 0.50]);
+                    draw(tris, glow::TRIANGLES, c, 1.0, 0.55);
+                }
+                gl.disable(glow::DEPTH_TEST);
+                for (i, wire) in scene.obstacle_wireframes.iter().enumerate() {
+                    let selected = scene.selected_type == 3 && scene.selected_index == i as i32;
+                    if selected {
+                        lines(wire, style.accent, 2.2);
                     } else {
-                        gl.uniform_3_f32(Some(&self.u_color), c[0], c[1], c[2]);
+                        lines(wire, style.muted, 1.0);
                     }
-                    gl.uniform_1_f32(Some(&self.u_alpha), 0.85);
-                    upload_and_draw(gl, self.vbo, tris, glow::TRIANGLES);
-                    gl.draw_arrays(glow::TRIANGLES, 0, tris.len() as i32 / 3);
                 }
             }
-            // Wireframe edges: LEQUAL so edges coplanar with the front faces
-            // pass (visible), while edges behind the solid body stay occluded.
-            gl.depth_func(glow::LEQUAL);
-            for (i, wire) in obstacle_wireframes.iter().enumerate() {
-                if !wire.is_empty() {
-                    let is_selected = selected_type == 3 && selected_index == i as i32;
-                    let c = obstacle_colors.get(i).copied().unwrap_or([0.45, 0.45, 0.50]);
-                    if is_selected {
-                        gl.uniform_3_f32(Some(&self.u_color), (c[0] + 0.3).min(1.0), (c[1] + 0.3).min(1.0), (c[2] + 0.3).min(1.0));
+
+            // Flight areas dashed long, waypoint areas dashed short; the
+            // selected one solid
+            for (kind, areas, color, dash) in [
+                (1, scene.flight_areas, style.area, (0.10, 0.06)),
+                (2, scene.waypoint_areas, style.waypoint_area, (0.03, 0.06)),
+            ] {
+                let mut verts = Vec::new();
+                for (i, a) in areas.iter().enumerate() {
+                    if scene.selected_area_kind == kind && scene.selected_area_index == i as i32 {
+                        let mut sel = Vec::new();
+                        box_edges(&mut sel, a.min, a.max, None);
+                        lines(&sel, style.accent, 2.2);
                     } else {
-                        gl.uniform_3_f32(Some(&self.u_color), (c[0] + 0.2).min(1.0), (c[1] + 0.2).min(1.0), (c[2] + 0.2).min(1.0));
+                        box_edges(&mut verts, a.min, a.max, Some(dash));
                     }
-                    gl.uniform_1_f32(Some(&self.u_alpha), 1.0);
-                    upload_and_draw(gl, self.vbo, wire, glow::LINES);
-                    gl.draw_arrays(glow::LINES, 0, wire.len() as i32 / 3);
+                }
+                lines(&verts, color, 1.5);
+            }
+
+            for (i, traj) in scene.trajectories.iter().enumerate() {
+                if traj.len() < 2 {
+                    continue;
+                }
+                let (r, g, b) = hue_to_rgb((i as f32 * 0.618033988) % 1.0);
+                let verts: Vec<f32> = traj.iter().flat_map(|p| p.iter().copied()).collect();
+                draw(&verts, glow::LINE_STRIP, [r, g, b], 1.5, 1.0);
+            }
+
+            // Base stations: where they aim, and the field of view of the
+            // selected one
+            let horiz_half = (160.0_f32 / 2.0).to_radians();
+            let vert_half = (115.0_f32 / 2.0).to_radians();
+            let mut aims = Vec::new();
+            for (i, (pos, rot)) in scene.base_stations.iter().enumerate() {
+                let to_world = |l: [f32; 3]| -> [f32; 3] {
+                    [
+                        pos[0] + rot[0][0] * l[0] + rot[0][1] * l[1] + rot[0][2] * l[2],
+                        pos[1] + rot[1][0] * l[0] + rot[1][1] * l[1] + rot[1][2] * l[2],
+                        pos[2] + rot[2][0] * l[0] + rot[2][1] * l[1] + rot[2][2] * l[2],
+                    ]
+                };
+                aims.extend_from_slice(pos);
+                aims.extend_from_slice(&to_world([0.6, 0.0, 0.0]));
+                if scene.selected_type == 1 && scene.selected_index == i as i32 {
+                    let len = 1.5_f32;
+                    let corners: Vec<[f32; 3]> = [(1.0, 1.0), (-1.0, 1.0), (-1.0, -1.0), (1.0, -1.0)]
+                        .iter()
+                        .map(|&(sh, sv)| {
+                            let d = [1.0, sh * horiz_half.tan(), sv * vert_half.tan()];
+                            let n = dot(d, d).sqrt();
+                            to_world([d[0] * len / n, d[1] * len / n, d[2] * len / n])
+                        })
+                        .collect();
+                    let mut faces = Vec::new();
+                    let mut edges = Vec::new();
+                    for c in 0..4 {
+                        let (a, b) = (corners[c], corners[(c + 1) % 4]);
+                        faces.extend_from_slice(pos);
+                        faces.extend_from_slice(&a);
+                        faces.extend_from_slice(&b);
+                        edges.extend_from_slice(pos);
+                        edges.extend_from_slice(&a);
+                        edges.extend_from_slice(&a);
+                        edges.extend_from_slice(&b);
+                    }
+                    draw(&faces, glow::TRIANGLES, style.accent, 1.0, 0.07);
+                    lines(&edges, style.accent, 1.25);
                 }
             }
-            gl.uniform_1_f32(Some(&self.u_alpha), 1.0);
+            lines(&aims, style.base_station, 1.5);
 
-            // --- Flight areas (amber) and waypoint areas (green) wireframes ---
-            // Drawn after the solid obstacles, with LEQUAL, so the parts in
-            // front of an obstacle stay crisp while the parts behind it are
-            // occluded by the solid body.
-            for fa in flight_areas {
-                self.draw_box_wireframe(gl, fa.min, fa.max, FLIGHT_AREA_COLOR);
+            // The gizmo of the selected object: arrows along the axes, and
+            // the arcs that turn it
+            let sel_pos = match scene.selected_type {
+                1 => scene.base_stations.get(scene.selected_index as usize).map(|b| b.0),
+                2 => scene.anchors.get(scene.selected_index as usize).copied(),
+                3 => scene.obstacle_triangles.get(scene.selected_index as usize).and_then(|tris| {
+                    let n = tris.len() / 3;
+                    (n > 0).then(|| {
+                        let mut c = [0.0f32; 3];
+                        for v in tris.chunks_exact(3) {
+                            c = [c[0] + v[0], c[1] + v[1], c[2] + v[2]];
+                        }
+                        [c[0] / n as f32, c[1] / n as f32, c[2] / n as f32]
+                    })
+                }),
+                _ => None,
+            };
+            let mut gizmo_points: Vec<([f32; 3], [f32; 3], bool)> = Vec::new();
+            if let Some(pos) = sel_pos {
+                for (axis, handle) in [HANDLE_TRANSLATE_X, HANDLE_TRANSLATE_Y, HANDLE_TRANSLATE_Z].into_iter().enumerate() {
+                    let mut end = pos;
+                    end[axis] += GIZMO_TRANSLATE_LEN;
+                    let active = scene.active_handle == handle;
+                    lines(&[pos[0], pos[1], pos[2], end[0], end[1], end[2]], style.axes[axis], if active { 3.0 } else { 2.0 });
+                    gizmo_points.push((end, style.axes[axis], active));
+                }
+                let arc = |center: f32, point: &dyn Fn(f32) -> [f32; 3]| -> Vec<f32> {
+                    (0..=GIZMO_ARC_STEPS)
+                        .flat_map(|step| point(center - GIZMO_ARC_SPAN + 2.0 * GIZMO_ARC_SPAN * step as f32 / GIZMO_ARC_STEPS as f32))
+                        .collect()
+                };
+                if scene.selected_type == 1 {
+                    let (_, rot) = &scene.base_stations[scene.selected_index as usize];
+                    let azimuth = rot[1][0].atan2(rot[0][0]);
+                    let elevation = (-rot[2][0]).asin();
+                    let az = arc(azimuth, &|a| [pos[0] + GIZMO_ROTATE_RADIUS * a.cos(), pos[1] + GIZMO_ROTATE_RADIUS * a.sin(), pos[2]]);
+                    let el = arc(elevation, &|e| [
+                        pos[0] + GIZMO_ROTATE_RADIUS * e.cos() * azimuth.cos(),
+                        pos[1] + GIZMO_ROTATE_RADIUS * e.cos() * azimuth.sin(),
+                        pos[2] - GIZMO_ROTATE_RADIUS * e.sin(),
+                    ]);
+                    for (verts, color, handle) in [(az, style.accent, HANDLE_ROTATE_AZ), (el, style.area, HANDLE_ROTATE_EL)] {
+                        let active = scene.active_handle == handle;
+                        draw(&verts, glow::LINE_STRIP, color, if active { 3.0 } else { 2.0 }, 1.0);
+                        let n = verts.len();
+                        gizmo_points.push(([verts[0], verts[1], verts[2]], color, active));
+                        gizmo_points.push(([verts[n - 3], verts[n - 2], verts[n - 1]], color, active));
+                    }
+                }
+                if scene.selected_type == 3 {
+                    let ring: Vec<f32> = (0..=GIZMO_ARC_STEPS * 2)
+                        .flat_map(|step| {
+                            let a = std::f32::consts::TAU * step as f32 / (GIZMO_ARC_STEPS * 2) as f32;
+                            [pos[0] + GIZMO_ROTATE_RADIUS * a.cos(), pos[1] + GIZMO_ROTATE_RADIUS * a.sin(), pos[2]]
+                        })
+                        .collect();
+                    let active = scene.active_handle == HANDLE_ROTATE_YAW;
+                    draw(&ring, glow::LINE_STRIP, style.accent, if active { 3.0 } else { 2.0 }, 1.0);
+                }
             }
-            for wa in waypoint_areas {
-                self.draw_box_wireframe(gl, wa.min, wa.max, WAYPOINT_AREA_COLOR);
-            }
-            gl.depth_func(glow::LESS);
 
-            // --- Face-center drag handles for the selected area (always on top) ---
-            let selected_area = match selected_area_kind {
-                1 => flight_areas.get(selected_area_index as usize),
-                2 => waypoint_areas.get(selected_area_index as usize),
+            // Markers on top, far ones first
+            let no_ring = ([0.0; 3], 0.0);
+            let mut markers: Vec<Marker> = Vec::new();
+            for (i, (pos, _)) in scene.base_stations.iter().enumerate() {
+                let selected = scene.selected_type == 1 && scene.selected_index == i as i32;
+                markers.push(Marker {
+                    pos: *pos,
+                    size: Some(16.0 * px),
+                    fill: style.surface,
+                    inner: (if selected { style.accent } else { style.base_station }, 2.0 * px),
+                    rings: if selected { [(style.scene, 2.0 * px), (style.accent_tint, 3.0 * px), no_ring] } else { [no_ring; 3] },
+                    square: true,
+                    alpha: 1.0,
+                });
+            }
+            for (i, pos) in scene.anchors.iter().enumerate() {
+                let selected = scene.selected_type == 2 && scene.selected_index == i as i32;
+                markers.push(Marker {
+                    pos: *pos,
+                    size: Some(14.0 * px),
+                    fill: style.surface,
+                    inner: (if selected { style.accent } else { style.axes[2] }, 2.5 * px),
+                    rings: if selected { [(style.scene, 2.0 * px), (style.accent_tint, 3.0 * px), no_ring] } else { [(style.scene, 1.5 * px), no_ring, no_ring] },
+                    square: false,
+                    alpha: 1.0,
+                });
+            }
+            // Handles on the sides of the selected area
+            let selected_area = match scene.selected_area_kind {
+                1 => scene.flight_areas.get(scene.selected_area_index as usize),
+                2 => scene.waypoint_areas.get(scene.selected_area_index as usize),
                 _ => None,
             };
             if let Some(area) = selected_area {
-                let handles = area_handle_positions(area.min, area.max);
-                gl.disable(glow::DEPTH_TEST);
-                let verts: Vec<f32> = handles.iter().flat_map(|h| *h).collect();
-                upload_and_draw(gl, self.vbo, &verts, glow::POINTS);
-                gl.uniform_3_f32(Some(&self.u_color), 0.10, 0.10, 0.10);
-                gl.uniform_1_f32(Some(&self.u_point_size), 22.0);
-                gl.draw_arrays(glow::POINTS, 0, handles.len() as i32);
-                gl.uniform_3_f32(Some(&self.u_color), 0.95, 0.55, 0.10);
-                gl.uniform_1_f32(Some(&self.u_point_size), 14.0);
-                gl.draw_arrays(glow::POINTS, 0, handles.len() as i32);
-                gl.uniform_1_f32(Some(&self.u_point_size), 1.0);
-                gl.enable(glow::DEPTH_TEST);
-            }
-
-            // --- Base station axes and FOV frustum ---
-            let horiz_half = (160.0_f32 / 2.0).to_radians();
-            let vert_half = (115.0_f32 / 2.0).to_radians();
-            let fov_len = 1.5_f32;
-
-            for (bs_i, (pos, rot)) in base_stations.iter().enumerate() {
-                let to_world = |lx: f32, ly: f32, lz: f32| -> [f32; 3] {
-                    [
-                        pos[0] + rot[0][0] * lx + rot[0][1] * ly + rot[0][2] * lz,
-                        pos[1] + rot[1][0] * lx + rot[1][1] * ly + rot[1][2] * lz,
-                        pos[2] + rot[2][0] * lx + rot[2][1] * ly + rot[2][2] * lz,
-                    ]
-                };
-
-                let axis_len = 0.5;
-                let origin = to_world(0.0, 0.0, 0.0);
-                let x_end = to_world(axis_len, 0.0, 0.0);
-                let y_end = to_world(0.0, axis_len, 0.0);
-                let z_end = to_world(0.0, 0.0, axis_len);
-
-                gl.uniform_3_f32(Some(&self.u_color), 0.94, 0.27, 0.27);
-                let line = [origin[0], origin[1], origin[2], x_end[0], x_end[1], x_end[2]];
-                upload_and_draw(gl, self.vbo, &line, glow::LINES);
-                gl.draw_arrays(glow::LINES, 0, 2);
-
-                gl.uniform_3_f32(Some(&self.u_color), 0.29, 0.85, 0.50);
-                let line = [origin[0], origin[1], origin[2], y_end[0], y_end[1], y_end[2]];
-                upload_and_draw(gl, self.vbo, &line, glow::LINES);
-                gl.draw_arrays(glow::LINES, 0, 2);
-
-                gl.uniform_3_f32(Some(&self.u_color), 0.38, 0.65, 0.98);
-                let line = [origin[0], origin[1], origin[2], z_end[0], z_end[1], z_end[2]];
-                upload_and_draw(gl, self.vbo, &line, glow::LINES);
-                gl.draw_arrays(glow::LINES, 0, 2);
-
-                // FOV frustum
-                let tan_h = horiz_half.tan();
-                let tan_v = vert_half.tan();
-                let corners = [
-                    (1.0, tan_h, tan_v),
-                    (1.0, -tan_h, tan_v),
-                    (1.0, -tan_h, -tan_v),
-                    (1.0, tan_h, -tan_v),
-                ];
-
-                gl.uniform_3_f32(Some(&self.u_color), 0.7, 0.4, 0.2);
-                let mut frustum_verts = Vec::new();
-                let mut far_points = Vec::new();
-                for (cx, cy, cz) in &corners {
-                    let len = (cx * cx + cy * cy + cz * cz).sqrt();
-                    let scale = fov_len / len;
-                    let far = to_world(cx * scale, cy * scale, cz * scale);
-                    frustum_verts.extend_from_slice(&[origin[0], origin[1], origin[2], far[0], far[1], far[2]]);
-                    far_points.push(far);
-                }
-                for i in 0..4 {
-                    let j = (i + 1) % 4;
-                    frustum_verts.extend_from_slice(&[
-                        far_points[i][0], far_points[i][1], far_points[i][2],
-                        far_points[j][0], far_points[j][1], far_points[j][2],
-                    ]);
-                }
-                upload_and_draw(gl, self.vbo, &frustum_verts, glow::LINES);
-                gl.draw_arrays(glow::LINES, 0, frustum_verts.len() as i32 / 3);
-
-                // BS point (highlighted if selected)
-                let is_selected = selected_type == 1 && selected_index == bs_i as i32;
-                if is_selected {
-                    gl.uniform_3_f32(Some(&self.u_color), 1.0, 0.5, 0.5);
-                    gl.uniform_1_f32(Some(&self.u_point_size), 12.0);
-                } else {
-                    gl.uniform_3_f32(Some(&self.u_color), 0.94, 0.27, 0.27);
-                    gl.uniform_1_f32(Some(&self.u_point_size), 8.0);
-                }
-                upload_and_draw(gl, self.vbo, &origin, glow::POINTS);
-                gl.draw_arrays(glow::POINTS, 0, 1);
-                gl.uniform_1_f32(Some(&self.u_point_size), 1.0);
-            }
-
-            // --- TDoA3 Anchors ---
-            for (ai, pos) in anchors.iter().enumerate() {
-                let is_selected = selected_type == 2 && selected_index == ai as i32;
-                if is_selected {
-                    gl.uniform_3_f32(Some(&self.u_color), 1.0, 1.0, 0.3);
-                    gl.uniform_1_f32(Some(&self.u_point_size), 12.0);
-                } else {
-                    gl.uniform_3_f32(Some(&self.u_color), 1.0, 0.85, 0.0);
-                    gl.uniform_1_f32(Some(&self.u_point_size), 8.0);
-                }
-                upload_and_draw(gl, self.vbo, pos, glow::POINTS);
-                gl.draw_arrays(glow::POINTS, 0, 1);
-            }
-            gl.uniform_1_f32(Some(&self.u_point_size), 1.0);
-
-            // --- Coverage voxels (transparent) ---
-            gl.depth_mask(false);
-            gl.enable(glow::BLEND);
-            gl.blend_func(glow::SRC_ALPHA, glow::ONE_MINUS_SRC_ALPHA);
-            gl.uniform_1_f32(Some(&self.u_point_size), 12.0);
-
-            // LH coverage voxels
-            if !lh_voxels.is_empty() {
-                let mut buckets: [Vec<f32>; 5] = Default::default();
-                for &(x, y, z, count) in lh_voxels {
-                    let idx = (count as usize).min(4);
-                    buckets[idx].push(x);
-                    buckets[idx].push(y);
-                    buckets[idx].push(z);
-                }
-
-                let has_coverage = (1..5).any(|i| !buckets[i].is_empty());
-                let colors: [[f32; 3]; 5] = [
-                    [0.9, 0.15, 0.15],
-                    [0.95, 0.8, 0.1],
-                    [0.2, 0.9, 0.35],
-                    [0.2, 0.9, 0.35],
-                    [0.2, 0.9, 0.35],
-                ];
-                let alphas: [f32; 5] = [0.06, 0.08, 0.08, 0.08, 0.08];
-
-                for (i, bucket) in buckets.iter().enumerate() {
-                    if bucket.is_empty() || !show_lh_coverage[i] {
-                        continue;
-                    }
-                    if i == 0 && !has_coverage {
-                        continue;
-                    }
-                    gl.uniform_3_f32(Some(&self.u_color), colors[i][0], colors[i][1], colors[i][2]);
-                    gl.uniform_1_f32(Some(&self.u_alpha), alphas[i]);
-                    upload_and_draw(gl, self.vbo, bucket, glow::POINTS);
-                    gl.draw_arrays(glow::POINTS, 0, bucket.len() as i32 / 3);
+                for h in area_handle_positions(area.min, area.max) {
+                    markers.push(Marker {
+                        pos: h,
+                        size: Some(12.0 * px),
+                        fill: style.surface,
+                        inner: (style.accent, 2.0 * px),
+                        rings: [(style.scene, 1.5 * px), no_ring, no_ring],
+                        square: false,
+                        alpha: 1.0,
+                    });
                 }
             }
-
-            // TDoA3 GDOP voxels
-            if show_tdoa3_voxels && !tdoa3_voxels.is_empty() {
-                const N_GDOP_BUCKETS: usize = 16;
-                let mut buckets: Vec<Vec<f32>> = vec![Vec::new(); N_GDOP_BUCKETS];
-
-                let range = (max_scale - min_scale).max(0.001);
-                for &(x, y, z, gdop) in tdoa3_voxels {
-                    if gdop.is_finite() && gdop >= min_scale && gdop <= max_scale {
-                        let t = ((gdop - min_scale) / range).clamp(0.0, 1.0);
-                        let idx = ((t * N_GDOP_BUCKETS as f32) as usize).min(N_GDOP_BUCKETS - 1);
-                        buckets[idx].push(x);
-                        buckets[idx].push(y);
-                        buckets[idx].push(z);
-                    }
-                }
-
-                for (i, bucket) in buckets.iter().enumerate() {
-                    if bucket.is_empty() {
-                        continue;
-                    }
-                    let t = (i as f32 + 0.5) / N_GDOP_BUCKETS as f32;
-                    let (r, g, b) = gdop_color(t);
-                    gl.uniform_3_f32(Some(&self.u_color), r, g, b);
-                    gl.uniform_1_f32(Some(&self.u_alpha), 0.08);
-                    upload_and_draw(gl, self.vbo, bucket, glow::POINTS);
-                    gl.draw_arrays(glow::POINTS, 0, bucket.len() as i32 / 3);
-                }
+            for (pos, color, active) in gizmo_points {
+                markers.push(Marker {
+                    pos,
+                    size: Some(if active { 12.0 } else { 9.0 } * px),
+                    fill: color,
+                    inner: no_ring,
+                    rings: [(style.scene, 1.5 * px), no_ring, no_ring],
+                    square: false,
+                    alpha: 1.0,
+                });
             }
-
-            gl.uniform_1_f32(Some(&self.u_alpha), 1.0);
-            gl.disable(glow::BLEND);
-            gl.depth_mask(true);
-
-            // --- Gizmo for selected object ---
-            if selected_index >= 0 {
-                gl.disable(glow::DEPTH_TEST);
-
-                // Determine position and what handles to show
-                let sel_pos: Option<[f32; 3]> = match selected_type {
-                    1 if (selected_index as usize) < base_stations.len() => {
-                        Some(base_stations[selected_index as usize].0)
-                    }
-                    2 if (selected_index as usize) < anchors.len() => {
-                        Some(anchors[selected_index as usize])
-                    }
-                    3 => None, // obstacle pos comes from obstacle_triangles center — handled below
-                    _ => None,
-                };
-
-                // For obstacles, compute center from first 3 vertices of triangles
-                let obstacle_pos = if selected_type == 3 {
-                    let oi = selected_index as usize;
-                    if oi < obstacle_triangles.len() && obstacle_triangles[oi].len() >= 3 {
-                        // Average all vertices to find center (not perfect but works)
-                        let tris = &obstacle_triangles[oi];
-                        let n_verts = tris.len() / 3;
-                        if n_verts > 0 {
-                            let (mut sx, mut sy, mut sz) = (0.0f32, 0.0f32, 0.0f32);
-                            for v in 0..n_verts {
-                                sx += tris[v * 3];
-                                sy += tris[v * 3 + 1];
-                                sz += tris[v * 3 + 2];
-                            }
-                            Some([sx / n_verts as f32, sy / n_verts as f32, sz / n_verts as f32])
-                        } else {
-                            None
-                        }
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                };
-
-                let pos = sel_pos.or(obstacle_pos);
-
-                if let Some(pos) = pos {
-                    // Translation handles (world-axis arrows)
-                    let axes: [([f32; 3], [f32; 3], i32); 3] = [
-                        ([GIZMO_TRANSLATE_LEN, 0.0, 0.0], [0.94, 0.27, 0.27], HANDLE_TRANSLATE_X),
-                        ([0.0, GIZMO_TRANSLATE_LEN, 0.0], [0.29, 0.85, 0.50], HANDLE_TRANSLATE_Y),
-                        ([0.0, 0.0, GIZMO_TRANSLATE_LEN], [0.38, 0.65, 0.98], HANDLE_TRANSLATE_Z),
-                    ];
-
-                    for (dir, color, handle_id) in &axes {
-                        let active = *handle_id == active_handle;
-                        let bright = if active { 1.0 } else { 0.7 };
-                        gl.uniform_3_f32(
-                            Some(&self.u_color),
-                            (color[0] * bright).min(1.0),
-                            (color[1] * bright).min(1.0),
-                            (color[2] * bright).min(1.0),
-                        );
-
-                        let end = [pos[0] + dir[0], pos[1] + dir[1], pos[2] + dir[2]];
-                        let line = [pos[0], pos[1], pos[2], end[0], end[1], end[2]];
-                        upload_and_draw(gl, self.vbo, &line, glow::LINES);
-                        gl.draw_arrays(glow::LINES, 0, 2);
-
-                        gl.uniform_1_f32(
-                            Some(&self.u_point_size),
-                            if active { 14.0 } else { 10.0 },
-                        );
-                        upload_and_draw(gl, self.vbo, &end, glow::POINTS);
-                        gl.draw_arrays(glow::POINTS, 0, 1);
-                    }
-
-                    // Azimuth/elevation arcs for BS
-                    if selected_type == 1 {
-                        let (_, rot) = &base_stations[selected_index as usize];
-                        let azimuth = rot[1][0].atan2(rot[0][0]);
-                        let elevation = (-rot[2][0]).asin();
-
-                        // Azimuth arc
-                        let az_active = active_handle == HANDLE_ROTATE_AZ;
-                        let az_color = if az_active { [1.0, 0.5, 1.0] } else { [0.8, 0.2, 0.8] };
-                        gl.uniform_3_f32(Some(&self.u_color), az_color[0], az_color[1], az_color[2]);
-                        let mut arc = Vec::with_capacity((GIZMO_ARC_STEPS + 1) * 3);
-                        for step in 0..=GIZMO_ARC_STEPS {
-                            let a = azimuth - GIZMO_ARC_SPAN
-                                + 2.0 * GIZMO_ARC_SPAN * step as f32 / GIZMO_ARC_STEPS as f32;
-                            arc.extend_from_slice(&[
-                                pos[0] + GIZMO_ROTATE_RADIUS * a.cos(),
-                                pos[1] + GIZMO_ROTATE_RADIUS * a.sin(),
-                                pos[2],
-                            ]);
-                        }
-                        upload_and_draw(gl, self.vbo, &arc, glow::LINE_STRIP);
-                        gl.draw_arrays(glow::LINE_STRIP, 0, arc.len() as i32 / 3);
-
-                        gl.uniform_1_f32(Some(&self.u_point_size), if az_active { 10.0 } else { 7.0 });
-                        upload_and_draw(gl, self.vbo, &arc[..3], glow::POINTS);
-                        gl.draw_arrays(glow::POINTS, 0, 1);
-                        let last = arc.len() - 3;
-                        upload_and_draw(gl, self.vbo, &arc[last..], glow::POINTS);
-                        gl.draw_arrays(glow::POINTS, 0, 1);
-
-                        // Elevation arc
-                        let el_active = active_handle == HANDLE_ROTATE_EL;
-                        let el_color = if el_active { [1.0, 0.8, 0.3] } else { [0.9, 0.6, 0.1] };
-                        gl.uniform_3_f32(Some(&self.u_color), el_color[0], el_color[1], el_color[2]);
-                        let mut arc = Vec::with_capacity((GIZMO_ARC_STEPS + 1) * 3);
-                        for step in 0..=GIZMO_ARC_STEPS {
-                            let e = elevation - GIZMO_ARC_SPAN
-                                + 2.0 * GIZMO_ARC_SPAN * step as f32 / GIZMO_ARC_STEPS as f32;
-                            arc.extend_from_slice(&[
-                                pos[0] + GIZMO_ROTATE_RADIUS * e.cos() * azimuth.cos(),
-                                pos[1] + GIZMO_ROTATE_RADIUS * e.cos() * azimuth.sin(),
-                                pos[2] - GIZMO_ROTATE_RADIUS * e.sin(),
-                            ]);
-                        }
-                        upload_and_draw(gl, self.vbo, &arc, glow::LINE_STRIP);
-                        gl.draw_arrays(glow::LINE_STRIP, 0, arc.len() as i32 / 3);
-
-                        gl.uniform_1_f32(Some(&self.u_point_size), if el_active { 10.0 } else { 7.0 });
-                        upload_and_draw(gl, self.vbo, &arc[..3], glow::POINTS);
-                        gl.draw_arrays(glow::POINTS, 0, 1);
-                        let last = arc.len() - 3;
-                        upload_and_draw(gl, self.vbo, &arc[last..], glow::POINTS);
-                        gl.draw_arrays(glow::POINTS, 0, 1);
-
-                        // Look direction line
-                        let look_len = 0.8_f32;
-                        let look_end = [
-                            pos[0] + rot[0][0] * look_len,
-                            pos[1] + rot[1][0] * look_len,
-                            pos[2] + rot[2][0] * look_len,
-                        ];
-                        gl.uniform_3_f32(Some(&self.u_color), 1.0, 1.0, 1.0);
-                        let line = [pos[0], pos[1], pos[2], look_end[0], look_end[1], look_end[2]];
-                        upload_and_draw(gl, self.vbo, &line, glow::LINES);
-                        gl.draw_arrays(glow::LINES, 0, 2);
-                    }
-
-                    // Yaw rotation arc for obstacles
-                    if selected_type == 3 {
-                        let yaw_active = active_handle == HANDLE_ROTATE_YAW;
-                        let yaw_color = if yaw_active { [1.0, 0.5, 1.0] } else { [0.8, 0.2, 0.8] };
-                        gl.uniform_3_f32(Some(&self.u_color), yaw_color[0], yaw_color[1], yaw_color[2]);
-                        let mut arc = Vec::with_capacity((GIZMO_ARC_STEPS + 1) * 3);
-                        for step in 0..=GIZMO_ARC_STEPS {
-                            let a = 2.0 * std::f32::consts::PI * step as f32 / GIZMO_ARC_STEPS as f32;
-                            arc.extend_from_slice(&[
-                                pos[0] + GIZMO_ROTATE_RADIUS * a.cos(),
-                                pos[1] + GIZMO_ROTATE_RADIUS * a.sin(),
-                                pos[2],
-                            ]);
-                        }
-                        upload_and_draw(gl, self.vbo, &arc, glow::LINE_STRIP);
-                        gl.draw_arrays(glow::LINE_STRIP, 0, arc.len() as i32 / 3);
-                    }
-                }
-
-                gl.enable(glow::DEPTH_TEST);
-            }
+            let depth = |m: &Marker| clip_w(m.pos, &mvp);
+            markers.sort_by(|a, b| depth(b).total_cmp(&depth(a)));
+            self.draw_markers(gl, &markers, &mvp, height as f32, px);
 
             gl.use_program(None);
-            gl.disable(glow::DEPTH_TEST);
+            gl.line_width(1.0);
+            gl.disable(glow::BLEND);
+
+            if let Some(msaa) = &self.msaa {
+                gl.bind_framebuffer(glow::READ_FRAMEBUFFER, Some(msaa.fbo));
+                gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, Some(self.next_texture.fbo));
+                gl.blit_framebuffer(0, 0, width as i32, height as i32, 0, 0, width as i32, height as i32, glow::COLOR_BUFFER_BIT, glow::NEAREST);
+            }
+            gl.bind_framebuffer(glow::READ_FRAMEBUFFER, saved_read_fbo);
             gl.viewport(saved_viewport[0], saved_viewport[1], saved_viewport[2], saved_viewport[3]);
         }
 
@@ -2062,7 +2101,6 @@ impl Scene3DRenderer {
             )
             .build()
         };
-
         std::mem::swap(&mut self.next_texture, &mut self.displayed_texture);
         result
     }
@@ -2070,7 +2108,7 @@ impl Scene3DRenderer {
 
 /// Map a normalised GDOP ratio `t` ∈ [0, 1] to an RGB colour.
 /// 0 = green (good), 0.5 = yellow, 1 = red (bad).
-fn gdop_color(t: f32) -> (f32, f32, f32) {
+pub fn gdop_color(t: f32) -> (f32, f32, f32) {
     let t = t.clamp(0.0, 1.0);
     let r = (2.0 * t).min(1.0);
     let g = (2.0 * (1.0 - t)).min(1.0);
@@ -2144,6 +2182,7 @@ impl Drop for Scene3DRenderer {
     fn drop(&mut self) {
         unsafe {
             self.gl.delete_program(self.program);
+            self.gl.delete_program(self.marker.program);
             self.gl.delete_vertex_array(self.vao);
             self.gl.delete_buffer(self.vbo);
         }
@@ -2163,6 +2202,70 @@ fn hue_to_rgb(h: f32) -> (f32, f32, f32) {
         3 => (0.0, 1.0 - f, 1.0),
         4 => (f, 0.0, 1.0),
         _ => (1.0, 0.0, 1.0 - f),
+    }
+}
+
+/// Clip-space w of `p`: its distance along the view direction.
+pub fn clip_w(p: [f32; 3], mvp: &[f32; 16]) -> f32 {
+    mvp[3] * p[0] + mvp[7] * p[1] + mvp[11] * p[2] + mvp[15]
+}
+
+/// Line segments around a horizontal circle.
+fn circle_segments(out: &mut Vec<f32>, center: [f32; 3], radius: f32, segments: usize) {
+    let point = |i: usize| {
+        let a = i as f32 / segments as f32 * std::f32::consts::TAU;
+        [center[0] + radius * a.cos(), center[1] + radius * a.sin(), center[2]]
+    };
+    for i in 0..segments {
+        out.extend_from_slice(&point(i));
+        out.extend_from_slice(&point(i + 1));
+    }
+}
+
+/// Triangles filling a horizontal disc.
+fn disc_triangles(out: &mut Vec<f32>, center: [f32; 3], radius: f32, segments: usize) {
+    for i in 0..segments {
+        let a0 = i as f32 / segments as f32 * std::f32::consts::TAU;
+        let a1 = (i + 1) as f32 / segments as f32 * std::f32::consts::TAU;
+        out.extend_from_slice(&center);
+        out.extend_from_slice(&[center[0] + radius * a0.cos(), center[1] + radius * a0.sin(), center[2]]);
+        out.extend_from_slice(&[center[0] + radius * a1.cos(), center[1] + radius * a1.sin(), center[2]]);
+    }
+}
+
+/// A line from `a` to `b` as dashes `on` metres long with `off` between.
+fn dashed(out: &mut Vec<f32>, a: [f32; 3], b: [f32; 3], on: f32, off: f32) {
+    let d = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+    let len = dot(d, d).sqrt();
+    if len < 1e-6 {
+        return;
+    }
+    let at = |t: f32| [a[0] + d[0] * t / len, a[1] + d[1] * t / len, a[2] + d[2] * t / len];
+    let mut t = 0.0;
+    while t < len {
+        out.extend_from_slice(&at(t));
+        out.extend_from_slice(&at((t + on).min(len)));
+        t += on + off;
+    }
+}
+
+/// The 12 edges of a box, dashed when `dash` gives (on, off) lengths.
+fn box_edges(out: &mut Vec<f32>, min: [f32; 3], max: [f32; 3], dash: Option<(f32, f32)>) {
+    let [x0, y0, z0] = min;
+    let [x1, y1, z1] = max;
+    let corners = [[x0, y0], [x1, y0], [x1, y1], [x0, y1]];
+    for k in 0..4 {
+        let [ax, ay] = corners[k];
+        let [bx, by] = corners[(k + 1) % 4];
+        for (a, b) in [([ax, ay, z0], [bx, by, z0]), ([ax, ay, z1], [bx, by, z1]), ([ax, ay, z0], [ax, ay, z1])] {
+            match dash {
+                Some((on, off)) => dashed(out, a, b, on, off),
+                None => {
+                    out.extend_from_slice(&a);
+                    out.extend_from_slice(&b);
+                }
+            }
+        }
     }
 }
 
@@ -2237,7 +2340,7 @@ pub fn build_mvp(yaw: f32, pitch: f32, distance: f32, pan_x: f32, pan_y: f32, as
     let view = look_at(eye, target, [0.0, 0.0, 1.0]);
     // near=0.3 keeps good depth precision even with the far range needed for
     // zooming far out, so coplanar wireframe edges don't z-fight with faces.
-    let proj = perspective(45.0_f32.to_radians(), aspect, 0.3, 300.0);
+    let proj = perspective(FOV_DEG.to_radians(), aspect, 0.3, 300.0);
 
     mat4_mul(&proj, &view)
 }

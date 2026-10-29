@@ -180,18 +180,19 @@ view_state! {
     col_leddn_w: f32 = 55.0, get_col_leddn_w / set_col_leddn_w;
 
     // Visualization tab: camera
-    cam_yaw: f32 = 0.8, get_cam_yaw / set_cam_yaw;
-    cam_pitch: f32 = 0.6, get_cam_pitch / set_cam_pitch;
-    cam_distance: f32 = 6.0, get_cam_distance / set_cam_distance;
+    cam_yaw: f32 = -2.05, get_cam_yaw / set_cam_yaw;
+    cam_pitch: f32 = 0.58, get_cam_pitch / set_cam_pitch;
+    cam_distance: f32 = 8.6, get_cam_distance / set_cam_distance;
     cam_pan_x: f32 = 0.0, get_cam_pan_x / set_cam_pan_x;
     cam_pan_y: f32 = 0.0, get_cam_pan_y / set_cam_pan_y;
+    view_preset: i32 = 0, get_view_preset / set_view_preset;
 
     // Visualization tab: overlays
-    show_cf_labels: bool = false, get_show_cf_labels / set_show_cf_labels;
-    show_lh_labels: bool = false, get_show_lh_labels / set_show_lh_labels;
-    show_loco_labels: bool = false, get_show_loco_labels / set_show_loco_labels;
-    show_axis_labels: bool = false, get_show_axis_labels / set_show_axis_labels;
-    show_grid_labels: bool = false, get_show_grid_labels / set_show_grid_labels;
+    label_mode: i32 = 0, get_label_mode / set_label_mode;
+    show_lh_labels: bool = true, get_show_lh_labels / set_show_lh_labels;
+    show_loco_labels: bool = true, get_show_loco_labels / set_show_loco_labels;
+    show_axis_labels: bool = true, get_show_axis_labels / set_show_axis_labels;
+    show_grid_labels: bool = true, get_show_grid_labels / set_show_grid_labels;
     show_scene_overlay: bool = true, get_show_scene_overlay / set_show_scene_overlay;
 
     // Visualization tab: per-object visibility

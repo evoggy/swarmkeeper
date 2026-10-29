@@ -1,13 +1,13 @@
 import { VerticalBox, HorizontalBox, TabWidget, Palette, Button, LineEdit, ScrollView, ComboBox, CheckBox } from "std-widgets.slint";
 import { UnitsContent } from "units.slint";
-import { VisualizationContent, VizLabel } from "visualization.slint";
+import { VisualizationContent, VizLabel, UnitLabel, SceneTip, SceneLegend } from "visualization.slint";
 import { UnitData, UnitState, JournalEntryData, ConsoleLineData } from "unit-card.slint";
 import { RadioTestContent, ChannelResult } from "radio-test.slint";
 import { LocoContent, LocoAnchorStatus } from "loco.slint";
 import { LhBaseStationData } from "lh-coverage.slint";
 import { Tdoa3AnchorData } from "tdoa3-coverage.slint";
 import { LhWizardContent, WizardSampleData, WizardBsData } from "lh-wizard.slint";
-import { PlanningContent, PlanObstacleData, PlanPadData, PlanBoxVolumeData } from "planning.slint";
+import { PlanningContent, PlanObstacleData, PlanPadData, PlanBoxVolumeData, PlanCoverage } from "planning.slint";
 import { SnifferContent, SnifferAnchorRow, SnifferFeedRow, SnifferMatrixRow, SnifferSurveyRow } from "sniffer.slint";
 import { PlotBridge, PlotLine, AxisTick, LegendEntry, PlotNewConfigDialog } from "plot.slint";
 import { ViewSettings } from "view-settings.slint";
@@ -49,6 +49,8 @@ export component AppWindow inherits Window {
 
     // The Status screen, worked out in Rust (status.rs)
     in property <StatusData> status;
+    // The account or the connection changed: Status shows them too.
+    callback status-inputs-changed();
     // The chosen connection mode didn't work and Swarmkeeper fell back to direct.
     in property <bool> connection-problem;
 
@@ -72,6 +74,13 @@ export component AppWindow inherits Window {
     }
     changed theme-mode => { root.apply-theme(); }
     changed theme-dark => { Palette.color-scheme = Theme.dark ? ColorScheme.dark : ColorScheme.light; }
+    changed signed-in => { root.status-inputs-changed(); }
+    changed needs-sign-in => { root.status-inputs-changed(); }
+    changed account-text => { root.status-inputs-changed(); }
+    changed account-orgs => { root.status-inputs-changed(); }
+    changed connection-label => { root.status-inputs-changed(); }
+    changed connection-problem => { root.status-inputs-changed(); }
+    changed drives-radios => { root.status-inputs-changed(); }
     init => {
         root.system-dark = Palette.color-scheme == ColorScheme.dark;
         root.apply-theme();
@@ -106,7 +115,6 @@ export component AppWindow inherits Window {
     out property <float> cam-pan-y: viz-content.cam-pan-y;
 
     // Visualization label toggle states (read by Rust to know what to compute)
-    out property <bool> show-cf-labels: viz-content.show-cf-labels;
     out property <bool> show-lh-labels: viz-content.show-lh-labels;
     out property <bool> show-loco-labels: viz-content.show-loco-labels;
     out property <bool> show-axis-labels: viz-content.show-axis-labels;
@@ -123,7 +131,13 @@ export component AppWindow inherits Window {
     callback viz-unit-clicked(/* x */ float, /* y */ float);
 
     // Visualization label data (set by Rust)
-    in-out property <[VizLabel]> cf-labels;
+    in-out property <[UnitLabel]> unit-labels;
+    in-out property <SceneTip> viz-tip;
+    in-out property <SceneLegend> viz-legend;
+    // The unit under the pointer in the 3D view (sorted-units row, -1 none)
+    in-out property <int> viz-hover-unit: -1;
+    callback viz-hover(/* x */ float, /* y */ float);
+    callback viz-fit();
     in-out property <[VizLabel]> lh-labels;
     in-out property <[VizLabel]> loco-labels;
     in-out property <[VizLabel]> axis-labels;
@@ -285,6 +299,8 @@ export component AppWindow inherits Window {
     // The account on the server that shares swarms
     in-out property <string> account-label: "Sign in";
     in-out property <string> account-text;
+    // The organizations the account is in, by name, for Status.
+    in-out property <string> account-orgs;
     in-out property <bool> signed-in: false;
     in-out property <bool> needs-sign-in: true;
     in-out property <bool> sign-in-dialog-visible: false;
@@ -570,6 +586,18 @@ export component AppWindow inherits Window {
     in-out property <bool> planning-handle-active: false;
     in-out property <int> planning-active-handle: 0;
     in-out property <[VizLabel]> planning-grid-labels;
+    // Base stations and anchors by name, over the view
+    in-out property <[UnitLabel]> planning-marks;
+    in-out property <string> planning-scene-name <=> planning-content.scene-name;
+    in-out property <bool> planning-scene-dirty <=> planning-content.scene-dirty;
+    in-out property <int> planning-undo-count <=> planning-content.undo-count;
+    in-out property <PlanCoverage> planning-coverage <=> planning-content.coverage;
+    in-out property <bool> planning-coverage-stale <=> planning-content.coverage-stale;
+    in-out property <bool> planning-show-slice <=> planning-content.show-slice;
+    in-out property <float> planning-slice-z <=> planning-content.slice-z;
+    in-out property <int> planning-coverage-source <=> planning-content.coverage-source;
+    callback planning-select(int, int);
+    callback planning-save-scene-as();
     in-out property <string> planning-stats-text-1;
     in-out property <string> planning-stats-text-2;
     in-out property <string> planning-stats-text-3;
@@ -830,7 +858,11 @@ export component AppWindow inherits Window {
                     visible: root.screen == "view3d";
                     viz-content := VisualizationContent {
                         texture <=> root.viz-texture;
-                        cf-labels: root.cf-labels;
+                        unit-labels: root.unit-labels;
+                        tip: root.viz-tip;
+                        legend: root.viz-legend;
+                        hover(x, y) => { root.viz-hover(x, y); }
+                        fit => { root.viz-fit(); }
                         lh-labels: root.lh-labels;
                         loco-labels: root.loco-labels;
                         axis-labels: root.axis-labels;
@@ -904,6 +936,9 @@ export component AppWindow inherits Window {
                         handle-active <=> root.planning-handle-active;
                         active-handle <=> root.planning-active-handle;
                         grid-labels: root.planning-grid-labels;
+                        marks: root.planning-marks;
+                        select(kind, index) => { root.planning-select(kind, index); }
+                        save-scene-as => { root.planning-save-scene-as(); }
                         stats-text-1: root.planning-stats-text-1;
                         stats-text-2: root.planning-stats-text-2;
                         stats-text-3: root.planning-stats-text-3;

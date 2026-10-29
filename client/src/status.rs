@@ -289,6 +289,10 @@ pub(crate) fn rebuild(ui: &AppWindow, units: &[UnitData], rows: &[UnitRow], summ
 
     // Servers
     let drives = ui.get_drives_radios();
+    // The organizations, else the first line of the account text.
+    let account_text = ui.get_account_text();
+    let account_orgs = ui.get_account_orgs();
+    let account_detail = if account_orgs.is_empty() { account_text.split("\n\n").next().unwrap_or_default() } else { account_orgs.as_str() };
     data.servers = ModelRc::new(VecModel::from(vec![
         ServerRow {
             name: if drives { "This computer".into() } else { "Connection server".into() },
@@ -300,9 +304,9 @@ pub(crate) fn rebuild(ui: &AppWindow, units: &[UnitData], rows: &[UnitRow], summ
         ServerRow {
             name: "arc.bitcraze.io".into(),
             kind: "Shared swarms".into(),
-            state: if ui.get_signed_in() { "Signed in".into() } else { "Signed out".into() },
-            detail: ui.get_account_text(),
-            tone: if ui.get_signed_in() && !ui.get_needs_sign_in() { Health::Ready } else { Health::Off },
+            state: if ui.get_signed_in() && !ui.get_needs_sign_in() { "Signed in".into() } else if ui.get_signed_in() { "Sign in again".into() } else { "Signed out".into() },
+            detail: account_detail.into(),
+            tone: if ui.get_signed_in() && !ui.get_needs_sign_in() { Health::Ready } else if ui.get_signed_in() { Health::Warn } else { Health::Off },
         },
     ]));
 
