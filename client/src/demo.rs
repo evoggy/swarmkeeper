@@ -157,7 +157,31 @@ pub(crate) fn show(ui: &AppWindow, flying: bool) {
     ui.set_connection_label("This computer's Crazyradios, shared on port 7777".into());
     ui.set_signed_in(true);
     ui.set_needs_sign_in(false);
+    ui.set_account_label("Test Pilot".into());
+    ui.set_account_initials("TP".into());
     ui.set_account_text("Signed in as pilot@example.com".into());
+    let servers: Vec<slint::SharedString> = vec!["lab-pc:7777".into(), "arena-connection-server".into()];
+    ui.set_recent_servers(ModelRc::new(VecModel::from(servers)));
+    // Swarms to open (the top bar's swarm switcher)
+    let choice = |id: &str, name: &str, units, detail: &str, shared, current| crate::SwarmChoice {
+        id: id.into(),
+        name: name.into(),
+        units,
+        detail: detail.into(),
+        shared,
+        current,
+    };
+    ui.set_os_local(ModelRc::new(VecModel::from(vec![
+        choice("default", "49-unit swarm", 49, "swarms/default.yaml", false, true),
+        choice("fishtank", "Fishtank", 9, "swarms/fishtank.yaml", false, false),
+        choice("arena", "Arena demo", 25, "swarms/arena.yaml", false, false),
+    ])));
+    ui.set_os_shared(ModelRc::new(VecModel::from(vec![
+        choice("bitcraze/fishtank", "Fishtank", 9, "revision 12", true, false),
+        choice("bitcraze/arena", "Arena demo", 25, "revision 4", true, false),
+    ])));
+    ui.set_os_shared_title("Shared on arc.bitcraze.io".into());
+    ui.set_os_selected_id("fishtank".into());
     crate::status::seed_demo_traffic(4);
     rebuild_table_rows(ui);
     use crate::Health;

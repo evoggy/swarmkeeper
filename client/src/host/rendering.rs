@@ -434,7 +434,7 @@ pub(crate) fn draw_main_view(app: &AppWindow, renderer: &mut renderer::Scene3DRe
         match health.get(i).copied().unwrap_or(Health::Off) {
             Health::Ready => legend.ready += 1,
             Health::Flying => legend.flying += 1,
-            Health::Charging | Health::Charged => legend.charger += 1,
+            Health::Charging | Health::Charged => legend.charging += 1,
             Health::Warn => legend.warn += 1,
             Health::Fault => legend.fault += 1,
             Health::Off => {}

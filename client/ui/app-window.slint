@@ -46,6 +46,8 @@ export component AppWindow inherits Window {
     // The screen shown, by rail id: status, units, view3d, planning,
     // lighthouse, loco, radio, settings.
     in-out property <string> screen: "status";
+    // The section open on the Settings screen
+    in-out property <int> settings-section: 0;
 
     // The Status screen, worked out in Rust (status.rs)
     in property <StatusData> status;
@@ -293,11 +295,18 @@ export component AppWindow inherits Window {
     // Swarmkeeper drives this computer's Crazyradios (shared or direct mode):
     // the features that send raw radio packets need it
     in-out property <bool> drives-radios: true;
+    // Connection servers used before, the last one first (settings.rs)
+    in-out property <[string]> recent-servers;
     callback connection-chosen(string);
     callback connection-opened();
+    callback forget-server(string);
 
     // The account on the server that shares swarms
     in-out property <string> account-label: "Sign in";
+    // The initials of the name signed in, and the picture from GitHub or
+    // Google, for the avatar
+    in-out property <string> account-initials;
+    in-out property <image> account-picture;
     in-out property <string> account-text;
     // The organizations the account is in, by name, for Status.
     in-out property <string> account-orgs;
@@ -672,9 +681,12 @@ export component AppWindow inherits Window {
                 connection-label: root.connection-label;
                 connection-text: root.connection-text;
                 connection-mode: root.connection-mode;
+                recent-servers: root.recent-servers;
                 connection-chosen(mode) => { root.connection-chosen(mode); }
                 connection-opened => { root.connection-opened(); }
-                account-text: root.account-text;
+                account-name: root.account-label;
+                account-initials: root.account-initials;
+                account-picture: root.account-picture;
                 signed-in: root.signed-in;
                 needs-sign-in: root.needs-sign-in;
                 sign-in => {
@@ -682,11 +694,59 @@ export component AppWindow inherits Window {
                     sign-in-dialog-visible = true;
                 }
                 sign-out => { sign-out(); }
+                account-settings => {
+                    root.settings-section = 2;
+                    root.screen = "settings";
+                }
                 connect => { connect-swarm(); }
                 disconnect => { disconnect-swarm(); }
                 reconnect => { reconnect-swarm(); }
                 land-all => { land-swarm(); }
                 emergency-stop => { emergency-stop(); }
+
+                SwarmActionsButton {
+                    y: (parent.height - self.height) / 2;
+                    connected: root.swarm-connected;
+                    drives-radios: root.drives-radios;
+                    arm-all => { arm-swarm(); }
+                    disarm-all => { disarm-swarm(); }
+                    upload-trajectory => { upload-trajectory-swarm(); }
+                    fly-trajectory => { fly-trajectory-swarm(); }
+                    land-all => { land-swarm(); }
+                    sync-blink => { sync-blink(); }
+                    delayed-sync-blink => { delayed-sync-blink(); }
+                    health-test => {
+                        health-test-dialog-visible = true;
+                        run-health-test();
+                    }
+                    download-toc => { download-toc(); }
+                    clear-consoles => { clear-all-console(); }
+                    reboot => { reboot-swarm(); }
+                    sleep => { sysoff-swarm(); }
+                    wake-up => { syson-swarm(); }
+                    power-off => { confirm-power-off-visible = true; }
+                    flash-firmware => { flash-dialog-visible = true; }
+                    clear-tlv => { confirm-clear-tlv-visible = true; }
+                    rechannel => {
+                        rc-dialog-visible = true;
+                        rc-open();
+                    }
+                    upload-geometry => { upload-geometry(); }
+                    upload-params => { upload-params(); }
+                    set-parameter => {
+                        set-param-selected-name = "";
+                        set-param-selected-type = "";
+                        set-param-search-text = "";
+                        set-param-value-text = "";
+                        set-param-persist = false;
+                        swarm-params = [];
+                        swarm-params-all = [];
+                        set-param-loading = true;
+                        set-param-dialog-visible = true;
+                        refresh-swarm-params();
+                    }
+                    tuning => { tuning-dialog-visible = true; }
+                }
             }
 
             screens := Rectangle {
@@ -720,9 +780,15 @@ export component AppWindow inherits Window {
 
                 SettingsScreen {
                     visible: root.screen == "settings";
+                    section <=> root.settings-section;
                     connection-mode: root.connection-mode;
                     connection-text: root.connection-text;
+                    recent-servers: root.recent-servers;
                     connection-chosen(mode) => { root.connection-chosen(mode); }
+                    forget-server(server) => { root.forget-server(server); }
+                    account-name: root.account-label;
+                    account-initials: root.account-initials;
+                    account-picture: root.account-picture;
                     signed-in: root.signed-in;
                     needs-sign-in: root.needs-sign-in;
                     account-text: root.account-text;
@@ -743,55 +809,9 @@ export component AppWindow inherits Window {
                     padding-bottom: 24px;
                     spacing: 16px;
 
-                    HorizontalLayout {
-                        spacing: 8px;
-                        ScreenTitle {
-                            text: "Units";
-                            note: root.connected-count + " of " + root.units.length + " connected";
-                        }
-                        Rectangle { horizontal-stretch: 1; }
-                        SwarmActionsButton {
-                            connected: root.swarm-connected;
-                            drives-radios: root.drives-radios;
-                            arm-all => { arm-swarm(); }
-                            disarm-all => { disarm-swarm(); }
-                            upload-trajectory => { upload-trajectory-swarm(); }
-                            fly-trajectory => { fly-trajectory-swarm(); }
-                            land-all => { land-swarm(); }
-                            sync-blink => { sync-blink(); }
-                            delayed-sync-blink => { delayed-sync-blink(); }
-                            health-test => {
-                                health-test-dialog-visible = true;
-                                run-health-test();
-                            }
-                            download-toc => { download-toc(); }
-                            clear-consoles => { clear-all-console(); }
-                            reboot => { reboot-swarm(); }
-                            sleep => { sysoff-swarm(); }
-                            wake-up => { syson-swarm(); }
-                            power-off => { confirm-power-off-visible = true; }
-                            flash-firmware => { flash-dialog-visible = true; }
-                            clear-tlv => { confirm-clear-tlv-visible = true; }
-                            rechannel => {
-                                rc-dialog-visible = true;
-                                rc-open();
-                            }
-                            upload-geometry => { upload-geometry(); }
-                            upload-params => { upload-params(); }
-                            set-parameter => {
-                                set-param-selected-name = "";
-                                set-param-selected-type = "";
-                                set-param-search-text = "";
-                                set-param-value-text = "";
-                                set-param-persist = false;
-                                swarm-params = [];
-                                swarm-params-all = [];
-                                set-param-loading = true;
-                                set-param-dialog-visible = true;
-                                refresh-swarm-params();
-                            }
-                            tuning => { tuning-dialog-visible = true; }
-                        }
+                    ScreenTitle {
+                        text: "Units";
+                        note: root.connected-count + " of " + root.units.length + " connected";
                     }
 
                     units-content := UnitsContent {
@@ -830,8 +850,6 @@ export component AppWindow inherits Window {
                         go-home-requested(row) => { hlc-go-home(row); }
                         land-requested(row) => { hlc-land(row); }
                         identify-requested(row) => { identify-unit(row); }
-                        connect-unit-requested(row) => { connect-unit(row); }
-                        disconnect-unit-requested(row) => { disconnect-unit(row); }
                         delete-journal-entry-requested(row, entry-idx) => { delete-journal-entry(row, entry-idx); }
                         row-selected(row) => { unit-row-selected(row); }
                         joystick-names: root.joystick-names;
@@ -906,7 +924,6 @@ export component AppWindow inherits Window {
                         land-requested(row) => { hlc-land(row); }
                         identify-requested(row) => { identify-unit(row); }
                         connect-unit-requested(row) => { connect-unit(row); }
-                        disconnect-unit-requested(row) => { disconnect-unit(row); }
                         delete-journal-entry-requested(row, entry-idx) => { delete-journal-entry(row, entry-idx); }
                         open-manual-control-requested(row) => { open-manual-control(row); }
                         joystick-selected(row, idx) => { start-manual-control(row, idx); }

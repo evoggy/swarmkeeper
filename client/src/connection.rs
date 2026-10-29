@@ -38,6 +38,9 @@ pub const DEFAULT_MODE: &str = "auto";
 /// of connect retries, with no window.
 const OPEN_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// How many connection servers the settings remember.
+const RECENT_SERVERS: usize = 8;
+
 /// The connection, replaced when the user picks another mode.
 pub type SharedConnection = Arc<RwLock<Connection>>;
 
@@ -132,6 +135,25 @@ impl Connection {
     }
 }
 
+/// Whether `mode` is a connection server on another computer (`host`,
+/// `host:port` or a URL) rather than one of the named modes.
+pub fn is_remote(mode: &str) -> bool {
+    !matches!(mode, "auto" | "shared" | "direct" | "local" | "")
+}
+
+/// Put `server` first in the connection servers used before.
+pub fn remember_server(recent: &mut Vec<String>, server: &str) {
+    recent.retain(|s| s != server);
+    recent.insert(0, server.to_string());
+    recent.truncate(RECENT_SERVERS);
+}
+
+/// Show the connection servers used before.
+pub fn show_recent(ui: &AppWindow, recent: &[String]) {
+    let servers: Vec<slint::SharedString> = recent.iter().map(|s| s.as_str().into()).collect();
+    ui.set_recent_servers(slint::ModelRc::new(slint::VecModel::from(servers)));
+}
+
 /// Show the connection in the menu bar.
 pub fn show(ui: &AppWindow, connection: &Connection, others: &str) {
     ui.set_connection_label(connection.label().into());
@@ -165,4 +187,24 @@ pub async fn others(connection: &Connection) -> String {
 /// `lab-pc:7777` from `ws://lab-pc:7777/`.
 fn server_host(url: &str) -> &str {
     url.trim_start_matches("ws://").trim_start_matches("wss://").trim_end_matches('/')
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn recent_servers_last_first_without_repeats() {
+        let mut recent = Vec::new();
+        for server in ["a:7777", "b", "a:7777", "c"] {
+            remember_server(&mut recent, server);
+        }
+        assert_eq!(recent, ["c", "a:7777", "b"]);
+        for i in 0..20 {
+            remember_server(&mut recent, &format!("host{}", i));
+        }
+        assert_eq!(recent.len(), RECENT_SERVERS);
+        assert_eq!(recent[0], "host19");
+        assert!(is_remote("lab-pc:7777") && !is_remote("local") && !is_remote("auto"));
+    }
 }

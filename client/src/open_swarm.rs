@@ -235,6 +235,8 @@ fn refresh_account(ctx: &Ctx) {
             ui.set_account_label("Sign in".into());
             ui.set_account_text("Not signed in. Sign in to open the swarms shared in your organizations.".into());
             ui.set_account_orgs("".into());
+            ui.set_account_initials("".into());
+            ui.set_account_picture(slint::Image::default());
             ui.set_signed_in(false);
             ui.set_needs_sign_in(true);
             ui.set_os_shared_title("Shared".into());
@@ -273,11 +275,20 @@ fn refresh_account(ctx: &Ctx) {
                     "Signed in to {} as {}.\n\n{}\n\nSwarmkeeper's key is '{}'; you can revoke it at {}/keys.",
                     host, user.name, orgs, credentials.key_name, credentials.server
                 );
+                let avatar_url = user.avatar_url.clone();
                 ctx.ui(move |ui| {
+                    ui.set_account_initials(initials(&user.name).into());
                     ui.set_account_label(user.name.into());
                     ui.set_account_text(text.into());
                     ui.set_account_orgs(org_names.into());
                 });
+                // The picture, when there is one; the initials until then
+                if let Some(url) = avatar_url {
+                    match account::avatar(&url).await {
+                        Ok(pixels) => ctx.ui(move |ui| ui.set_account_picture(slint::Image::from_rgba8(pixels))),
+                        Err(e) => eprintln!("No account picture: {:#}", e),
+                    }
+                }
             }
             Err(e) if e.downcast_ref::<KeyRejected>().is_some() => {
                 let text = format!("{}.", explain(&e).0);
@@ -286,6 +297,7 @@ fn refresh_account(ctx: &Ctx) {
                     ui.set_account_text(text.into());
                     ui.set_needs_sign_in(true);
                     ui.set_account_orgs("".into());
+                    ui.set_account_picture(slint::Image::default());
                 });
             }
             Err(e) => {
@@ -295,6 +307,19 @@ fn refresh_account(ctx: &Ctx) {
             }
         }
     });
+}
+
+/// The initials of a name for the avatar: the first letters of its first and
+/// last words: "AL" for "Ada Lovelace", "A" for "ada".
+fn initials(name: &str) -> String {
+    let words: Vec<&str> = name.split_whitespace().collect();
+    let first = |word: &&str| word.chars().next();
+    let letters = match words.as_slice() {
+        [] => Vec::new(),
+        [only] => vec![first(only)],
+        [head, .., tail] => vec![first(head), first(tail)],
+    };
+    letters.into_iter().flatten().flat_map(char::to_uppercase).collect()
 }
 
 /// The server no longer takes the key: show it in the account menu.
@@ -823,4 +848,17 @@ pub fn setup(
     }
 
     host::spawn(watch(ctx));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::initials;
+
+    #[test]
+    fn initials_of_first_and_last_word() {
+        assert_eq!(initials("Ada Lovelace"), "AL");
+        assert_eq!(initials("Ada King Lovelace"), "AL");
+        assert_eq!(initials("ada"), "A");
+        assert_eq!(initials("  "), "");
+    }
 }

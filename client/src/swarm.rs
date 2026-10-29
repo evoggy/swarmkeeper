@@ -448,7 +448,27 @@ pub(crate) async fn setup(ui: &AppWindow, cx: &AppContext) {
         let ui_weak = ui.as_weak();
         let shown = connection.read().await;
         connection::show(&ui, &shown, "");
+        // The servers used before, with the one in use first when it answered
+        let mut settings: AppSettings = host::store::load();
+        if shown.problem.is_none() && connection::is_remote(&shown.mode) && settings.recent_servers.first() != Some(&shown.mode) {
+            connection::remember_server(&mut settings.recent_servers, &shown.mode);
+            if let Err(e) = host::store::save(&settings) {
+                eprintln!("Failed to save settings: {}", e);
+            }
+        }
+        connection::show_recent(&ui, &settings.recent_servers);
         drop(shown);
+
+        ui.on_forget_server(move |server| {
+            let Some(ui) = ui_weak.upgrade() else { return };
+            let mut settings: AppSettings = host::store::load();
+            settings.recent_servers.retain(|s| s.as_str() != server.as_str());
+            if let Err(e) = host::store::save(&settings) {
+                eprintln!("Failed to save settings: {}", e);
+            }
+            connection::show_recent(&ui, &settings.recent_servers);
+        });
+        let ui_weak = ui.as_weak();
 
         // List the other programs when the menu opens.
         let opened = connection.clone();
@@ -521,9 +541,14 @@ pub(crate) async fn setup(ui: &AppWindow, cx: &AppContext) {
                     ));
                     let mut settings: AppSettings = host::store::load();
                     settings.connection = (mode != connection::DEFAULT_MODE).then(|| mode.clone());
+                    // Only a server that answered: not a typo
+                    if connection.problem.is_none() && connection::is_remote(&mode) {
+                        connection::remember_server(&mut settings.recent_servers, &mode);
+                    }
                     if let Err(e) = host::store::save(&settings) {
                         eprintln!("Failed to save settings: {}", e);
                     }
+                    let recent = settings.recent_servers;
                     let (label, text, mode) = (connection.label(), connection.description(), connection.mode.clone());
                     let drives_radios = connection.drives_radios();
                     let ui_weak = ui_weak.clone();
@@ -534,6 +559,7 @@ pub(crate) async fn setup(ui: &AppWindow, cx: &AppContext) {
                             ui.set_connection_mode(mode.into());
                             ui.set_drives_radios(drives_radios);
                             ui.set_swarm_connected(false);
+                            connection::show_recent(&ui, &recent);
                         }
                     })
                     .ok();

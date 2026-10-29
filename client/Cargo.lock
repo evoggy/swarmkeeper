@@ -5850,6 +5850,7 @@ dependencies = [
  "gilrs",
  "glow 0.16.0",
  "glutin",
+ "image",
  "levenberg-marquardt",
  "nalgebra",
  "open",

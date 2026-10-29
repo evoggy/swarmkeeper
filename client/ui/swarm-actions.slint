@@ -56,14 +56,14 @@ export component SwarmActionsButton inherits KButton {
                     if Features.trajectories: MenuRow { text: "Upload trajectory…"; icon: Icons.upload; enabled: root.connected; clicked => { root.upload-trajectory(); menu.close(); } }
                     if Features.trajectories: MenuRow { text: "Fly trajectory"; icon: Icons.play; enabled: root.connected; clicked => { root.fly-trajectory(); menu.close(); } }
                     MenuRow { text: "Land all"; icon: Icons.land; enabled: root.connected; clicked => { root.land-all(); menu.close(); } }
-                    MenuRow {
+                    if Features.swarmkeeper-app: MenuRow {
                         text: "Sync blink";
                         hint: root.drives-radios ? "" : "own radios only";
                         icon: Icons.identify;
                         enabled: root.drives-radios;
                         clicked => { root.sync-blink(); menu.close(); }
                     }
-                    MenuRow {
+                    if Features.swarmkeeper-app: MenuRow {
                         text: "Delayed sync blink";
                         hint: root.drives-radios ? "" : "own radios only";
                         enabled: root.drives-radios;
@@ -72,7 +72,14 @@ export component SwarmActionsButton inherits KButton {
                     MenuSeparator {}
                     MenuGroupTitle { text: "DIAGNOSTICS"; }
                     MenuRow { text: "Health test…"; icon: Icons.check-circle; enabled: root.connected; clicked => { root.health-test(); menu.close(); } }
-                    if Features.developer: MenuRow { text: "Download TOC"; icon: Icons.download; clicked => { root.download-toc(); menu.close(); } }
+                    // Connects every unit and disconnects it again, so not while connected
+                    if Features.developer: MenuRow {
+                        text: "Download TOC";
+                        hint: root.connected ? "disconnect first" : "";
+                        icon: Icons.download;
+                        enabled: !root.connected;
+                        clicked => { root.download-toc(); menu.close(); }
+                    }
                     MenuRow { text: "Clear all consoles"; icon: Icons.console; clicked => { root.clear-consoles(); menu.close(); } }
                 }
 
@@ -85,10 +92,11 @@ export component SwarmActionsButton inherits KButton {
                     alignment: start;
                     width: 251px;
                     MenuGroupTitle { text: "POWER AND SYSTEM"; }
-                    MenuRow { text: "Reboot"; icon: Icons.reconnect; enabled: root.connected; clicked => { root.reboot(); menu.close(); } }
-                    MenuRow { text: "Sleep"; icon: Icons.sleep; enabled: root.connected; clicked => { root.sleep(); menu.close(); } }
-                    MenuRow { text: "Wake up"; icon: Icons.sun; enabled: root.connected; clicked => { root.wake-up(); menu.close(); } }
-                    MenuRow { text: "Power off…"; icon: Icons.power; danger: true; enabled: root.connected; clicked => { root.power-off(); menu.close(); } }
+                    // These reach each unit by its address, connected or not
+                    MenuRow { text: "Reboot"; icon: Icons.reconnect; clicked => { root.reboot(); menu.close(); } }
+                    MenuRow { text: "Sleep"; icon: Icons.sleep; clicked => { root.sleep(); menu.close(); } }
+                    MenuRow { text: "Wake up"; icon: Icons.sun; clicked => { root.wake-up(); menu.close(); } }
+                    MenuRow { text: "Power off…"; icon: Icons.power; danger: true; clicked => { root.power-off(); menu.close(); } }
                     if Features.flashing: MenuRow { text: "Flash firmware…"; icon: Icons.chip; clicked => { root.flash-firmware(); menu.close(); } }
                     if Features.developer: MenuRow { text: "Clear TLV storage…"; icon: Icons.trash; danger: true; clicked => { root.clear-tlv(); menu.close(); } }
                     MenuSeparator {}

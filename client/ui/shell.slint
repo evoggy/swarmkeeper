@@ -1,8 +1,8 @@
 // The frame around every screen: the icon rail on the left and the top bar
-// with the swarm, the connection and the safety buttons.
+// with the swarm, the connection, the swarm actions and the safety buttons.
 
 import { LineEdit } from "std-widgets.slint";
-import { Theme, Icons, Icon, KButton, ButtonKind, IconButton, Dot, Pill, VSeparator, MenuPanel, MenuRow, MenuSeparator, MenuGroupTitle } from "kit.slint";
+import { Theme, Icons, Icon, KButton, ButtonKind, IconButton, Dot, Pill, VSeparator, MenuPanel, MenuRow, MenuSeparator, MenuGroupTitle, Avatar } from "kit.slint";
 
 export struct RailEntry {
     id: string,
@@ -134,15 +134,20 @@ export component TopBar inherits Rectangle {
     in property <string> connection-label;
     in property <string> connection-text;
     in property <string> connection-mode;
+    // Connection servers used before, the last one first
+    in property <[string]> recent-servers;
     callback connection-chosen(string);
     callback connection-opened();
 
     // Account on arc.bitcraze.io
-    in property <string> account-text;
+    in property <string> account-name;
+    in property <string> account-initials;
+    in property <image> account-picture;
     in property <bool> signed-in;
     in property <bool> needs-sign-in;
     callback sign-in();
     callback sign-out();
+    callback account-settings();
 
     callback connect();
     callback disconnect();
@@ -285,6 +290,8 @@ export component TopBar inherits Rectangle {
                 enabled: root.unit-count > 0;
                 clicked => { root.connect(); }
             }
+            // Swarm actions
+            @children
             VSeparator { y: (parent.height - self.height) / 2; }
             KButton {
                 y: (parent.height - self.height) / 2;
@@ -304,13 +311,10 @@ export component TopBar inherits Rectangle {
                 y: (parent.height - self.height) / 2;
                 width: 36px;
                 height: 36px;
-                border-radius: 18px;
-                background: account-touch.has-hover ? Theme.hover : Theme.surface2;
-                border-width: 1px;
-                border-color: Theme.border;
-                Icon {
-                    source: Icons.user;
-                    color: Theme.text2;
+                Avatar {
+                    initials: root.signed-in && !root.needs-sign-in ? root.account-initials : "";
+                    picture: root.account-picture;
+                    opacity: account-touch.has-hover ? 0.85 : 1.0;
                 }
                 if root.signed-in && root.needs-sign-in: Rectangle {
                     x: parent.width - 9px;
@@ -424,37 +428,56 @@ export component TopBar inherits Rectangle {
                         clicked => { root.connection-chosen(remote-address.text); connection-popup.close(); }
                     }
                 }
+                if root.recent-servers.length > 0: MenuGroupTitle { text: "RECENT SERVERS"; }
+                for server in root.recent-servers: MenuRow {
+                    text: server;
+                    icon: Icons.server;
+                    checked: root.connection-mode == server;
+                    clicked => { root.connection-chosen(server); connection-popup.close(); }
+                }
             }
         }
     }
 
     account-popup := PopupWindow {
-        x: root.width - 320px - 20px;
+        x: root.width - 280px - 20px;
         y: root.height - 4px;
-        width: 320px;
+        width: 280px;
 
         MenuPanel {
-            width: 320px;
+            width: 280px;
             height: account-menu.preferred-height;
 
             account-menu := VerticalLayout {
                 padding: 6px;
 
-                VerticalLayout {
+                HorizontalLayout {
                     padding: 8px;
                     padding-bottom: 10px;
-                    spacing: 4px;
-                    Text {
-                        text: "arc.bitcraze.io";
-                        font-size: 13px;
-                        font-weight: 600;
-                        color: Theme.text;
+                    spacing: 10px;
+                    Avatar {
+                        y: (parent.height - self.height) / 2;
+                        size: 40px;
+                        initials: root.signed-in && !root.needs-sign-in ? root.account-initials : "";
+                        picture: root.account-picture;
                     }
-                    Text {
-                        text: root.account-text;
-                        font-size: Theme.font-small;
-                        color: Theme.text2;
-                        wrap: word-wrap;
+                    VerticalLayout {
+                        alignment: center;
+                        spacing: 2px;
+                        Text {
+                            text: !root.signed-in ? "Not signed in"
+                                : root.needs-sign-in ? "Sign in again" : root.account-name;
+                            font-size: 13px;
+                            font-weight: 600;
+                            color: Theme.text;
+                            overflow: elide;
+                        }
+                        Text {
+                            text: "arc.bitcraze.io";
+                            font-size: Theme.font-small;
+                            color: Theme.text3;
+                            overflow: elide;
+                        }
                     }
                 }
                 MenuSeparator {}
@@ -464,6 +487,11 @@ export component TopBar inherits Rectangle {
                     // Call before closing: closing drops the popup, and with it
                     // this conditional item's way back to the top bar.
                     clicked => { root.sign-in(); account-popup.close(); }
+                }
+                MenuRow {
+                    text: "Account settings";
+                    icon: Icons.settings;
+                    clicked => { root.account-settings(); account-popup.close(); }
                 }
                 if root.signed-in: MenuRow {
                     text: "Sign out";

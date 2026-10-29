@@ -139,6 +139,9 @@ pub fn host(server: &str) -> &str {
 #[derive(Debug, Clone, Deserialize)]
 pub struct UserInfo {
     pub name: String,
+    /// The picture from GitHub or Google. Servers before it was added don't send it.
+    #[serde(default)]
+    pub avatar_url: Option<String>,
     pub orgs: Vec<OrgInfo>,
 }
 
@@ -164,6 +167,27 @@ pub async fn whoami(credentials: &Credentials) -> Result<UserInfo> {
         bail!(KeyRejected { host: host(server).to_string(), key_name: credentials.key_name.clone() });
     }
     answer(server, response).await
+}
+
+/// The side of the avatar picture, in pixels: twice the largest avatar
+/// shown, for screens that scale by two.
+const AVATAR_SIZE: u32 = 96;
+
+/// The user's picture, scaled down for the avatar.
+pub async fn avatar(url: &str) -> Result<slint::SharedPixelBuffer<slint::Rgba8Pixel>> {
+    let bytes = http(Duration::from_secs(15))?
+        .get(url)
+        .send()
+        .await
+        .and_then(|response| response.error_for_status())
+        .with_context(|| format!("can't fetch {}", url))?
+        .bytes()
+        .await?;
+    let picture = image::load_from_memory(&bytes)
+        .with_context(|| format!("{} is not a picture", url))?
+        .resize_to_fill(AVATAR_SIZE, AVATAR_SIZE, image::imageops::FilterType::Triangle)
+        .to_rgba8();
+    Ok(slint::SharedPixelBuffer::clone_from_slice(picture.as_raw(), picture.width(), picture.height()))
 }
 
 /// Revoke the key on the server. A key that is already revoked is fine.

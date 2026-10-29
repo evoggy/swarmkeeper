@@ -18,11 +18,14 @@ export global ViewSettings {
     // Shorter unit rows without the address line.
     in-out property <bool> compact-rows: false;
     changed compact-rows => { save(); }
-    // 3D view: the selected unit docked as the full panel, and the legend.
+    // 3D view: the selected unit docked as the full panel, the legend, and
+    // where the geometry and the scene come from.
     in-out property <bool> unit-docked: false;
     changed unit-docked => { save(); }
     in-out property <bool> show-legend: true;
     changed show-legend => { save(); }
+    in-out property <bool> show-scene-source: true;
+    changed show-scene-source => { save(); }
     // The unit panel's tab
     in-out property <int> unit-tab: 0;
     changed unit-tab => { save(); }

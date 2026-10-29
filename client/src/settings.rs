@@ -21,6 +21,9 @@ pub(crate) struct AppSettings {
     /// How to reach the Crazyflies (see `connection`); None is the default, auto.
     #[serde(default)]
     pub(crate) connection: Option<String>,
+    /// Connection servers used before, the last one first.
+    #[serde(default)]
+    pub(crate) recent_servers: Vec<String>,
     /// Theme: 0 follows the system, 1 light, 2 dark.
     #[serde(default)]
     pub(crate) appearance: i32,
@@ -126,9 +129,10 @@ view_state! {
     // Units table
     compact_rows: bool = false, get_compact_rows / set_compact_rows;
 
-    // 3D view: docked unit panel, legend
+    // 3D view: docked unit panel, legend, geometry and scene
     unit_docked: bool = false, get_unit_docked / set_unit_docked;
     show_legend: bool = true, get_show_legend / set_show_legend;
+    show_scene_source: bool = true, get_show_scene_source / set_show_scene_source;
     unit_tab: i32 = 0, get_unit_tab / set_unit_tab;
 
     // Unit sidebar: goto
@@ -261,8 +265,12 @@ pub(crate) struct FeatureSettings {
     pub(crate) planning: bool,
     pub(crate) trajectories: bool,
     pub(crate) manual_control: bool,
+    /// Notes per unit
+    pub(crate) journal: bool,
     pub(crate) flashing: bool,
     pub(crate) developer: bool,
+    /// What needs the Swarmkeeper app in the Crazyflie firmware
+    pub(crate) swarmkeeper_app: bool,
 }
 
 impl Default for FeatureSettings {
@@ -274,8 +282,10 @@ impl Default for FeatureSettings {
             planning: true,
             trajectories: true,
             manual_control: true,
+            journal: false,
             flashing: true,
             developer: true,
+            swarmkeeper_app: false,
         }
     }
 }
@@ -290,8 +300,10 @@ pub(crate) fn show(ui: &AppWindow, settings: &AppSettings) {
     bridge.set_planning(f.planning);
     bridge.set_trajectories(f.trajectories);
     bridge.set_manual_control(f.manual_control);
+    bridge.set_journal(f.journal);
     bridge.set_flashing(f.flashing);
     bridge.set_developer(f.developer);
+    bridge.set_swarmkeeper_app(f.swarmkeeper_app);
     bridge.set_data_folder(host::env::data_dir().display().to_string().into());
     bridge.set_version(env!("CARGO_PKG_VERSION").into());
     ui.global::<Theme>().set_mode(settings.appearance);
@@ -316,8 +328,10 @@ pub(crate) fn apply_features(ui: &AppWindow) {
     features.set_planning(bridge.get_planning());
     features.set_trajectories(bridge.get_trajectories());
     features.set_manual_control(bridge.get_manual_control());
+    features.set_journal(bridge.get_journal());
     features.set_flashing(bridge.get_flashing());
     features.set_developer(bridge.get_developer());
+    features.set_swarmkeeper_app(bridge.get_swarmkeeper_app());
 }
 
 pub(crate) fn setup(ui: &AppWindow, cx: &AppContext) {
@@ -337,8 +351,10 @@ pub(crate) fn setup(ui: &AppWindow, cx: &AppContext) {
                 planning: bridge.get_planning(),
                 trajectories: bridge.get_trajectories(),
                 manual_control: bridge.get_manual_control(),
+                journal: bridge.get_journal(),
                 flashing: bridge.get_flashing(),
                 developer: bridge.get_developer(),
+                swarmkeeper_app: bridge.get_swarmkeeper_app(),
             };
             if let Err(e) = host::store::save(&settings) {
                 eprintln!("Saving the settings: {}", e);

@@ -33,9 +33,11 @@ export struct SceneTip {
 
 // What the 3D view shows, counted for the legend
 export struct SceneLegend {
+    // On battery, nothing to fix
     ready: int,
     flying: int,
-    charger: int,
+    // On a charger, charging or charged
+    charging: int,
     warn: int,
     fault: int,
     // Units without a position: not connected
@@ -280,7 +282,6 @@ export component VisualizationContent inherits Rectangle {
     callback land-requested(/* row index */ int);
     callback identify-requested(/* row index */ int);
     callback connect-unit-requested(/* row index */ int);
-    callback disconnect-unit-requested(/* row index */ int);
     callback delete-journal-entry-requested(/* row index */ int, /* entry index */ int);
     callback open-manual-control-requested(/* row index */ int);
     callback joystick-selected(/* row index */ int, /* joystick index */ int);
@@ -539,14 +540,16 @@ export component VisualizationContent inherits Rectangle {
                 }
             }
             for item in [
-                { label: root.legend.flying > 0 ? "Flying" : "Connected", tint: root.legend.flying > 0 ? Theme.flying : Theme.good, n: root.legend.flying + root.legend.ready, hollow: false },
-                { label: "On a charger", tint: Theme.text3, n: root.legend.charger, hollow: true },
-                { label: "Warning", tint: Theme.warn, n: root.legend.warn, hollow: false },
-                { label: "Fault", tint: Theme.crit, n: root.legend.fault, hollow: false },
+                { label: "Flying", tint: Theme.flying, n: root.legend.flying, hollow: false, shown: root.legend.flying > 0 },
+                { label: "On battery", tint: Theme.good, n: root.legend.ready, hollow: false, shown: true },
+                { label: "Charging", tint: Theme.text3, n: root.legend.charging, hollow: true, shown: true },
+                { label: "Warning", tint: Theme.warn, n: root.legend.warn, hollow: false, shown: true },
+                { label: "Fault", tint: Theme.crit, n: root.legend.fault, hollow: false, shown: true },
             ]: HorizontalLayout {
                 padding-left: 4px;
                 padding-right: 4px;
-                height: 24px;
+                visible: item.shown;
+                height: item.shown ? 24px : 0px;
                 spacing: 8px;
                 Rectangle {
                     y: (parent.height - self.height) / 2;
@@ -670,8 +673,8 @@ export component VisualizationContent inherits Rectangle {
     }
 
     // What the scene's base stations and anchors are read from, and the
-    // scene file, bottom left
-    Float {
+    // scene file, bottom left (Layers › Geometry and scene)
+    if ViewSettings.show-scene-source: Float {
         x: 16px;
         y: parent.height - self.height - 16px;
         width: 264px;
@@ -871,6 +874,7 @@ export component VisualizationContent inherits Rectangle {
                         LayerRow { text: "Obstacles"; checked <=> root.show-obstacles; enabled: root.show-scene-overlay; }
                         LayerTitle { text: "ON SCREEN"; }
                         LayerRow { text: "Legend"; checked <=> ViewSettings.show-legend; }
+                        LayerRow { text: "Geometry and scene"; checked <=> ViewSettings.show-scene-source; }
                     }
                 }
                 Rectangle { height: 1px; background: Theme.border; }
@@ -1133,8 +1137,6 @@ export component VisualizationContent inherits Rectangle {
             arm-clicked(arm) => { arm-requested(selected-unit, arm); }
             identify-clicked => { identify-requested(selected-unit); }
             manual-control-clicked => { open-manual-control-requested(selected-unit); manual-control-open = true; }
-            connect-clicked => { connect-unit-requested(selected-unit); }
-            disconnect-clicked => { disconnect-unit-requested(selected-unit); }
             recover-clicked => { recover-requested(selected-unit); }
             reboot-clicked => { reboot-requested(selected-unit); }
             power-off-clicked => { confirm-power-off-open = true; }

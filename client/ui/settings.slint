@@ -1,8 +1,9 @@
 // The Settings screen: which features are shown, how the Crazyflies are
 // reached, the account, the look, flight defaults and the data folder.
+// The sections on the left; the one chosen on the right, under its title.
 
-import { LineEdit, ScrollView } from "std-widgets.slint";
-import { Theme, Icons, Icon, Card, KButton, ButtonKind, Segmented, Switch, Dot, ScreenTitle } from "kit.slint";
+import { ScrollView } from "std-widgets.slint";
+import { Theme, Icons, Icon, Card, KButton, ButtonKind, IconButton, Segmented, Switch, TextField, Avatar } from "kit.slint";
 import { ViewSettings } from "view-settings.slint";
 
 // Settings kept between runs, read and written by Rust (settings.rs).
@@ -14,8 +15,10 @@ export global SettingsBridge {
     in-out property <bool> planning: true;
     in-out property <bool> trajectories: true;
     in-out property <bool> manual-control: true;
+    in-out property <bool> journal: false;
     in-out property <bool> flashing: true;
     in-out property <bool> developer: true;
+    in-out property <bool> swarmkeeper-app: false;
 
     // Whether a connected unit has the deck, for the Automatic hint.
     in property <int> lighthouse-units;
@@ -105,17 +108,38 @@ component SettingRow inherits Rectangle {
     }
 }
 
+// The title of the section shown, over its cards.
+component PageHeader inherits VerticalLayout {
+    in property <string> title;
+    in property <string> note;
+    spacing: 6px;
+    padding-bottom: 4px;
+    Text {
+        text: root.title;
+        font-size: 22px;
+        font-weight: 600;
+        color: Theme.text;
+    }
+    if root.note != "": Text {
+        text: root.note;
+        font-size: 13.5px;
+        color: Theme.text2;
+        wrap: word-wrap;
+    }
+}
+
+// A card of settings, with an optional title of its own.
 component SectionCard inherits Card {
     in property <string> title;
     in property <string> note;
     height: section-layout.preferred-height;
     section-layout := VerticalLayout {
-        VerticalLayout {
+        if root.title != "": VerticalLayout {
             padding-left: 20px;
             padding-right: 20px;
             padding-top: 16px;
             padding-bottom: 12px;
-            spacing: 2px;
+            spacing: 3px;
             Text {
                 text: root.title;
                 font-size: 14px;
@@ -129,7 +153,7 @@ component SectionCard inherits Card {
                 wrap: word-wrap;
             }
         }
-        Rectangle {
+        if root.title != "": Rectangle {
             height: 1px;
             background: Theme.border;
         }
@@ -146,19 +170,26 @@ component FeatureSwitch inherits SettingRow {
 }
 
 export component SettingsScreen inherits Rectangle {
+    in-out property <int> section: 0;
     // Connection
     in property <string> connection-mode;
     in property <string> connection-text;
+    in property <[string]> recent-servers;
     callback connection-chosen(string);
+    callback forget-server(string);
     // Account
     in property <bool> signed-in;
     in property <bool> needs-sign-in;
+    in property <string> account-name;
+    in property <string> account-initials;
+    in property <image> account-picture;
     in property <string> account-text;
     callback sign-in();
     callback sign-out();
     callback clear-consoles();
 
-    property <int> section: 0;
+    property <bool> remote-mode: root.connection-mode != "auto" && root.connection-mode != "shared"
+        && root.connection-mode != "direct" && root.connection-mode != "local";
     property <[{ text: string, icon: image }]> sections: [
         { text: "Features", icon: Icons.features },
         { text: "Connection", icon: Icons.radio },
@@ -170,40 +201,67 @@ export component SettingsScreen inherits Rectangle {
     ];
 
     HorizontalLayout {
-        padding-left: 24px;
-        padding-right: 24px;
-        padding-top: 20px;
-        padding-bottom: 24px;
-        spacing: 24px;
-
-        VerticalLayout {
-            width: 220px;
-            spacing: 4px;
-            alignment: start;
-            ScreenTitle {
-                text: "Settings";
-                note: "";
+        // The sections
+        Rectangle {
+            width: 240px;
+            background: Theme.surface;
+            Rectangle {
+                x: parent.width - 1px;
+                width: 1px;
+                background: Theme.border;
             }
-            Rectangle { height: 12px; }
-            for item[i] in root.sections: SectionItem {
-                text: item.text;
-                icon: item.icon;
-                on: root.section == i;
-                clicked => { root.section = i; }
+            VerticalLayout {
+                padding-left: 12px;
+                padding-right: 12px;
+                padding-top: 20px;
+                padding-bottom: 16px;
+                spacing: 2px;
+                HorizontalLayout {
+                    padding-left: 8px;
+                    Text {
+                        text: "Settings";
+                        font-size: 18px;
+                        font-weight: 600;
+                        color: Theme.text;
+                    }
+                }
+                Rectangle { height: 12px; }
+                for item[i] in root.sections: SectionItem {
+                    text: item.text;
+                    icon: item.icon;
+                    on: root.section == i;
+                    clicked => { root.section = i; }
+                }
+                Rectangle { vertical-stretch: 1; }
+                HorizontalLayout {
+                    padding-left: 8px;
+                    Text {
+                        text: "Swarmkeeper " + SettingsBridge.version;
+                        font-size: Theme.font-small;
+                        color: Theme.text3;
+                    }
+                }
             }
         }
 
         ScrollView {
             horizontal-stretch: 1;
             VerticalLayout {
-                spacing: 16px;
+                padding-left: 32px;
+                padding-right: 32px;
+                padding-top: 28px;
+                padding-bottom: 48px;
+                spacing: 20px;
                 alignment: start;
-                padding-right: 4px;
 
                 // Features
-                if root.section == 0: SectionCard {
+                if root.section == 0: PageHeader {
                     title: "Features";
-                    note: "Hide what this swarm doesn't use. Hidden features leave the rail, the menus and the unit panel.";
+                    note: "Hide what this swarm doesn't use. Hidden features leave the rail, the menus and the unit panel, and come back when you turn them on.";
+                }
+                if root.section == 0: SectionCard {
+                    title: "Positioning systems";
+                    note: "Automatic shows a system only when a connected unit has its deck.";
                     SettingRow {
                         title: "Lighthouse";
                         note: SettingsBridge.lighthouse-mode != 0 ? "Base station geometry, the Lighthouse screen and uploads"
@@ -220,40 +278,54 @@ export component SettingsScreen inherits Rectangle {
                         note: SettingsBridge.loco-mode != 0 ? "Anchors, the sniffer and TDoA3 planning"
                             : SettingsBridge.loco-units > 0 ? "Automatic: shown, " + SettingsBridge.loco-units + " connected units have the deck"
                             : "Automatic: hidden until a connected unit has the deck";
+                        last: true;
                         Segmented {
                             items: [{ label: "Automatic" }, { label: "On" }, { label: "Off" }];
                             current <=> SettingsBridge.loco-mode;
                             selected => { SettingsBridge.changed(); }
                         }
                     }
+                }
+                if root.section == 0: SectionCard {
+                    title: "Tools";
+                    note: "Screens and panel tabs for work beyond flying the swarm.";
                     FeatureSwitch { title: "Radio"; note: "The radio channel test, and rechanneling the swarm"; checked <=> SettingsBridge.radio; }
                     FeatureSwitch { title: "Planning"; note: "Rooms, base stations, anchors and coverage"; checked <=> SettingsBridge.planning; }
                     FeatureSwitch { title: "Trajectories"; note: "Upload, generate and fly trajectories"; checked <=> SettingsBridge.trajectories; }
                     FeatureSwitch { title: "Manual control"; note: "Fly one unit with a gamepad"; checked <=> SettingsBridge.manual-control; }
+                    FeatureSwitch { title: "Journal"; note: "Notes per unit, kept between runs, from the unit panel"; checked <=> SettingsBridge.journal; last: true; }
+                }
+                if root.section == 0: SectionCard {
+                    title: "Advanced";
+                    note: "Turn these off for demos and classrooms.";
                     FeatureSwitch { title: "Firmware flashing"; note: "Flash firmware to the swarm"; checked <=> SettingsBridge.flashing; }
-                    FeatureSwitch { title: "Developer tools"; note: "Parameters, tuning, TLV storage and the TOC"; checked <=> SettingsBridge.developer; last: true; }
+                    FeatureSwitch { title: "Developer tools"; note: "Parameters, tuning, TLV storage and the TOC"; checked <=> SettingsBridge.developer; }
+                    FeatureSwitch {
+                        title: "Swarmkeeper firmware application features";
+                        note: "Sync blink and delayed sync blink in Swarm actions. They need the Swarmkeeper app in the Crazyflie firmware.";
+                        checked <=> SettingsBridge.swarmkeeper-app;
+                        last: true;
+                    }
                 }
 
                 // Connection
-                if root.section == 1: SectionCard {
+                if root.section == 1: PageHeader {
                     title: "Connection";
                     note: "How Swarmkeeper reaches the Crazyflies. Switching reconnects the swarm.";
+                }
+                if root.section == 1: SectionCard {
                     SettingRow {
                         title: "Mode";
                         note: root.connection-text;
-                        VerticalLayout {
-                            spacing: 8px;
-                            alignment: center;
-                            Segmented {
-                                items: [{ label: "Automatic" }, { label: "Shared" }, { label: "Direct" }, { label: "Local" }, { label: "Remote" }];
-                                current: root.connection-mode == "auto" ? 0 : root.connection-mode == "shared" ? 1
-                                    : root.connection-mode == "direct" ? 2 : root.connection-mode == "local" ? 3 : 4;
-                                selected(i) => {
-                                    if (i == 0) { root.connection-chosen("auto"); }
-                                    if (i == 1) { root.connection-chosen("shared"); }
-                                    if (i == 2) { root.connection-chosen("direct"); }
-                                    if (i == 3) { root.connection-chosen("local"); }
-                                }
+                        Segmented {
+                            items: [{ label: "Automatic" }, { label: "Shared" }, { label: "Direct" }, { label: "Local" }, { label: "Remote" }];
+                            current: root.connection-mode == "auto" ? 0 : root.connection-mode == "shared" ? 1
+                                : root.connection-mode == "direct" ? 2 : root.connection-mode == "local" ? 3 : 4;
+                            selected(i) => {
+                                if (i == 0) { root.connection-chosen("auto"); }
+                                if (i == 1) { root.connection-chosen("shared"); }
+                                if (i == 2) { root.connection-chosen("direct"); }
+                                if (i == 3) { root.connection-chosen("local"); }
                             }
                         }
                     }
@@ -261,45 +333,96 @@ export component SettingsScreen inherits Rectangle {
                         title: "Remote server";
                         note: "A connection server on another computer: host or host:port";
                         last: true;
-                        HorizontalLayout {
-                            spacing: 8px;
-                            remote := LineEdit {
-                                width: 220px;
-                                placeholder-text: "lab-pc:7777";
-                                text: root.connection-mode == "auto" || root.connection-mode == "shared" || root.connection-mode == "direct" || root.connection-mode == "local" ? "" : root.connection-mode;
-                            }
-                            KButton {
-                                    text: "Connect";
-                                enabled: remote.text != "";
-                                clicked => { root.connection-chosen(remote.text); }
-                            }
+                        remote := TextField {
+                            width: 220px;
+                            placeholder: "lab-pc:7777";
+                            text: root.remote-mode ? root.connection-mode : "";
+                            accepted(address) => { root.connection-chosen(address); }
+                        }
+                        KButton {
+                            text: "Connect";
+                            enabled: remote.text != "";
+                            clicked => { root.connection-chosen(remote.text); }
+                        }
+                    }
+                }
+                if root.section == 1 && root.recent-servers.length > 0: SectionCard {
+                    title: "Recent servers";
+                    note: "The connection servers used before, the last one first.";
+                    for server[i] in root.recent-servers: SettingRow {
+                        title: server;
+                        note: server == root.connection-mode ? "In use" : "";
+                        last: i == root.recent-servers.length - 1;
+                        KButton {
+                            text: "Connect";
+                            small: true;
+                            enabled: server != root.connection-mode;
+                            clicked => { root.connection-chosen(server); }
+                        }
+                        IconButton {
+                            icon: Icons.trash;
+                            clicked => { root.forget-server(server); }
                         }
                     }
                 }
 
                 // Account
-                if root.section == 2: SectionCard {
+                if root.section == 2: PageHeader {
                     title: "Account";
                     note: "arc.bitcraze.io keeps shared swarms and Lighthouse geometries.";
-                    SettingRow {
-                        title: root.signed-in ? (root.needs-sign-in ? "Sign in again" : "Signed in") : "Signed out";
-                        note: root.account-text;
-                        last: true;
-                        if root.needs-sign-in: KButton {
-                            text: root.signed-in ? "Sign in again" : "Sign in";
-                            kind: ButtonKind.primary;
-                            clicked => { root.sign-in(); }
+                }
+                if root.section == 2: SectionCard {
+                    HorizontalLayout {
+                        padding: 20px;
+                        spacing: 16px;
+                        VerticalLayout {
+                            alignment: start;
+                            Avatar {
+                                size: 44px;
+                                initials: root.signed-in && !root.needs-sign-in ? root.account-initials : "";
+                                picture: root.account-picture;
+                            }
                         }
-                        if root.signed-in: KButton {
-                            text: "Sign out";
-                            clicked => { root.sign-out(); }
+                        VerticalLayout {
+                            horizontal-stretch: 1;
+                            spacing: 4px;
+                            Text {
+                                text: !root.signed-in ? "Not signed in"
+                                    : root.needs-sign-in ? "Sign in again" : root.account-name;
+                                font-size: 14px;
+                                font-weight: 600;
+                                color: Theme.text;
+                            }
+                            Text {
+                                text: root.account-text;
+                                font-size: Theme.font-small;
+                                color: Theme.text2;
+                                wrap: word-wrap;
+                            }
+                        }
+                        VerticalLayout {
+                            alignment: start;
+                            HorizontalLayout {
+                                spacing: 8px;
+                                if root.needs-sign-in: KButton {
+                                    text: root.signed-in ? "Sign in again" : "Sign in";
+                                    kind: ButtonKind.primary;
+                                    clicked => { root.sign-in(); }
+                                }
+                                if root.signed-in: KButton {
+                                    text: "Sign out";
+                                    clicked => { root.sign-out(); }
+                                }
+                            }
                         }
                     }
                 }
 
                 // Appearance
-                if root.section == 3: SectionCard {
+                if root.section == 3: PageHeader {
                     title: "Appearance";
+                }
+                if root.section == 3: SectionCard {
                     SettingRow {
                         title: "Theme";
                         note: "System follows the desktop";
@@ -320,18 +443,20 @@ export component SettingsScreen inherits Rectangle {
                 }
 
                 // Flight defaults
-                if root.section == 4: SectionCard {
+                if root.section == 4: PageHeader {
                     title: "Flight defaults";
                     note: "Used by the unit panel; also changed there.";
+                }
+                if root.section == 4: SectionCard {
                     SettingRow {
                         title: "Take-off height";
                         note: "Metres";
-                        LineEdit { width: 100px; text <=> ViewSettings.takeoff-height; }
+                        TextField { width: 100px; text <=> ViewSettings.takeoff-height; }
                     }
                     SettingRow {
                         title: "Take-off time";
                         note: "Seconds";
-                        LineEdit { width: 100px; text <=> ViewSettings.takeoff-time; }
+                        TextField { width: 100px; text <=> ViewSettings.takeoff-time; }
                     }
                     SettingRow {
                         title: "Take off relative to the current position";
@@ -343,13 +468,15 @@ export component SettingsScreen inherits Rectangle {
                         title: "Go-to speed";
                         note: "Metres per second";
                         last: true;
-                        LineEdit { width: 100px; text <=> ViewSettings.goto-speed; }
+                        TextField { width: 100px; text <=> ViewSettings.goto-speed; }
                     }
                 }
 
                 // Data and files
-                if root.section == 5: SectionCard {
+                if root.section == 5: PageHeader {
                     title: "Data and files";
+                }
+                if root.section == 5: SectionCard {
                     SettingRow {
                         title: "Data folder";
                         note: SettingsBridge.data-folder;
@@ -367,8 +494,10 @@ export component SettingsScreen inherits Rectangle {
                 }
 
                 // About
-                if root.section == 6: SectionCard {
+                if root.section == 6: PageHeader {
                     title: "About";
+                }
+                if root.section == 6: SectionCard {
                     SettingRow {
                         title: "Swarmkeeper " + SettingsBridge.version;
                         note: "Set up, configure and debug Crazyflie swarms. MIT or Apache-2.0.";
