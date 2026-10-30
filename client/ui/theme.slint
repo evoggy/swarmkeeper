@@ -1,0 +1,152 @@
+// The look of Swarmkeeper: colours for the light and dark theme, type,
+// and the icon set. Every screen takes its colours from here.
+
+export global Theme {
+    // Dark when the setting says so, or when it follows the system and the
+    // system is dark. Set from Rust (Settings › Appearance).
+    in-out property <bool> dark: false;
+    // Settings › Appearance: 0 follows the system, 1 light, 2 dark.
+    in-out property <int> mode: 0;
+
+    // Window background, behind the cards
+    out property <color> ground: dark ? #0E1013 : #F3F4F6;
+    // Cards, rail, top bar
+    out property <color> surface: dark ? #16191D : #FFFFFF;
+    // Table headers, insets, segmented controls
+    out property <color> surface2: dark ? #1B1F24 : #F8F9FA;
+    out property <color> hover: dark ? #20252B : #F2F4F7;
+    out property <color> border: dark ? #272C33 : #E3E6EA;
+    // Buttons, inputs
+    out property <color> border2: dark ? #3A414A : #CDD2D8;
+    out property <color> text: dark ? #E7E9EC : #16181C;
+    out property <color> text2: dark ? #B0B6BF : #4B515B;
+    // Labels, captions
+    out property <color> text3: dark ? #99A0AA : #636975;
+    out property <color> accent: dark ? #5B97FF : #0B63E5;
+    out property <color> accent-text: dark ? #8AB4FF : #0A58CC;
+    // Selected rows, the active rail item
+    out property <color> accent-tint: dark ? #1A2840 : #E9F1FE;
+    out property <color> accent-button: dark ? #2F6BDB : #0B63E5;
+    // Ready, charged
+    out property <color> good: dark ? #0CA30C : #0CA30C;
+    // Needs a look: low battery, weak link, old firmware
+    out property <color> warn: dark ? #E8A20F : #E8A20F;
+    out property <color> warn-text: dark ? #F0BD4F : #8A5A00;
+    out property <color> warn-tint: dark ? #33290F : #FFF5DE;
+    // Fault: tumbled, selftest failed, timeout
+    out property <color> crit: dark ? #D03B3B : #D03B3B;
+    out property <color> crit-text: dark ? #F28B8B : #B42828;
+    out property <color> crit-tint: dark ? #3A1B1D : #FDEDED;
+    out property <color> flying: dark ? #5B97FF : #2F7BF0;
+    // Not connected
+    out property <color> off: dark ? #6B727C : #9AA0A8;
+    // Emergency stop
+    out property <color> estop: dark ? #C62828 : #C62828;
+    out property <color> estop-hover: dark ? #A81F1F : #A81F1F;
+    // Popups and floating cards
+    out property <color> shadow: dark ? #0000008C : #1018283D;
+
+    // The 3D scene, drawn in OpenGL (host/renderer.rs) and by the labels on it
+    out property <color> scene: dark ? #0F1216 : #EDF0F4;
+    out property <color> grid: dark ? #1C2229 : #D9DEE5;
+    out property <color> grid-major: dark ? #2A323B : #C2C9D2;
+    // Flight areas, dashed
+    out property <color> area: dark ? #D49A26 : #C98400;
+    out property <color> waypoint-area: dark ? #199e70 : #1baf7a;
+    // Takeoff pads
+    out property <color> pad: dark ? #38414B : #B6BEC8;
+    // Lines from units and base stations down to the floor
+    out property <color> drop: dark ? #4C5662 : #97A1AD;
+    out property <color> base-station: dark ? #C9CFD7 : #3C434D;
+    out property <color> axis-x: dark ? #E86464 : #D84B4B;
+    out property <color> axis-y: dark ? #3DBB76 : #23955A;
+    out property <color> axis-z: dark ? #5B97FF : #2F7BF0;
+    // The walls of the planned room
+    out property <color> room: dark ? #4A535E : #A7AFB9;
+    // Plotted lines: one colour per unit (plot.rs), apart from the status colours
+    out property <[color]> series: dark ? [#60A5FA, #FB923C, #34D399, #C084FC, #F472B6, #22D3EE, #FACC15, #A3A3A3]
+        : [#2563EB, #EA580C, #059669, #9333EA, #DB2777, #0891B2, #CA8A04, #525252];
+    // Coverage: points seen by 0, 1, 2, 3, 4 or more base stations
+    out property <[color]> coverage: dark ? [#D03B3B, #E8A20F, #256abf, #5598e7, #9ec5f4] : [#D03B3B, #E8A20F, #86b6ef, #2a78d6, #184f95];
+
+    // Type. Live numbers use a monospaced font so they don't jump around.
+    out property <string> font-mono: "DejaVu Sans Mono";
+    out property <length> font-body: 13px;
+    out property <length> font-small: 12px;
+    out property <length> font-tiny: 11px;
+    out property <length> font-title: 20px;
+    out property <length> font-value: 24px;
+
+    out property <length> radius-card: 12px;
+    out property <length> radius-control: 8px;
+}
+
+// Stroke icons, 24×24, drawn black: show them with `colorize`.
+export global Icons {
+    out property <image> appearance: @image-url("icons/appearance.svg");
+    out property <image> arm: @image-url("icons/arm.svg");
+    out property <image> bolt: @image-url("icons/bolt.svg");
+    out property <image> check: @image-url("icons/check.svg");
+    out property <image> check-circle: @image-url("icons/check-circle.svg");
+    out property <image> chevron-down: @image-url("icons/chevron-down.svg");
+    out property <image> chevron-right: @image-url("icons/chevron-right.svg");
+    out property <image> chip: @image-url("icons/chip.svg");
+    out property <image> close: @image-url("icons/close.svg");
+    out property <image> cloud: @image-url("icons/cloud.svg");
+    out property <image> code: @image-url("icons/code.svg");
+    out property <image> columns: @image-url("icons/columns.svg");
+    out property <image> console: @image-url("icons/console.svg");
+    out property <image> dock: @image-url("icons/dock.svg");
+    out property <image> download: @image-url("icons/download.svg");
+    out property <image> duplicate: @image-url("icons/duplicate.svg");
+    out property <image> estop: @image-url("icons/estop.svg");
+    out property <image> eye: @image-url("icons/eye.svg");
+    out property <image> eye-off: @image-url("icons/eye-off.svg");
+    out property <image> features: @image-url("icons/features.svg");
+    out property <image> fit: @image-url("icons/fit.svg");
+    out property <image> folder: @image-url("icons/folder.svg");
+    out property <image> gamepad: @image-url("icons/gamepad.svg");
+    out property <image> home: @image-url("icons/home.svg");
+    out property <image> identify: @image-url("icons/identify.svg");
+    out property <image> info: @image-url("icons/info.svg");
+    out property <image> journal: @image-url("icons/journal.svg");
+    out property <image> land: @image-url("icons/land.svg");
+    out property <image> layers: @image-url("icons/layers.svg");
+    out property <image> lighthouse: @image-url("icons/lighthouse.svg");
+    out property <image> list: @image-url("icons/list.svg");
+    out property <image> loco: @image-url("icons/loco.svg");
+    out property <image> logo: @image-url("icons/logo.svg");
+    out property <image> minus: @image-url("icons/minus.svg");
+    out property <image> more: @image-url("icons/more.svg");
+    out property <image> move: @image-url("icons/move.svg");
+    out property <image> planning: @image-url("icons/planning.svg");
+    out property <image> play: @image-url("icons/play.svg");
+    out property <image> plot: @image-url("icons/plot.svg");
+    out property <image> plug: @image-url("icons/plug.svg");
+    out property <image> plus: @image-url("icons/plus.svg");
+    out property <image> power: @image-url("icons/power.svg");
+    out property <image> radio: @image-url("icons/radio.svg");
+    out property <image> reconnect: @image-url("icons/reconnect.svg");
+    out property <image> search: @image-url("icons/search.svg");
+    out property <image> server: @image-url("icons/server.svg");
+    out property <image> settings: @image-url("icons/settings.svg");
+    out property <image> sleep: @image-url("icons/sleep.svg");
+    out property <image> sniffer: @image-url("icons/sniffer.svg");
+    out property <image> sort-down: @image-url("icons/sort-down.svg");
+    out property <image> sort-up: @image-url("icons/sort-up.svg");
+    out property <image> status: @image-url("icons/status.svg");
+    out property <image> stop: @image-url("icons/stop.svg");
+    out property <image> sun: @image-url("icons/sun.svg");
+    out property <image> swarm: @image-url("icons/swarm.svg");
+    out property <image> takeoff: @image-url("icons/takeoff.svg");
+    out property <image> trajectory: @image-url("icons/trajectory.svg");
+    out property <image> trash: @image-url("icons/trash.svg");
+    out property <image> undo: @image-url("icons/undo.svg");
+    out property <image> undock: @image-url("icons/undock.svg");
+    out property <image> units: @image-url("icons/units.svg");
+    out property <image> upload: @image-url("icons/upload.svg");
+    out property <image> user: @image-url("icons/user.svg");
+    out property <image> view3d: @image-url("icons/view3d.svg");
+    out property <image> warning: @image-url("icons/warning.svg");
+    out property <image> wizard: @image-url("icons/wizard.svg");
+}

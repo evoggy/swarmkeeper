@@ -31,7 +31,8 @@ assets = [
 ]
 
 [dependencies]
-slint = "1.14.1"
+# software-renderer-path: icons and charts in headless screenshots (host::screenshot)
+slint = { version = "1.14.1", features = ["software-renderer-path"] }
 crazyflie-lib = "0.8.0"
 crazyflie-link = "0.5.0"
 # Reaches the Crazyflies directly or through a connection server
@@ -47,6 +48,8 @@ serde_json = "1.0"
 serde_yaml = "0.9"
 dirs-next = "2.0"
 glow = "0.16"
+# An OpenGL ES context without a window, for screenshots of the 3D view
+glutin = { version = "0.32", default-features = false, features = ["egl"] }
 chrono = "0.4"
 rfd = "0.15"
 confy = "0.6"
@@ -56,6 +59,10 @@ levenberg-marquardt = "0.14"
 serialport = "4"
 # Signing in to the server that shares swarms (src/account.rs).
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "json"] }
+# Firmware release zips (firmware.rs): deflate in pure Rust
+zip = { version = "9", default-features = false, features = ["deflate-flate2-zlib-rs"] }
+# The account's picture (host/account.rs); Slint already builds it
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
 base64 = "0.22"
 sha2 = "0.11"
 rand = "0.10"

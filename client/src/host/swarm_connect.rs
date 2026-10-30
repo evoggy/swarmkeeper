@@ -201,3 +201,28 @@ mod tests {
         assert!(toc.is_empty());
     }
 }
+
+/// Serve a unit connected here to the client API, and to other programs in
+/// shared mode. Its link is closed when that fails.
+pub async fn adopt(
+    client: &crazyflie_connection_server::Client,
+    uri: &str,
+    cf: crazyflie_lib::Crazyflie,
+) -> crazyflie_connection_server::Result<crazyflie_connection_server::Crazyflie> {
+    let lib = Arc::new(cf);
+    let adopted = client.adopt(uri, lib.clone()).await;
+    if adopted.is_err() {
+        lib.disconnect().await;
+    }
+    adopted
+}
+
+/// Disconnect a unit, or through a connection server detach from it. Its
+/// telemetry and console streams end either way.
+pub async fn disconnect(cf: &crazyflie_connection_server::Crazyflie) {
+    let lib = cf.lib();
+    cf.detach();
+    if let Some(lib) = lib {
+        lib.disconnect().await;
+    }
+}

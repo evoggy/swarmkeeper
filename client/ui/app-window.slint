@@ -1,23 +1,32 @@
 import { VerticalBox, HorizontalBox, TabWidget, Palette, Button, LineEdit, ScrollView, ComboBox, CheckBox } from "std-widgets.slint";
 import { UnitsContent } from "units.slint";
-import { VisualizationContent, VizLabel } from "visualization.slint";
+import { VisualizationContent, VizLabel, UnitLabel, SceneTip, SceneLegend } from "visualization.slint";
 import { UnitData, UnitState, JournalEntryData, ConsoleLineData } from "unit-card.slint";
 import { RadioTestContent, ChannelResult } from "radio-test.slint";
 import { LocoContent, LocoAnchorStatus } from "loco.slint";
 import { LhBaseStationData } from "lh-coverage.slint";
 import { Tdoa3AnchorData } from "tdoa3-coverage.slint";
 import { LhWizardContent, WizardSampleData, WizardBsData } from "lh-wizard.slint";
-import { PlanningContent, PlanObstacleData, PlanPadData, PlanBoxVolumeData } from "planning.slint";
+import { PlanningContent, PlanObstacleData, PlanPadData, PlanBoxVolumeData, PlanCoverage } from "planning.slint";
 import { SnifferContent, SnifferAnchorRow, SnifferFeedRow, SnifferMatrixRow, SnifferSurveyRow } from "sniffer.slint";
-import { PlotBridge, PlotLine, AxisTick, LegendEntry, PlotNewConfigDialog } from "plot.slint";
+import { PlotBridge, PlotLine, AxisTick, LegendEntry, ChartData, PlotUnit, LogVarRow, PlotNewConfigDialog } from "plot.slint";
+import { PlotScreen } from "plot-screen.slint";
+import { FlashBridge, FlashDialog, FlashPart, FlashUnit, FlashCell, FlashStep, FlashPhase, FlashCard, FlashState } from "flash.slint";
 import { ViewSettings } from "view-settings.slint";
-import { RechannelDialog, RechannelRow, RcRowState } from "rechannel.slint";
+import { RechannelBridge, RechannelDialog, RcLane, RcChip, RcMove, RcRowState } from "rechannel.slint";
 import { OpenSwarmDialog, SignInDialog, SwarmChoice } from "open-swarm.slint";
+import { Theme, Icons, Card, Segmented, ScreenTitle } from "kit.slint";
+import { Rail, RailEntry, TopBar } from "shell.slint";
+import { SwarmActionsButton } from "swarm-actions.slint";
+import { Features } from "features.slint";
+import { SettingsScreen, SettingsBridge } from "settings.slint";
+import { UnitRow, SwarmSummary, FilterCounts, Health } from "units-table.slint";
+import { StatusScreen, StatusData, HealthTile, GridCell, HistBar, Fact, AttentionRow, RadioRow, TrafficSeries, ServerRow, ActivityRow } from "status.slint";
 
 // Re-export the plot globals/structs from the root so the Rust side can reach
 // PlotBridge via `ui.global::<PlotBridge>()` and the generated data structs.
-export { PlotBridge, PlotLine, AxisTick, LegendEntry, ViewSettings }
-export { RechannelRow, RcRowState }
+export { PlotBridge, PlotLine, AxisTick, LegendEntry, ChartData, PlotUnit, LogVarRow, FlashBridge, FlashPart, FlashUnit, FlashCell, FlashStep, FlashPhase, FlashCard, FlashState, ViewSettings, Theme, Features, SettingsBridge, UnitRow, SwarmSummary, FilterCounts, Health, StatusData, HealthTile, GridCell, HistBar, Fact, AttentionRow, RadioRow, TrafficSeries, ServerRow, ActivityRow }
+export { RechannelBridge, RcLane, RcChip, RcMove, RcRowState }
 export { SwarmChoice }
 
 export struct HealthTestResult {
@@ -35,726 +44,58 @@ export struct SwarmParamData {
     writable: bool,
 }
 
-component MenuItem inherits Rectangle {
-    in property <string> text;
-    in property <bool> enabled: true;
-    callback clicked();
-
-    height: 32px;
-    background: (root.enabled && touch.has-hover) ? Palette.accent-background : transparent;
-
-    Text {
-        text: root.text;
-        font-size: 13px;
-        color: root.enabled ? Palette.foreground : Palette.foreground.with-alpha(0.4);
-        vertical-alignment: center;
-        x: 16px;
-    }
-
-    touch := TouchArea {
-        enabled: root.enabled;
-        clicked => { root.clicked(); }
-        mouse-cursor: root.enabled ? pointer : default;
-    }
-}
-
-component MenuSeparator inherits Rectangle {
-    height: 9px;
-
-    Rectangle {
-        height: 1px;
-        width: parent.width - 16px;
-        background: Palette.border;
-    }
-}
-
-component MenuTitle inherits Rectangle {
-    in property <string> text;
-    callback clicked();
-
-    Text {
-        text: root.text;
-        font-size: 13px;
-        horizontal-alignment: center;
-        vertical-alignment: center;
-    }
-
-    TouchArea {
-        clicked => { root.clicked(); }
-        mouse-cursor: pointer;
-    }
-}
-
-component MenuBar inherits Rectangle {
-    callback exit-clicked();
-    callback open-swarm-clicked();
-    callback connect-clicked();
-    callback disconnect-clicked();
-    callback reconnect-clicked();
-    callback arm-all-clicked();
-    callback disarm-all-clicked();
-    callback upload-trajectory-swarm-clicked();
-    callback fly-trajectory-swarm-clicked();
-    callback sync-blink-clicked();
-    callback delayed-sync-blink-clicked();
-    callback land-swarm-clicked();
-    callback reboot-swarm-clicked();
-    callback sysoff-swarm-clicked();
-    callback syson-swarm-clicked();
-    callback power-off-swarm-clicked();
-    callback clear-all-console-clicked();
-    callback download-toc-clicked();
-    callback rechannel-clicked();
-    callback upload-geometry-clicked();
-    callback upload-params-clicked();
-    callback clear-tlv-clicked();
-    callback tuning-clicked();
-    callback set-param-clicked();
-    callback health-test-clicked();
-    callback flash-firmware-clicked();
-    callback sign-in-clicked();
-    callback sign-out-clicked();
-    // How the Crazyflies are reached (left of the account): `auto`,
-    // `shared`, `direct`, `local` or a server address.
-    callback connection-chosen(string);
-    callback connection-opened();
-
-    in property <bool> connected;
-    in property <bool> drives-radios: true;
-    in property <string> connection-label;
-    in property <string> connection-text;
-    in property <string> connection-mode;
-    // The account on the server that shares swarms (right end of the bar).
-    in property <string> account-label;
-    in property <string> account-text;
-    in property <bool> signed-in;
-    in property <bool> needs-sign-in;     // signed out, or the key no longer works
-
-    height: 30px;
-
-    HorizontalBox {
-        padding: 0px;
-        spacing: 0px;
-        alignment: start;
-
-        MenuTitle { width: 54px; text: "File"; clicked => { file-popup.show(); } }
-        MenuTitle { width: 66px; text: "Swarm"; clicked => { swarm-popup.show(); } }
-        MenuTitle { width: 60px; text: "Flight"; clicked => { flight-popup.show(); } }
-        MenuTitle { width: 68px; text: "System"; clicked => { system-popup.show(); } }
-        MenuTitle { width: 60px; text: "Setup"; clicked => { setup-popup.show(); } }
-        MenuTitle { width: 92px; text: "Diagnostics"; clicked => { diagnostics-popup.show(); } }
-    }
-
-    connection-button := Rectangle {
-        x: account-button.x - self.width - 8px;
-        width: connection-label-text.preferred-width + 24px;
-        height: root.height;
-
-        connection-label-text := Text {
-            text: root.connection-label;
-            font-size: 13px;
-            horizontal-alignment: center;
-            vertical-alignment: center;
-        }
-
-        TouchArea {
-            clicked => {
-                root.connection-opened();
-                connection-popup.show();
-            }
-            mouse-cursor: pointer;
-        }
-    }
-
-    account-button := Rectangle {
-        x: root.width - self.width - 8px;
-        width: account-label-text.preferred-width + 24px;
-        height: root.height;
-
-        account-label-text := Text {
-            text: root.account-label;
-            font-size: 13px;
-            color: root.needs-sign-in && root.signed-in ? #c62828 : Palette.foreground;
-            horizontal-alignment: center;
-            vertical-alignment: center;
-        }
-
-        TouchArea {
-            clicked => { account-popup.show(); }
-            mouse-cursor: pointer;
-        }
-    }
-
-    connection-popup := PopupWindow {
-        x: max(0px, connection-button.x + connection-button.width - 440px);
-        y: root.height;
-        width: 440px;
-        // The server address field takes clicks.
-        close-policy: PopupClosePolicy.close-on-click-outside;
-
-        property <bool> remote: root.connection-mode != "auto" && root.connection-mode != "shared"
-            && root.connection-mode != "direct" && root.connection-mode != "local";
-
-        Rectangle {
-            width: 440px;
-            height: connection-menu.preferred-height;
-            background: Palette.background;
-            border-width: 1px;
-            border-color: Palette.border;
-
-            connection-menu := VerticalLayout {
-                padding-bottom: 4px;
-
-                VerticalLayout {
-                    padding: 12px;
-                    padding-left: 16px;
-                    Text {
-                        text: root.connection-text;
-                        font-size: 12px;
-                        color: Palette.foreground.transparentize(0.2);
-                        wrap: word-wrap;
-                    }
-                }
-                MenuSeparator {}
-                MenuItem {
-                    text: (root.connection-mode == "auto" ? "✓ " : "    ") + "Automatic: a server on this computer if one runs, else shared";
-                    clicked => { root.connection-chosen("auto"); connection-popup.close(); }
-                }
-                MenuItem {
-                    text: (root.connection-mode == "shared" ? "✓ " : "    ") + "This computer's Crazyradios, shared with other programs";
-                    clicked => { root.connection-chosen("shared"); connection-popup.close(); }
-                }
-                MenuItem {
-                    text: (root.connection-mode == "direct" ? "✓ " : "    ") + "This computer's Crazyradios, Swarmkeeper only";
-                    clicked => { root.connection-chosen("direct"); connection-popup.close(); }
-                }
-                MenuItem {
-                    text: (root.connection-mode == "local" ? "✓ " : "    ") + "Server on this computer (cfcli server run)";
-                    clicked => { root.connection-chosen("local"); connection-popup.close(); }
-                }
-                HorizontalLayout {
-                    padding-left: 16px;
-                    padding-right: 12px;
-                    padding-top: 4px;
-                    padding-bottom: 4px;
-                    spacing: 8px;
-
-                    Text {
-                        text: (connection-popup.remote ? "✓ " : "    ") + "Server at";
-                        font-size: 13px;
-                        vertical-alignment: center;
-                    }
-                    remote-address := LineEdit {
-                        placeholder-text: "host or host:port";
-                        text: connection-popup.remote ? root.connection-mode : "";
-                        accepted(address) => { root.connection-chosen(address); connection-popup.close(); }
-                    }
-                    Button {
-                        text: "Use";
-                        enabled: remote-address.text != "";
-                        clicked => { root.connection-chosen(remote-address.text); connection-popup.close(); }
-                    }
-                }
-            }
-        }
-    }
-
-    account-popup := PopupWindow {
-        x: root.width - 320px - 8px;
-        y: root.height;
-        width: 320px;
-
-        Rectangle {
-            width: 320px;
-            height: account-menu.preferred-height;
-            background: Palette.background;
-            border-width: 1px;
-            border-color: Palette.border;
-
-            account-menu := VerticalLayout {
-                padding-bottom: 4px;
-
-                VerticalLayout {
-                    padding: 12px;
-                    padding-left: 16px;
-                    Text {
-                        text: root.account-text;
-                        font-size: 12px;
-                        color: Palette.foreground.transparentize(0.2);
-                        wrap: word-wrap;
-                    }
-                }
-                MenuSeparator {}
-                if root.needs-sign-in: MenuItem {
-                    text: root.signed-in ? "Sign in again..." : "Sign in...";
-                    // Call before closing: closing drops the popup, and with it
-                    // this conditional item's way back to the menu bar.
-                    clicked => { sign-in-clicked(); account-popup.close(); }
-                }
-                if root.signed-in: MenuItem {
-                    text: "Sign out";
-                    clicked => { sign-out-clicked(); account-popup.close(); }
-                }
-            }
-        }
-    }
-
-    file-popup := PopupWindow {
-        x: 0px;
-        y: root.height;
-        width: 180px;
-
-        Rectangle {
-            width: 180px;
-            height: 64px;
-            background: Palette.background;
-            border-width: 1px;
-            border-color: Palette.border;
-
-            VerticalLayout {
-                MenuItem {
-                    text: "Open swarm...";
-                    clicked => { file-popup.close(); open-swarm-clicked(); }
-                }
-                MenuItem {
-                    text: "Exit";
-                    clicked => { file-popup.close(); exit-clicked(); }
-                }
-            }
-        }
-    }
-
-    swarm-popup := PopupWindow {
-        x: 54px;
-        y: root.height;
-        width: 180px;
-
-        Rectangle {
-            width: 180px;
-            height: 169px;
-            background: Palette.background;
-            border-width: 1px;
-            border-color: Palette.border;
-
-            VerticalLayout {
-                MenuItem {
-                    text: "Connect Swarm";
-                    enabled: !root.connected;
-                    clicked => { swarm-popup.close(); connect-clicked(); }
-                }
-                MenuItem {
-                    text: "Disconnect";
-                    enabled: root.connected;
-                    clicked => { swarm-popup.close(); disconnect-clicked(); }
-                }
-                MenuItem {
-                    text: "Reconnect";
-                    enabled: root.connected;
-                    clicked => { swarm-popup.close(); reconnect-clicked(); }
-                }
-                MenuSeparator {}
-                MenuItem {
-                    text: "Arm All";
-                    enabled: root.connected;
-                    clicked => { swarm-popup.close(); arm-all-clicked(); }
-                }
-                MenuItem {
-                    text: "Disarm All";
-                    enabled: root.connected;
-                    clicked => { swarm-popup.close(); disarm-all-clicked(); }
-                }
-            }
-        }
-    }
-
-    flight-popup := PopupWindow {
-        x: 120px;
-        y: root.height;
-        width: 180px;
-
-        Rectangle {
-            width: 180px;
-            height: 178px;
-            background: Palette.background;
-            border-width: 1px;
-            border-color: Palette.border;
-
-            VerticalLayout {
-                MenuItem {
-                    text: "Upload Trajectory";
-                    enabled: root.connected;
-                    clicked => { flight-popup.close(); upload-trajectory-swarm-clicked(); }
-                }
-                MenuItem {
-                    text: "Fly Trajectory";
-                    enabled: root.connected;
-                    clicked => { flight-popup.close(); fly-trajectory-swarm-clicked(); }
-                }
-                MenuSeparator {}
-                MenuItem {
-                    text: root.drives-radios ? "Sync Blink" : "Sync Blink (this computer's Crazyradios only)";
-                    enabled: root.connected && root.drives-radios;
-                    clicked => { flight-popup.close(); sync-blink-clicked(); }
-                }
-                MenuItem {
-                    text: root.drives-radios ? "Delayed Sync Blink" : "Delayed Sync Blink (this computer's Crazyradios only)";
-                    enabled: root.connected && root.drives-radios;
-                    clicked => { flight-popup.close(); delayed-sync-blink-clicked(); }
-                }
-                MenuSeparator {}
-                MenuItem {
-                    text: "Land All";
-                    enabled: root.connected;
-                    clicked => { flight-popup.close(); land-swarm-clicked(); }
-                }
-            }
-        }
-    }
-
-    system-popup := PopupWindow {
-        x: 180px;
-        y: root.height;
-        width: 180px;
-
-        Rectangle {
-            width: 180px;
-            height: 243px;
-            background: Palette.background;
-            border-width: 1px;
-            border-color: Palette.border;
-
-            VerticalLayout {
-                MenuItem {
-                    text: "Reboot";
-                    clicked => { system-popup.close(); reboot-swarm-clicked(); }
-                }
-                MenuItem {
-                    text: "Sleep";
-                    clicked => { system-popup.close(); sysoff-swarm-clicked(); }
-                }
-                MenuItem {
-                    text: "Wake Up";
-                    clicked => { system-popup.close(); syson-swarm-clicked(); }
-                }
-                MenuSeparator {}
-                MenuItem {
-                    text: "Flash Firmware...";
-                    clicked => { system-popup.close(); flash-firmware-clicked(); }
-                }
-                MenuSeparator {}
-                MenuItem {
-                    text: "Power Off...";
-                    clicked => { system-popup.close(); power-off-swarm-clicked(); }
-                }
-                MenuSeparator {}
-                MenuItem {
-                    text: "Clear All Console";
-                    clicked => { system-popup.close(); clear-all-console-clicked(); }
-                }
-            }
-        }
-    }
-
-    setup-popup := PopupWindow {
-        x: 248px;
-        y: root.height;
-        width: 180px;
-
-        Rectangle {
-            width: 180px;
-            height: 242px;
-            background: Palette.background;
-            border-width: 1px;
-            border-color: Palette.border;
-
-            VerticalLayout {
-                MenuItem {
-                    text: "Download TOC";
-                    enabled: !root.connected;
-                    clicked => { setup-popup.close(); download-toc-clicked(); }
-                }
-                MenuItem {
-                    text: "Upload Geometry";
-                    enabled: !root.connected;
-                    clicked => { setup-popup.close(); upload-geometry-clicked(); }
-                }
-                MenuItem {
-                    text: "Rechannel Swarm...";
-                    clicked => { setup-popup.close(); rechannel-clicked(); }
-                }
-                MenuSeparator {}
-                MenuItem {
-                    text: "Upload Params";
-                    clicked => { setup-popup.close(); upload-params-clicked(); }
-                }
-                MenuItem {
-                    text: "Clear TLV...";
-                    clicked => { setup-popup.close(); clear-tlv-clicked(); }
-                }
-                MenuItem {
-                    text: "Set Parameter...";
-                    enabled: root.connected;
-                    clicked => { setup-popup.close(); set-param-clicked(); }
-                }
-                MenuItem {
-                    text: "Tuning...";
-                    clicked => { setup-popup.close(); tuning-clicked(); }
-                }
-            }
-        }
-    }
-
-    diagnostics-popup := PopupWindow {
-        x: 308px;
-        y: root.height;
-        width: 180px;
-
-        Rectangle {
-            width: 180px;
-            height: 32px;
-            background: Palette.background;
-            border-width: 1px;
-            border-color: Palette.border;
-
-            VerticalLayout {
-                MenuItem {
-                    text: "Health Test...";
-                    enabled: !root.connected;
-                    clicked => { diagnostics-popup.close(); health-test-clicked(); }
-                }
-            }
-        }
-    }
-}
-
-component SwarmInfoBar inherits Rectangle {
-    in property <string> swarm-name;
-    in property <string> swarm-source;     // where the swarm is from
-    in property <string> swarm-update;     // a newer revision on the server, if any
-    in property <[UnitData]> units;
-    in property <bool> connected;
-    in property <int> connected-count;
-    in property <int> selftest-passed-count;
-    in property <int> battery-count;
-    in property <int> charging-count;
-    in property <int> charged-count;
-    callback connect-clicked();
-    callback disconnect-clicked();
-    callback reconnect-clicked();
-    callback land-swarm-clicked();
-    callback emergency-stop-clicked();
-    callback reload-clicked();
-
-    property <float> progress: units.length > 0 ? connected-count / units.length : 0;
-    property <bool> connecting: connected && progress < 1.0;
-    property <float> selftest-progress: connected-count > 0 ? selftest-passed-count / connected-count : 0;
-    property <float> power-total: battery-count + charging-count + charged-count;
-
-    height: 48px;
-    border-width: 1px;
-    border-color: Palette.border;
-
-    HorizontalBox {
-        padding-left: 16px;
-        padding-right: 16px;
-        spacing: 16px;
-
-        VerticalLayout {
-            alignment: center;
-            spacing: 2px;
-
-            Text {
-                text: swarm-name;
-                font-size: 14px;
-                font-weight: 600;
-            }
-            if swarm-source != "": Text {
-                text: swarm-source;
-                font-size: 11px;
-                color: Palette.foreground.transparentize(0.4);
-            }
-        }
-
-        if swarm-update != "": HorizontalLayout {
-            alignment: center;
-            spacing: 6px;
-
-            Text {
-                text: swarm-update;
-                font-size: 12px;
-                color: dodgerblue;
-                vertical-alignment: center;
-            }
-            Button {
-                text: "Reload";
-                clicked => { reload-clicked(); }
-            }
-        }
-
-        VerticalLayout {
-            alignment: center;
-            spacing: 4px;
-
-            Text {
-                text: connected-count > 0
-                    ? "\{connected-count}/\{units.length} connected"
-                    : "\{units.length} units";
-                font-size: 13px;
-                color: Palette.foreground.transparentize(0.4);
-            }
-
-            Rectangle {
-                height: 4px;
-                border-radius: 2px;
-                background: Palette.border;
-
-                Rectangle {
-                    x: 0px;
-                    width: parent.width * progress;
-                    height: parent.height;
-                    border-radius: 2px;
-                    background: progress >= 1.0 ? limegreen : dodgerblue;
-                }
-            }
-        }
-
-        if connected-count > 0: VerticalLayout {
-            alignment: center;
-            spacing: 4px;
-
-            Text {
-                text: "\{selftest-passed-count}/\{connected-count} selftest";
-                font-size: 13px;
-                color: Palette.foreground.transparentize(0.4);
-            }
-
-            Rectangle {
-                height: 4px;
-                border-radius: 2px;
-                background: Palette.border;
-
-                Rectangle {
-                    x: 0px;
-                    width: parent.width * selftest-progress;
-                    height: parent.height;
-                    border-radius: 2px;
-                    background: selftest-progress >= 1.0 ? limegreen : red;
-                }
-            }
-        }
-
-        if connected-count > 0 && power-total > 0: VerticalLayout {
-            alignment: center;
-            spacing: 4px;
-
-            Text {
-                text: battery-count > 0 && (charging-count > 0 || charged-count > 0)
-                    ? "\{battery-count} battery, \{charging-count} charging, \{charged-count} charged"
-                    : charging-count > 0 || charged-count > 0
-                    ? "\{charging-count} charging, \{charged-count} charged"
-                    : "\{battery-count} battery";
-                font-size: 13px;
-                color: Palette.foreground.transparentize(0.4);
-            }
-
-            Rectangle {
-                height: 4px;
-                border-radius: 2px;
-                background: Palette.border;
-
-                // Battery portion (dodgerblue)
-                Rectangle {
-                    x: 0px;
-                    width: parent.width * (battery-count / power-total);
-                    height: parent.height;
-                    border-radius: 2px;
-                    background: dodgerblue;
-                }
-
-                // Charging portion (orange)
-                Rectangle {
-                    x: parent.width * (battery-count / power-total);
-                    width: parent.width * (charging-count / power-total);
-                    height: parent.height;
-                    background: orange;
-                }
-
-                // Charged portion (limegreen)
-                Rectangle {
-                    x: parent.width * ((battery-count + charging-count) / power-total);
-                    width: parent.width * (charged-count / power-total);
-                    height: parent.height;
-                    border-radius: 2px;
-                    background: limegreen;
-                }
-            }
-        }
-
-        Rectangle { horizontal-stretch: 1; }
-
-        if connected && connected-count < units.length: Button {
-            text: "Reconnect";
-            clicked => {
-                reconnect-clicked();
-            }
-        }
-
-        if connected: Button {
-            text: "Land All";
-            clicked => {
-                land-swarm-clicked();
-            }
-        }
-
-        if connected: Rectangle {
-            width: estop-layout.preferred-width + 16px;
-            height: 33px;
-            background: #cc0000;
-            border-radius: 4px;
-
-            estop-layout := HorizontalLayout {
-                alignment: center;
-                padding-left: 8px;
-                padding-right: 8px;
-
-                Text {
-                    text: "Emergency Stop";
-                    color: white;
-                    font-weight: 700;
-                    font-size: 14px;
-                    vertical-alignment: center;
-                    horizontal-alignment: center;
-                }
-            }
-
-            TouchArea {
-                mouse-cursor: pointer;
-                clicked => { emergency-stop-clicked(); }
-            }
-        }
-
-        Button {
-            text: connected ? "Disconnect" : "Connect Swarm";
-            clicked => {
-                if (connected) {
-                    disconnect-clicked();
-                } else {
-                    connect-clicked();
-                }
-            }
-        }
-    }
-}
-
-// Main application window
 export component AppWindow inherits Window {
+    // The screen shown, by rail id: status, units, view3d, planning,
+    // lighthouse, loco, radio, settings.
+    in-out property <string> screen: "status";
+    // The section open on the Settings screen
+    in-out property <int> settings-section: 0;
+
+    // The Status screen, worked out in Rust (status.rs)
+    in property <StatusData> status;
+    // The account or the connection changed: Status shows them too.
+    callback status-inputs-changed();
+    // The chosen connection mode didn't work and Swarmkeeper fell back to direct.
+    in property <bool> connection-problem;
+
+    // The Units screen, worked out in Rust (units.rs)
+    in property <[UnitRow]> unit-rows;
+    in property <int> unit-visible-count;
+    in property <SwarmSummary> swarm-summary;
+    in property <FilterCounts> unit-filter-counts;
+    in-out property <int> unit-filter;
+    in-out property <string> unit-search;
+    callback unit-filter-changed();
+
+    background: Theme.ground;
+    // The theme: the setting, or the desktop's scheme as it was at start.
+    // The standard widgets (line edits, combo boxes) follow it too.
+    property <bool> system-dark;
+    property <int> theme-mode: Theme.mode;
+    property <bool> theme-dark: Theme.dark;
+    function apply-theme() {
+        Theme.dark = Theme.mode == 2 || (Theme.mode == 0 && root.system-dark);
+    }
+    changed theme-mode => { root.apply-theme(); }
+    changed theme-dark => { Palette.color-scheme = Theme.dark ? ColorScheme.dark : ColorScheme.light; }
+    changed signed-in => { root.status-inputs-changed(); }
+    changed needs-sign-in => { root.status-inputs-changed(); }
+    changed account-text => { root.status-inputs-changed(); }
+    changed account-orgs => { root.status-inputs-changed(); }
+    changed connection-label => { root.status-inputs-changed(); }
+    changed connection-problem => { root.status-inputs-changed(); }
+    changed drives-radios => { root.status-inputs-changed(); }
+    init => {
+        root.system-dark = Palette.color-scheme == ColorScheme.dark;
+        root.apply-theme();
+        Palette.color-scheme = Theme.dark ? ColorScheme.dark : ColorScheme.light;
+    }
     title: "Swarmkeeper";
     preferred-width: 1600px;
     preferred-height: 900px;
 
     in-out property <string> swarm-name;
     in-out property <[UnitData]> units;
-    in-out property <[[StandardListViewItem]]> unit-table-rows;
     in-out property <[UnitData]> sorted-units;
     in-out property <bool> swarm-connected;
     in-out property <int> connected-count;
@@ -778,7 +119,6 @@ export component AppWindow inherits Window {
     out property <float> cam-pan-y: viz-content.cam-pan-y;
 
     // Visualization label toggle states (read by Rust to know what to compute)
-    out property <bool> show-cf-labels: viz-content.show-cf-labels;
     out property <bool> show-lh-labels: viz-content.show-lh-labels;
     out property <bool> show-loco-labels: viz-content.show-loco-labels;
     out property <bool> show-axis-labels: viz-content.show-axis-labels;
@@ -795,7 +135,13 @@ export component AppWindow inherits Window {
     callback viz-unit-clicked(/* x */ float, /* y */ float);
 
     // Visualization label data (set by Rust)
-    in-out property <[VizLabel]> cf-labels;
+    in-out property <[UnitLabel]> unit-labels;
+    in-out property <SceneTip> viz-tip;
+    in-out property <SceneLegend> viz-legend;
+    // The unit under the pointer in the 3D view (sorted-units row, -1 none)
+    in-out property <int> viz-hover-unit: -1;
+    callback viz-hover(/* x */ float, /* y */ float);
+    callback viz-fit();
     in-out property <[VizLabel]> lh-labels;
     in-out property <[VizLabel]> loco-labels;
     in-out property <[VizLabel]> axis-labels;
@@ -899,33 +245,6 @@ export component AppWindow inherits Window {
     pure callback validate-param-value(/* type */ string, /* value */ string) -> string;
     callback set-swarm-param(/* name */ string, /* value */ string, /* persist */ bool);
 
-    // Flash firmware (bootloader)
-    in-out property <bool> flash-dialog-visible: false;
-    in-out property <[string]> flash-target-names;
-    in-out property <int> flash-selected-target: 0;
-    in-out property <string> flash-binary-name;       // basename shown to the user
-    in-out property <bool> flash-binary-selected: false;
-    in-out property <bool> flashing: false;            // a flash run is in progress
-    in-out property <string> flash-overall-status;
-    callback flash-select-binary();
-    callback flash-start();
-
-    // Rechannel swarm: spread the swarm over several radio channels
-    in-out property <bool> rc-dialog-visible: false;
-    in-out property <[RechannelRow]> rc-rows;
-    in-out property <int> rc-radios;                   // Crazyradios attached
-    in-out property <int> rc-count: 1;
-    in-out property <string> rc-channels;
-    in-out property <string> rc-plan-error;
-    in-out property <string> rc-summary;
-    in-out property <int> rc-moving;
-    in-out property <bool> rc-running: false;
-    in-out property <string> rc-status;
-    callback rc-open();                                // read the swarm file and plan
-    callback rc-count-edited(int);
-    callback rc-channels-edited(string);
-    callback rc-start();
-
     // File > Open swarm: the swarm files on this computer and the shared swarms
     in-out property <bool> os-dialog-visible: false;
     in-out property <[SwarmChoice]> os-local;
@@ -951,12 +270,21 @@ export component AppWindow inherits Window {
     // Swarmkeeper drives this computer's Crazyradios (shared or direct mode):
     // the features that send raw radio packets need it
     in-out property <bool> drives-radios: true;
+    // Connection servers used before, the last one first (settings.rs)
+    in-out property <[string]> recent-servers;
     callback connection-chosen(string);
     callback connection-opened();
+    callback forget-server(string);
 
     // The account on the server that shares swarms
     in-out property <string> account-label: "Sign in";
+    // The initials of the name signed in, and the picture from GitHub or
+    // Google, for the avatar
+    in-out property <string> account-initials;
+    in-out property <image> account-picture;
     in-out property <string> account-text;
+    // The organizations the account is in, by name, for Status.
+    in-out property <string> account-orgs;
     in-out property <bool> signed-in: false;
     in-out property <bool> needs-sign-in: true;
     in-out property <bool> sign-in-dialog-visible: false;
@@ -1242,6 +570,18 @@ export component AppWindow inherits Window {
     in-out property <bool> planning-handle-active: false;
     in-out property <int> planning-active-handle: 0;
     in-out property <[VizLabel]> planning-grid-labels;
+    // Base stations and anchors by name, over the view
+    in-out property <[UnitLabel]> planning-marks;
+    in-out property <string> planning-scene-name <=> planning-content.scene-name;
+    in-out property <bool> planning-scene-dirty <=> planning-content.scene-dirty;
+    in-out property <int> planning-undo-count <=> planning-content.undo-count;
+    in-out property <PlanCoverage> planning-coverage <=> planning-content.coverage;
+    in-out property <bool> planning-coverage-stale <=> planning-content.coverage-stale;
+    in-out property <bool> planning-show-slice <=> planning-content.show-slice;
+    in-out property <float> planning-slice-z <=> planning-content.slice-z;
+    in-out property <int> planning-coverage-source <=> planning-content.coverage-source;
+    callback planning-select(int, int);
+    callback planning-save-scene-as();
     in-out property <string> planning-stats-text-1;
     in-out property <string> planning-stats-text-2;
     in-out property <string> planning-stats-text-3;
@@ -1278,348 +618,506 @@ export component AppWindow inherits Window {
     callback planning-view-mouse-released();
     callback planning-view-pan(float, float);
 
-    VerticalBox {
-        padding: 0px;
+    HorizontalLayout {
         spacing: 0px;
 
-        MenuBar {
-            connected: root.swarm-connected;
-            exit-clicked => { exit-requested(); }
-            open-swarm-clicked => {
-                os-error = "";
-                os-busy = false;
-                os-dialog-visible = true;
-                os-show();
-            }
-            drives-radios: root.drives-radios;
-            connection-label: root.connection-label;
-            connection-text: root.connection-text;
-            connection-mode: root.connection-mode;
-            connection-chosen(mode) => { root.connection-chosen(mode); }
-            connection-opened => { root.connection-opened(); }
-            account-label: root.account-label;
-            account-text: root.account-text;
-            signed-in: root.signed-in;
-            needs-sign-in: root.needs-sign-in;
-            sign-in-clicked => {
-                sign-in-error = "";
-                sign-in-dialog-visible = true;
-            }
-            sign-out-clicked => { sign-out(); }
-            connect-clicked => { connect-swarm(); }
-            disconnect-clicked => { disconnect-swarm(); }
-            reconnect-clicked => { reconnect-swarm(); }
-            arm-all-clicked => { arm-swarm(); }
-            disarm-all-clicked => { disarm-swarm(); }
-            upload-trajectory-swarm-clicked => { upload-trajectory-swarm(); }
-            fly-trajectory-swarm-clicked => { fly-trajectory-swarm(); }
-            sync-blink-clicked => { sync-blink(); }
-            delayed-sync-blink-clicked => { delayed-sync-blink(); }
-            land-swarm-clicked => { land-swarm(); }
-            reboot-swarm-clicked => { reboot-swarm(); }
-            sysoff-swarm-clicked => { sysoff-swarm(); }
-            syson-swarm-clicked => { syson-swarm(); }
-            power-off-swarm-clicked => { confirm-power-off-visible = true; }
-            clear-all-console-clicked => { clear-all-console(); }
-            download-toc-clicked => { download-toc(); }
-            rechannel-clicked => {
-                rc-dialog-visible = true;
-                rc-open();
-            }
-            upload-geometry-clicked => { upload-geometry(); }
-            upload-params-clicked => { upload-params(); }
-            clear-tlv-clicked => { confirm-clear-tlv-visible = true; }
-            tuning-clicked => { tuning-dialog-visible = true; }
-            set-param-clicked => {
-                set-param-selected-name = "";
-                set-param-selected-type = "";
-                set-param-search-text = "";
-                set-param-value-text = "";
-                set-param-persist = false;
-                swarm-params = [];
-                swarm-params-all = [];
-                set-param-loading = true;
-                set-param-dialog-visible = true;
-                refresh-swarm-params();
-            }
-            health-test-clicked => {
-                health-test-dialog-visible = true;
-                run-health-test();
-            }
-            flash-firmware-clicked => {
-                flash-dialog-visible = true;
-            }
+        Rail {
+            current <=> root.screen;
+            entries: [
+                { id: "status", label: "Status", icon: Icons.status, shown: true },
+                { id: "units", label: "Units", icon: Icons.units, shown: true },
+                { id: "view3d", label: "3D view", icon: Icons.view3d, shown: true },
+                { id: "plot", label: "Plot", icon: Icons.plot, shown: true },
+                { id: "planning", label: "Planning", icon: Icons.planning, shown: Features.planning },
+                { id: "lighthouse", label: "Lighthouse", icon: Icons.lighthouse, shown: Features.lighthouse },
+                { id: "loco", label: "Loco", icon: Icons.loco, shown: Features.loco },
+                { id: "radio", label: "Radio", icon: Icons.radio, shown: Features.radio },
+            ];
+            settings-entry: { id: "settings", label: "Settings", icon: Icons.settings, shown: true };
         }
 
-        SwarmInfoBar {
-            swarm-name: root.swarm-name;
-            swarm-source: root.swarm-source;
-            swarm-update: root.swarm-update;
-            reload-clicked => { reload-swarm(); }
-            units: root.units;
-            connected: root.swarm-connected;
-            connected-count: root.connected-count;
-            selftest-passed-count: root.selftest-passed-count;
-            battery-count: root.battery-count;
-            charging-count: root.charging-count;
-            charged-count: root.charged-count;
-            connect-clicked => { connect-swarm(); }
-            disconnect-clicked => { disconnect-swarm(); }
-            reconnect-clicked => { reconnect-swarm(); }
-            land-swarm-clicked => { land-swarm(); }
-            emergency-stop-clicked => { emergency-stop(); }
-        }
+        VerticalLayout {
+            spacing: 0px;
 
-        TabWidget {
-            Tab {
-                title: "Units";
-                units-content := UnitsContent {
-                    units: root.units;
-                    sorted-units: root.sorted-units;
-                    table-rows: root.unit-table-rows;
-                    sort-column: root.sort-column;
-                    sort-ascending: root.sort-ascending;
-                    journal-entries: root.journal-entries;
-                    console-lines: root.console-lines;
-                    assert-text: root.assert-text;
-                    assert-busy: root.assert-busy;
-                    sort-requested(col, ascending) => { sort-units(col, ascending); }
-                    open-journal-requested(row) => { open-journal(row); }
-                    add-journal-entry-requested(row, text) => { add-journal-entry(row, text); }
-                    open-console-requested(row) => { open-console(row); }
-                    clear-console-requested(row) => { clear-console(row); }
-                    clear-all-console-requested() => { clear-all-console(); }
-                    read-assert-requested(row) => { read-assert(row); }
-                    upload-trajectory-requested(row) => { upload-trajectory(row); }
-                    download-trajectory-requested(row) => { download-trajectory(row); }
-                    fly-trajectory-requested(row) => { fly-trajectory(row); }
-                    clear-trajectory-requested(row) => { clear-trajectory(row); }
-                    generate-primitive-requested(row, shape, size, sizey, zoff, ziter) => { generate-primitive(row, shape, size, sizey, zoff, ziter); }
-                    generate-wave-requested(row, x, y, reps, sim, speed, zoff, ziter) => { generate-wave(row, x, y, reps, sim, speed, zoff, ziter); }
-                    takeoff-requested(row, height, yaw, time, relative) => { hlc-takeoff(row, height, yaw, time, relative); }
-                    goto-requested(row, x, y, z, yaw, relative, speed) => { hlc-goto(row, x, y, z, yaw, relative, speed); }
-                    random-goto-requested(row) => { random-goto(row); }
-                    go-home-requested(row) => { hlc-go-home(row); }
-                    land-requested(row) => { hlc-land(row); }
-                    identify-requested(row) => { identify-unit(row); }
-                    connect-unit-requested(row) => { connect-unit(row); }
-                    disconnect-unit-requested(row) => { disconnect-unit(row); }
-                    delete-journal-entry-requested(row, entry-idx) => { delete-journal-entry(row, entry-idx); }
-                    row-selected(row) => { unit-row-selected(row); }
-                    joystick-names: root.joystick-names;
-                    stick-lx: root.stick-lx;
-                    stick-ly: root.stick-ly;
-                    stick-rx: root.stick-rx;
-                    stick-ry: root.stick-ry;
-                    manual-control-armed: root.manual-control-armed;
-                    open-manual-control-requested(row) => { open-manual-control(row); }
-                    joystick-selected(row, idx) => { start-manual-control(row, idx); }
-                    manual-control-stopped(row) => { stop-manual-control(row); }
-                    arm-requested(row, arm) => { arm-unit(row, arm); }
-                    recover-requested(row) => { recover-unit(row); }
-                    reboot-requested(row) => { reboot-unit(row); }
-                    power-off-requested(row) => { power-off-unit(row); }
-                    sysoff-requested(row) => { sysoff-unit(row); }
-                    syson-requested(row) => { syson-unit(row); }
-                    clear-tlv-requested(row) => { clear-tlv-unit(row); }
+            TopBar {
+                swarm-name: root.swarm-name;
+                swarm-source: root.swarm-source;
+                swarm-update: root.swarm-update;
+                unit-count: root.units.length;
+                open-swarm => {
+                    os-error = "";
+                    os-busy = false;
+                    os-dialog-visible = true;
+                    os-show();
                 }
-            }
-            Tab {
-                title: "Radio Test";
-                RadioTestContent {
-                    unit-names: root.radio-test-unit-names;
-                    selected-unit <=> root.radio-test-selected-unit;
-                    running: root.radio-test-running;
-                    swarm-connected: root.swarm-connected;
+                reload => { reload-swarm(); }
+                connected: root.swarm-connected;
+                connected-count: root.connected-count;
+                drives-radios: root.drives-radios;
+                connection-label: root.connection-label;
+                connection-text: root.connection-text;
+                connection-mode: root.connection-mode;
+                recent-servers: root.recent-servers;
+                connection-chosen(mode) => { root.connection-chosen(mode); }
+                connection-opened => { root.connection-opened(); }
+                account-name: root.account-label;
+                account-initials: root.account-initials;
+                account-picture: root.account-picture;
+                signed-in: root.signed-in;
+                needs-sign-in: root.needs-sign-in;
+                sign-in => {
+                    sign-in-error = "";
+                    sign-in-dialog-visible = true;
+                }
+                sign-out => { sign-out(); }
+                account-settings => {
+                    root.settings-section = 2;
+                    root.screen = "settings";
+                }
+                connect => { connect-swarm(); }
+                disconnect => { disconnect-swarm(); }
+                reconnect => { reconnect-swarm(); }
+                land-all => { land-swarm(); }
+                emergency-stop => { emergency-stop(); }
+
+                SwarmActionsButton {
+                    y: (parent.height - self.height) / 2;
+                    connected: root.swarm-connected;
                     drives-radios: root.drives-radios;
-                    progress: root.radio-test-progress;
-                    status-text: root.radio-test-status;
-                    results: root.radio-test-results;
-                    run-test(idx) => { run-radio-test(idx); }
+                    arm-all => { arm-swarm(); }
+                    disarm-all => { disarm-swarm(); }
+                    upload-trajectory => { upload-trajectory-swarm(); }
+                    fly-trajectory => { fly-trajectory-swarm(); }
+                    land-all => { land-swarm(); }
+                    sync-blink => { sync-blink(); }
+                    delayed-sync-blink => { delayed-sync-blink(); }
+                    health-test => {
+                        health-test-dialog-visible = true;
+                        run-health-test();
+                    }
+                    download-toc => { download-toc(); }
+                    clear-consoles => { clear-all-console(); }
+                    reboot => { reboot-swarm(); }
+                    sleep => { sysoff-swarm(); }
+                    wake-up => { syson-swarm(); }
+                    power-off => { confirm-power-off-visible = true; }
+                    flash-firmware => {
+                        FlashBridge.visible = true;
+                        FlashBridge.opened();
+                    }
+                    clear-tlv => { confirm-clear-tlv-visible = true; }
+                    rechannel => {
+                        RechannelBridge.visible = true;
+                        RechannelBridge.opened();
+                    }
+                    upload-geometry => { upload-geometry(); }
+                    upload-params => { upload-params(); }
+                    set-parameter => {
+                        set-param-selected-name = "";
+                        set-param-selected-type = "";
+                        set-param-search-text = "";
+                        set-param-value-text = "";
+                        set-param-persist = false;
+                        swarm-params = [];
+                        swarm-params-all = [];
+                        set-param-loading = true;
+                        set-param-dialog-visible = true;
+                        refresh-swarm-params();
+                    }
+                    tuning => { tuning-dialog-visible = true; }
                 }
             }
-            Tab {
-                title: "Loco";
-                LocoContent {
-                    positioning-source-names: root.positioning-source-names;
-                    positioning-source-index <=> root.positioning-source-index;
-                    positioning-source-changed(idx) => { root.positioning-source-changed(idx); }
-                    mode-text: root.loco-mode-text;
-                    anchors: root.loco-anchors;
-                    active-count: root.loco-active-count;
-                    total-count: root.loco-total-count;
-                    upload-status: root.loco-upload-status;
-                    upload-active: root.loco-upload-active;
-                    load-anchor-positions() => { root.load-anchor-positions(); }
-                    stop-anchor-upload() => { root.stop-anchor-upload(); }
-                }
-            }
-            Tab {
-                title: "Sniffer";
-                SnifferContent {
-                    port-names: root.sniffer-port-names;
-                    port-index <=> root.sniffer-port-index;
-                    connected: root.sniffer-connected;
-                    status-text: root.sniffer-status;
-                    total-packets: root.sniffer-total-packets;
-                    total-rate: root.sniffer-total-rate;
-                    wire-dropped: root.sniffer-wire-dropped;
-                    host-resyncs: root.sniffer-host-resyncs;
-                    air-lost: root.sniffer-air-lost;
-                    anchor-rows: root.sniffer-anchor-rows;
-                    matrix-ids: root.sniffer-matrix-ids;
-                    matrix-rows: root.sniffer-matrix-rows;
-                    survey-rows: root.sniffer-survey-rows;
-                    survey-status: root.sniffer-survey-status;
-                    ref-status: root.sniffer-ref-status;
-                    feed-rows: root.sniffer-feed-rows;
-                    paused <=> root.sniffer-paused;
-                    recording <=> root.sniffer-recording;
-                    recording-active: root.sniffer-recording-active;
-                    rec-count: root.sniffer-rec-count;
-                    rec-path: root.sniffer-rec-path;
-                    refresh-ports() => { root.sniffer-refresh-ports(); }
-                    connect() => { root.sniffer-connect(); }
-                    disconnect() => { root.sniffer-disconnect(); }
-                    solve-survey() => { root.sniffer-solve-survey(); }
-                    save-survey() => { root.sniffer-save-survey(); }
-                    set-paused(p) => { root.sniffer-set-paused(p); }
-                    set-recording(p) => { root.sniffer-set-recording(p); }
-                }
-            }
-            Tab {
-                title: "Visualization";
-                viz-content := VisualizationContent {
-                    texture <=> root.viz-texture;
-                    cf-labels: root.cf-labels;
-                    lh-labels: root.lh-labels;
-                    loco-labels: root.loco-labels;
-                    axis-labels: root.axis-labels;
-                    grid-labels: root.grid-labels;
-                    positioning-source-names: root.positioning-source-names;
-                    positioning-source-index <=> root.positioning-source-index;
-                    positioning-source-changed(idx) => { root.positioning-source-changed(idx); }
-                    save-pads => { root.viz-save-pads(); }
-                    load-scene => { root.viz-load-scene(); }
 
-                    // Shared unit sidebar (same component as the Units tab)
-                    sorted-units: root.sorted-units;
-                    journal-entries: root.journal-entries;
-                    console-lines: root.console-lines;
-                    assert-text: root.assert-text;
-                    assert-busy: root.assert-busy;
-                    joystick-names: root.joystick-names;
-                    stick-lx: root.stick-lx;
-                    stick-ly: root.stick-ly;
-                    stick-rx: root.stick-rx;
-                    stick-ry: root.stick-ry;
-                    manual-control-armed: root.manual-control-armed;
-                    viz-unit-clicked(x, y) => { root.viz-unit-clicked(x, y); }
-                    open-journal-requested(row) => { open-journal(row); }
-                    add-journal-entry-requested(row, text) => { add-journal-entry(row, text); }
-                    open-console-requested(row) => { open-console(row); }
-                    clear-console-requested(row) => { clear-console(row); }
-                    clear-all-console-requested() => { clear-all-console(); }
-                    read-assert-requested(row) => { read-assert(row); }
-                    upload-trajectory-requested(row) => { upload-trajectory(row); }
-                    download-trajectory-requested(row) => { download-trajectory(row); }
-                    fly-trajectory-requested(row) => { fly-trajectory(row); }
-                    clear-trajectory-requested(row) => { clear-trajectory(row); }
-                    generate-primitive-requested(row, shape, size, sizey, zoff, ziter) => { generate-primitive(row, shape, size, sizey, zoff, ziter); }
-                    generate-wave-requested(row, x, y, reps, sim, speed, zoff, ziter) => { generate-wave(row, x, y, reps, sim, speed, zoff, ziter); }
-                    takeoff-requested(row, height, yaw, time, relative) => { hlc-takeoff(row, height, yaw, time, relative); }
-                    goto-requested(row, x, y, z, yaw, relative, speed) => { hlc-goto(row, x, y, z, yaw, relative, speed); }
-                    random-goto-requested(row) => { random-goto(row); }
-                    go-home-requested(row) => { hlc-go-home(row); }
-                    land-requested(row) => { hlc-land(row); }
-                    identify-requested(row) => { identify-unit(row); }
-                    connect-unit-requested(row) => { connect-unit(row); }
-                    disconnect-unit-requested(row) => { disconnect-unit(row); }
-                    delete-journal-entry-requested(row, entry-idx) => { delete-journal-entry(row, entry-idx); }
-                    open-manual-control-requested(row) => { open-manual-control(row); }
-                    joystick-selected(row, idx) => { start-manual-control(row, idx); }
-                    manual-control-stopped(row) => { stop-manual-control(row); }
-                    arm-requested(row, arm) => { arm-unit(row, arm); }
-                    recover-requested(row) => { recover-unit(row); }
-                    reboot-requested(row) => { reboot-unit(row); }
-                    power-off-requested(row) => { power-off-unit(row); }
-                    sysoff-requested(row) => { sysoff-unit(row); }
-                    syson-requested(row) => { syson-unit(row); }
-                    clear-tlv-requested(row) => { clear-tlv-unit(row); }
+            screens := Rectangle {
+                vertical-stretch: 1;
+                // Each screen fills this; none of them sizes the window.
+                min-width: 0px;
+                max-width: 100000px;
+                min-height: 0px;
+                max-height: 100000px;
+                background: Theme.ground;
+
+                StatusScreen {
+                    visible: root.screen == "status";
+                    data: root.status;
+                    connected: root.swarm-connected;
+                    navigate(screen) => { root.screen = screen; }
+                    show-issues => {
+                        root.unit-filter = 3;
+                        root.unit-filter-changed();
+                        root.screen = "units";
+                    }
+                    open-unit(row) => {
+                        ViewSettings.selected-unit = row;
+                        root.unit-row-selected(row);
+                        root.screen = "units";
+                    }
+                    connect-unit(row) => { root.connect-unit(row); }
+                    recover-unit(row) => { root.recover-unit(row); }
+                    flash => {
+                        FlashBridge.visible = true;
+                        FlashBridge.opened();
+                    }
                 }
-            }
-            Tab {
-                title: "LH Wizard";
-                lh-wizard-content := LhWizardContent {
-                    texture <=> root.lh-wizard-texture;
-                    grid-labels: root.lh-wizard-grid-labels;
-                    measure-clicked => { root.lh-wizard-measure(); }
-                    step-next => { root.lh-wizard-step-next(); }
-                    step-prev => { root.lh-wizard-step-prev(); }
-                    clear-samples => { root.lh-wizard-clear(); }
-                    import-session => { root.lh-wizard-import(); }
-                    export-session => { root.lh-wizard-export(); }
-                    upload-geometry => { root.lh-wizard-upload(); }
-                    select-cf(idx) => { root.lh-wizard-select-cf(idx); }
-                    view-mouse-pressed(x, y) => { root.lh-wizard-view-mouse-pressed(x, y); }
-                    view-mouse-moved(x, y) => { root.lh-wizard-view-mouse-moved(x, y); }
-                    view-mouse-released => { root.lh-wizard-view-mouse-released(); }
-                    view-pan(dx, dy) => { root.lh-wizard-view-pan(dx, dy); }
+
+                PlotScreen {
+                    visible: root.screen == "plot";
                 }
-            }
-            Tab {
-                title: "Planning";
-                planning-content := PlanningContent {
-                    texture <=> root.planning-texture;
-                    base-stations <=> root.planning-base-stations;
-                    anchors <=> root.planning-anchors;
-                    obstacles <=> root.planning-obstacles;
-                    flight-areas <=> root.planning-flight-areas;
-                    waypoint-areas <=> root.planning-waypoint-areas;
-                    selected-type <=> root.planning-selected-type;
-                    selected-index <=> root.planning-selected-index;
-                    handle-active <=> root.planning-handle-active;
-                    active-handle <=> root.planning-active-handle;
-                    grid-labels: root.planning-grid-labels;
-                    stats-text-1: root.planning-stats-text-1;
-                    stats-text-2: root.planning-stats-text-2;
-                    stats-text-3: root.planning-stats-text-3;
-                    computing: root.planning-computing;
-                    save-scene => { root.planning-save-scene(); }
-                    load-scene => { root.planning-load-scene(); }
-                    load-lh-scene => { root.planning-load-lh-scene(); }
-                    load-tdoa3-scene => { root.planning-load-tdoa3-scene(); }
-                    add-base-station => { root.planning-add-bs(); }
-                    remove-base-station(idx) => { root.planning-remove-bs(idx); }
-                    duplicate-base-station(idx) => { root.planning-duplicate-bs(idx); }
-                    update-base-station(idx, data) => { root.planning-update-bs(idx, data); }
-                    add-anchor => { root.planning-add-anchor(); }
-                    remove-anchor(idx) => { root.planning-remove-anchor(idx); }
-                    duplicate-anchor(idx) => { root.planning-duplicate-anchor(idx); }
-                    update-anchor(idx, data) => { root.planning-update-anchor(idx, data); }
-                    add-box => { root.planning-add-box(); }
-                    add-cylinder => { root.planning-add-cylinder(); }
-                    remove-obstacle(idx) => { root.planning-remove-obstacle(idx); }
-                    duplicate-obstacle(idx) => { root.planning-duplicate-obstacle(idx); }
-                    update-obstacle(idx, data) => { root.planning-update-obstacle(idx, data); }
-                    add-flight-area => { root.planning-add-flight-area(); }
-                    remove-flight-area(idx) => { root.planning-remove-flight-area(idx); }
-                    update-flight-area(idx, data) => { root.planning-update-flight-area(idx, data); }
-                    select-flight-area(idx) => { root.planning-select-flight-area(idx); }
-                    add-waypoint-area => { root.planning-add-waypoint-area(); }
-                    remove-waypoint-area(idx) => { root.planning-remove-waypoint-area(idx); }
-                    update-waypoint-area(idx, data) => { root.planning-update-waypoint-area(idx, data); }
-                    select-waypoint-area(idx) => { root.planning-select-waypoint-area(idx); }
-                    undo => { root.planning-undo(); }
-                    recompute => { root.planning-recompute(); }
-                    error-metric-changed(idx) => { root.planning-error-metric-changed(idx); }
-                    trajectories-status: root.planning-trajectories-status;
-                    load-geometry => { root.planning-load-geometry(); }
-                    load-trajectories => { root.planning-load-trajectories(); }
-                    view-mouse-pressed(x, y) => { root.planning-view-mouse-pressed(x, y); }
-                    view-mouse-moved(x, y) => { root.planning-view-mouse-moved(x, y); }
-                    view-mouse-released => { root.planning-view-mouse-released(); }
-                    view-pan(dx, dy) => { root.planning-view-pan(dx, dy); }
+
+                SettingsScreen {
+                    visible: root.screen == "settings";
+                    section <=> root.settings-section;
+                    connection-mode: root.connection-mode;
+                    connection-text: root.connection-text;
+                    recent-servers: root.recent-servers;
+                    connection-chosen(mode) => { root.connection-chosen(mode); }
+                    forget-server(server) => { root.forget-server(server); }
+                    account-name: root.account-label;
+                    account-initials: root.account-initials;
+                    account-picture: root.account-picture;
+                    signed-in: root.signed-in;
+                    needs-sign-in: root.needs-sign-in;
+                    account-text: root.account-text;
+                    sign-in => {
+                        sign-in-error = "";
+                        sign-in-dialog-visible = true;
+                    }
+                    sign-out => { sign-out(); }
+                    clear-consoles => { clear-all-console(); }
+                }
+
+                // Units
+                VerticalLayout {
+                    visible: root.screen == "units";
+                    padding-left: 24px;
+                    padding-right: 24px;
+                    padding-top: 20px;
+                    padding-bottom: 24px;
+                    spacing: 16px;
+
+                    ScreenTitle {
+                        text: "Units";
+                        note: root.connected-count + " of " + root.units.length + " connected";
+                    }
+
+                    units-content := UnitsContent {
+                        plot-shown: root.screen == "units";
+                        vertical-stretch: 1;
+                        unit-rows: root.unit-rows;
+                        visible-count: root.unit-visible-count;
+                        summary: root.swarm-summary;
+                        counts: root.unit-filter-counts;
+                        filter <=> root.unit-filter;
+                        search <=> root.unit-search;
+                        filter-changed => { root.unit-filter-changed(); }
+                        units: root.units;
+                        sorted-units: root.sorted-units;
+                        sort-column: root.sort-column;
+                        sort-ascending: root.sort-ascending;
+                        journal-entries: root.journal-entries;
+                        console-lines: root.console-lines;
+                        assert-text: root.assert-text;
+                        assert-busy: root.assert-busy;
+                        sort-requested(col, ascending) => { sort-units(col, ascending); }
+                        open-journal-requested(row) => { open-journal(row); }
+                        add-journal-entry-requested(row, text) => { add-journal-entry(row, text); }
+                        open-console-requested(row) => { open-console(row); }
+                        clear-console-requested(row) => { clear-console(row); }
+                        clear-all-console-requested() => { clear-all-console(); }
+                        read-assert-requested(row) => { read-assert(row); }
+                        upload-trajectory-requested(row) => { upload-trajectory(row); }
+                        download-trajectory-requested(row) => { download-trajectory(row); }
+                        fly-trajectory-requested(row) => { fly-trajectory(row); }
+                        clear-trajectory-requested(row) => { clear-trajectory(row); }
+                        generate-primitive-requested(row, shape, size, sizey, zoff, ziter) => { generate-primitive(row, shape, size, sizey, zoff, ziter); }
+                        generate-wave-requested(row, x, y, reps, sim, speed, zoff, ziter) => { generate-wave(row, x, y, reps, sim, speed, zoff, ziter); }
+                        takeoff-requested(row, height, yaw, time, relative) => { hlc-takeoff(row, height, yaw, time, relative); }
+                        goto-requested(row, x, y, z, yaw, relative, speed) => { hlc-goto(row, x, y, z, yaw, relative, speed); }
+                        random-goto-requested(row) => { random-goto(row); }
+                        go-home-requested(row) => { hlc-go-home(row); }
+                        land-requested(row) => { hlc-land(row); }
+                        identify-requested(row) => { identify-unit(row); }
+                        delete-journal-entry-requested(row, entry-idx) => { delete-journal-entry(row, entry-idx); }
+                        row-selected(row) => { unit-row-selected(row); }
+                        joystick-names: root.joystick-names;
+                        stick-lx: root.stick-lx;
+                        stick-ly: root.stick-ly;
+                        stick-rx: root.stick-rx;
+                        stick-ry: root.stick-ry;
+                        manual-control-armed: root.manual-control-armed;
+                        open-manual-control-requested(row) => { open-manual-control(row); }
+                        joystick-selected(row, idx) => { start-manual-control(row, idx); }
+                        manual-control-stopped(row) => { stop-manual-control(row); }
+                        arm-requested(row, arm) => { arm-unit(row, arm); }
+                        recover-requested(row) => { recover-unit(row); }
+                        reboot-requested(row) => { reboot-unit(row); }
+                        power-off-requested(row) => { power-off-unit(row); }
+                        sysoff-requested(row) => { sysoff-unit(row); }
+                        syson-requested(row) => { syson-unit(row); }
+                        clear-tlv-requested(row) => { clear-tlv-unit(row); }
+                    }
+                }
+
+                // 3D view
+                Rectangle {
+                    visible: root.screen == "view3d";
+                    viz-content := VisualizationContent {
+                        plot-shown: root.screen == "view3d";
+                        texture <=> root.viz-texture;
+                        unit-labels: root.unit-labels;
+                        tip: root.viz-tip;
+                        legend: root.viz-legend;
+                        hover(x, y) => { root.viz-hover(x, y); }
+                        fit => { root.viz-fit(); }
+                        lh-labels: root.lh-labels;
+                        loco-labels: root.loco-labels;
+                        axis-labels: root.axis-labels;
+                        grid-labels: root.grid-labels;
+                        positioning-source-names: root.positioning-source-names;
+                        positioning-source-index <=> root.positioning-source-index;
+                        positioning-source-changed(idx) => { root.positioning-source-changed(idx); }
+                        save-pads => { root.viz-save-pads(); }
+                        load-scene => { root.viz-load-scene(); }
+
+                        // Shared unit sidebar (same component as the Units tab)
+                        sorted-units: root.sorted-units;
+                        unit-rows: root.unit-rows;
+                        journal-entries: root.journal-entries;
+                        console-lines: root.console-lines;
+                        assert-text: root.assert-text;
+                        assert-busy: root.assert-busy;
+                        joystick-names: root.joystick-names;
+                        stick-lx: root.stick-lx;
+                        stick-ly: root.stick-ly;
+                        stick-rx: root.stick-rx;
+                        stick-ry: root.stick-ry;
+                        manual-control-armed: root.manual-control-armed;
+                        viz-unit-clicked(x, y) => { root.viz-unit-clicked(x, y); }
+                        open-journal-requested(row) => { open-journal(row); }
+                        add-journal-entry-requested(row, text) => { add-journal-entry(row, text); }
+                        open-console-requested(row) => { open-console(row); }
+                        clear-console-requested(row) => { clear-console(row); }
+                        clear-all-console-requested() => { clear-all-console(); }
+                        read-assert-requested(row) => { read-assert(row); }
+                        upload-trajectory-requested(row) => { upload-trajectory(row); }
+                        download-trajectory-requested(row) => { download-trajectory(row); }
+                        fly-trajectory-requested(row) => { fly-trajectory(row); }
+                        clear-trajectory-requested(row) => { clear-trajectory(row); }
+                        generate-primitive-requested(row, shape, size, sizey, zoff, ziter) => { generate-primitive(row, shape, size, sizey, zoff, ziter); }
+                        generate-wave-requested(row, x, y, reps, sim, speed, zoff, ziter) => { generate-wave(row, x, y, reps, sim, speed, zoff, ziter); }
+                        takeoff-requested(row, height, yaw, time, relative) => { hlc-takeoff(row, height, yaw, time, relative); }
+                        goto-requested(row, x, y, z, yaw, relative, speed) => { hlc-goto(row, x, y, z, yaw, relative, speed); }
+                        random-goto-requested(row) => { random-goto(row); }
+                        go-home-requested(row) => { hlc-go-home(row); }
+                        land-requested(row) => { hlc-land(row); }
+                        identify-requested(row) => { identify-unit(row); }
+                        connect-unit-requested(row) => { connect-unit(row); }
+                        delete-journal-entry-requested(row, entry-idx) => { delete-journal-entry(row, entry-idx); }
+                        open-manual-control-requested(row) => { open-manual-control(row); }
+                        joystick-selected(row, idx) => { start-manual-control(row, idx); }
+                        manual-control-stopped(row) => { stop-manual-control(row); }
+                        arm-requested(row, arm) => { arm-unit(row, arm); }
+                        recover-requested(row) => { recover-unit(row); }
+                        reboot-requested(row) => { reboot-unit(row); }
+                        power-off-requested(row) => { power-off-unit(row); }
+                        sysoff-requested(row) => { sysoff-unit(row); }
+                        syson-requested(row) => { syson-unit(row); }
+                        clear-tlv-requested(row) => { clear-tlv-unit(row); }
+                    }
+                }
+
+                // Planning
+                Rectangle {
+                    visible: root.screen == "planning";
+                    planning-content := PlanningContent {
+                        texture <=> root.planning-texture;
+                        base-stations <=> root.planning-base-stations;
+                        anchors <=> root.planning-anchors;
+                        obstacles <=> root.planning-obstacles;
+                        flight-areas <=> root.planning-flight-areas;
+                        waypoint-areas <=> root.planning-waypoint-areas;
+                        selected-type <=> root.planning-selected-type;
+                        selected-index <=> root.planning-selected-index;
+                        handle-active <=> root.planning-handle-active;
+                        active-handle <=> root.planning-active-handle;
+                        grid-labels: root.planning-grid-labels;
+                        marks: root.planning-marks;
+                        select(kind, index) => { root.planning-select(kind, index); }
+                        save-scene-as => { root.planning-save-scene-as(); }
+                        stats-text-1: root.planning-stats-text-1;
+                        stats-text-2: root.planning-stats-text-2;
+                        stats-text-3: root.planning-stats-text-3;
+                        computing: root.planning-computing;
+                        save-scene => { root.planning-save-scene(); }
+                        load-scene => { root.planning-load-scene(); }
+                        load-lh-scene => { root.planning-load-lh-scene(); }
+                        load-tdoa3-scene => { root.planning-load-tdoa3-scene(); }
+                        add-base-station => { root.planning-add-bs(); }
+                        remove-base-station(idx) => { root.planning-remove-bs(idx); }
+                        duplicate-base-station(idx) => { root.planning-duplicate-bs(idx); }
+                        update-base-station(idx, data) => { root.planning-update-bs(idx, data); }
+                        add-anchor => { root.planning-add-anchor(); }
+                        remove-anchor(idx) => { root.planning-remove-anchor(idx); }
+                        duplicate-anchor(idx) => { root.planning-duplicate-anchor(idx); }
+                        update-anchor(idx, data) => { root.planning-update-anchor(idx, data); }
+                        add-box => { root.planning-add-box(); }
+                        add-cylinder => { root.planning-add-cylinder(); }
+                        remove-obstacle(idx) => { root.planning-remove-obstacle(idx); }
+                        duplicate-obstacle(idx) => { root.planning-duplicate-obstacle(idx); }
+                        update-obstacle(idx, data) => { root.planning-update-obstacle(idx, data); }
+                        add-flight-area => { root.planning-add-flight-area(); }
+                        remove-flight-area(idx) => { root.planning-remove-flight-area(idx); }
+                        update-flight-area(idx, data) => { root.planning-update-flight-area(idx, data); }
+                        select-flight-area(idx) => { root.planning-select-flight-area(idx); }
+                        add-waypoint-area => { root.planning-add-waypoint-area(); }
+                        remove-waypoint-area(idx) => { root.planning-remove-waypoint-area(idx); }
+                        update-waypoint-area(idx, data) => { root.planning-update-waypoint-area(idx, data); }
+                        select-waypoint-area(idx) => { root.planning-select-waypoint-area(idx); }
+                        undo => { root.planning-undo(); }
+                        recompute => { root.planning-recompute(); }
+                        error-metric-changed(idx) => { root.planning-error-metric-changed(idx); }
+                        trajectories-status: root.planning-trajectories-status;
+                        load-geometry => { root.planning-load-geometry(); }
+                        load-trajectories => { root.planning-load-trajectories(); }
+                        view-mouse-pressed(x, y) => { root.planning-view-mouse-pressed(x, y); }
+                        view-mouse-moved(x, y) => { root.planning-view-mouse-moved(x, y); }
+                        view-mouse-released => { root.planning-view-mouse-released(); }
+                        view-pan(dx, dy) => { root.planning-view-pan(dx, dy); }
+                    }
+                }
+
+                // Lighthouse
+                VerticalLayout {
+                    visible: root.screen == "lighthouse";
+                    padding-left: 24px;
+                    padding-right: 24px;
+                    padding-top: 20px;
+                    padding-bottom: 24px;
+                    spacing: 16px;
+                    ScreenTitle {
+                        text: "Lighthouse";
+                        note: "Set up the base station geometry";
+                    }
+                    Card {
+                        vertical-stretch: 1;
+                        lh-wizard-content := LhWizardContent {
+                            texture <=> root.lh-wizard-texture;
+                            grid-labels: root.lh-wizard-grid-labels;
+                            measure-clicked => { root.lh-wizard-measure(); }
+                            step-next => { root.lh-wizard-step-next(); }
+                            step-prev => { root.lh-wizard-step-prev(); }
+                            clear-samples => { root.lh-wizard-clear(); }
+                            import-session => { root.lh-wizard-import(); }
+                            export-session => { root.lh-wizard-export(); }
+                            upload-geometry => { root.lh-wizard-upload(); }
+                            select-cf(idx) => { root.lh-wizard-select-cf(idx); }
+                            view-mouse-pressed(x, y) => { root.lh-wizard-view-mouse-pressed(x, y); }
+                            view-mouse-moved(x, y) => { root.lh-wizard-view-mouse-moved(x, y); }
+                            view-mouse-released => { root.lh-wizard-view-mouse-released(); }
+                            view-pan(dx, dy) => { root.lh-wizard-view-pan(dx, dy); }
+                        }
+                    }
+                }
+
+                // Loco: anchors and the sniffer
+                VerticalLayout {
+                    visible: root.screen == "loco";
+                    padding-left: 24px;
+                    padding-right: 24px;
+                    padding-top: 20px;
+                    padding-bottom: 24px;
+                    spacing: 16px;
+                    HorizontalLayout {
+                        spacing: 16px;
+                        ScreenTitle {
+                            text: "Loco";
+                            note: "";
+                        }
+                        loco-tabs := Segmented {
+                            items: [{ label: "Anchors", count: "", attention: false }, { label: "Sniffer", count: "", attention: false }];
+                        }
+                        Rectangle { horizontal-stretch: 1; }
+                    }
+                    Card {
+                        vertical-stretch: 1;
+                        Rectangle {
+                            visible: loco-tabs.current == 0;
+                            LocoContent {
+                                positioning-source-names: root.positioning-source-names;
+                                positioning-source-index <=> root.positioning-source-index;
+                                positioning-source-changed(idx) => { root.positioning-source-changed(idx); }
+                                mode-text: root.loco-mode-text;
+                                anchors: root.loco-anchors;
+                                active-count: root.loco-active-count;
+                                total-count: root.loco-total-count;
+                                upload-status: root.loco-upload-status;
+                                upload-active: root.loco-upload-active;
+                                load-anchor-positions() => { root.load-anchor-positions(); }
+                                stop-anchor-upload() => { root.stop-anchor-upload(); }
+                            }
+                        }
+                        Rectangle {
+                            visible: loco-tabs.current == 1;
+                            SnifferContent {
+                                port-names: root.sniffer-port-names;
+                                port-index <=> root.sniffer-port-index;
+                                connected: root.sniffer-connected;
+                                status-text: root.sniffer-status;
+                                total-packets: root.sniffer-total-packets;
+                                total-rate: root.sniffer-total-rate;
+                                wire-dropped: root.sniffer-wire-dropped;
+                                host-resyncs: root.sniffer-host-resyncs;
+                                air-lost: root.sniffer-air-lost;
+                                anchor-rows: root.sniffer-anchor-rows;
+                                matrix-ids: root.sniffer-matrix-ids;
+                                matrix-rows: root.sniffer-matrix-rows;
+                                survey-rows: root.sniffer-survey-rows;
+                                survey-status: root.sniffer-survey-status;
+                                ref-status: root.sniffer-ref-status;
+                                feed-rows: root.sniffer-feed-rows;
+                                paused <=> root.sniffer-paused;
+                                recording <=> root.sniffer-recording;
+                                recording-active: root.sniffer-recording-active;
+                                rec-count: root.sniffer-rec-count;
+                                rec-path: root.sniffer-rec-path;
+                                refresh-ports() => { root.sniffer-refresh-ports(); }
+                                connect() => { root.sniffer-connect(); }
+                                disconnect() => { root.sniffer-disconnect(); }
+                                solve-survey() => { root.sniffer-solve-survey(); }
+                                save-survey() => { root.sniffer-save-survey(); }
+                                set-paused(p) => { root.sniffer-set-paused(p); }
+                                set-recording(p) => { root.sniffer-set-recording(p); }
+                            }
+                        }
+                    }
+                }
+
+                // Radio
+                VerticalLayout {
+                    visible: root.screen == "radio";
+                    padding-left: 24px;
+                    padding-right: 24px;
+                    padding-top: 20px;
+                    padding-bottom: 24px;
+                    spacing: 16px;
+                    ScreenTitle {
+                        text: "Radio";
+                        note: "Channel test";
+                    }
+                    Card {
+                        vertical-stretch: 1;
+                        RadioTestContent {
+                            unit-names: root.radio-test-unit-names;
+                            selected-unit <=> root.radio-test-selected-unit;
+                            running: root.radio-test-running;
+                            swarm-connected: root.swarm-connected;
+                            drives-radios: root.drives-radios;
+                            progress: root.radio-test-progress;
+                            status-text: root.radio-test-status;
+                            results: root.radio-test-results;
+                            run-test(idx) => { run-radio-test(idx); }
+                        }
+                    }
                 }
             }
         }
@@ -2050,177 +1548,10 @@ export component AppWindow inherits Window {
     }
 
     // Flash firmware dialog
-    if flash-dialog-visible: Rectangle {
-        width: 100%;
-        height: 100%;
-        background: black.transparentize(0.5);
-
-        TouchArea {
-            clicked => { if (!root.flashing) { flash-dialog-visible = false; } }
-        }
-
-        Rectangle {
-            width: 520px;
-            height: 600px;
-            x: (parent.width - self.width) / 2;
-            y: (parent.height - self.height) / 2;
-            background: Palette.background;
-            border-radius: 8px;
-            border-width: 1px;
-            border-color: Palette.border;
-
-            TouchArea {}
-
-            VerticalLayout {
-                padding: 24px;
-                spacing: 12px;
-
-                Text {
-                    text: "Flash Firmware";
-                    font-size: 16px;
-                    font-weight: 600;
-                }
-
-                Text {
-                    text: "Select a target and a binary, then flash every unit in the swarm. stm32-fw / nrf51-fw go to all units at once where their bootloaders take broadcast, else one at a time, and each unit is connected again after. Deck targets are flashed one unit at a time, disconnect the swarm, and only work when Swarmkeeper drives the Crazyradios.";
-                    font-size: 12px;
-                    color: Palette.foreground.transparentize(0.3);
-                    wrap: word-wrap;
-                }
-
-                HorizontalLayout {
-                    spacing: 8px;
-                    Text { text: "Target"; vertical-alignment: center; width: 70px; }
-                    ComboBox {
-                        model: root.flash-target-names;
-                        current-index <=> root.flash-selected-target;
-                        enabled: !root.flashing;
-                        horizontal-stretch: 1;
-                    }
-                }
-
-                HorizontalLayout {
-                    spacing: 8px;
-                    Text { text: "Binary"; vertical-alignment: center; width: 70px; }
-                    Text {
-                        text: root.flash-binary-selected ? root.flash-binary-name : "No file selected";
-                        font-size: 12px;
-                        vertical-alignment: center;
-                        horizontal-stretch: 1;
-                        overflow: elide;
-                        color: root.flash-binary-selected ? Palette.foreground : Palette.foreground.transparentize(0.4);
-                    }
-                    Button {
-                        text: "Select Binary...";
-                        enabled: !root.flashing;
-                        clicked => { flash-select-binary(); }
-                    }
-                }
-
-                // Per-Crazyflie progress list
-                Rectangle {
-                    vertical-stretch: 1;
-                    border-radius: 4px;
-                    border-width: 1px;
-                    border-color: Palette.border;
-                    background: Palette.alternate-background;
-
-                    ScrollView {
-                        VerticalLayout {
-                            padding: 4px;
-                            spacing: 3px;
-
-                            for unit in root.units: Rectangle {
-                                height: 46px;
-                                border-radius: 3px;
-                                background: Palette.background;
-
-                                VerticalLayout {
-                                    padding-left: 8px;
-                                    padding-right: 8px;
-                                    padding-top: 5px;
-                                    padding-bottom: 5px;
-                                    spacing: 4px;
-
-                                    HorizontalLayout {
-                                        spacing: 8px;
-                                        Text {
-                                            text: unit.name;
-                                            font-size: 12px;
-                                            font-weight: 600;
-                                            vertical-alignment: center;
-                                            horizontal-stretch: 1;
-                                            overflow: elide;
-                                        }
-                                        Text {
-                                            text: unit.flash-status == "" ? "Idle" : unit.flash-status;
-                                            font-size: 11px;
-                                            color: Palette.foreground.transparentize(0.3);
-                                            vertical-alignment: center;
-                                        }
-                                    }
-
-                                    Rectangle {
-                                        height: 6px;
-                                        border-radius: 3px;
-                                        background: Palette.border;
-
-                                        Rectangle {
-                                            x: 0px;
-                                            width: parent.width * unit.flash-progress;
-                                            height: parent.height;
-                                            border-radius: 3px;
-                                            background: dodgerblue;
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-
-                Text {
-                    text: root.flash-overall-status;
-                    font-size: 12px;
-                    color: Palette.foreground.transparentize(0.3);
-                    wrap: word-wrap;
-                }
-
-                HorizontalLayout {
-                    alignment: end;
-                    spacing: 8px;
-
-                    Button {
-                        text: "Close";
-                        enabled: !root.flashing;
-                        clicked => { flash-dialog-visible = false; }
-                    }
-                    Button {
-                        text: "Flash Swarm";
-                        enabled: root.flash-binary-selected && !root.flashing;
-                        clicked => { flash-start(); }
-                    }
-                }
-            }
-        }
-    }
+    if FlashBridge.visible: FlashDialog {}
 
     // Rechannel swarm dialog
-    if rc-dialog-visible: RechannelDialog {
-        rows: root.rc-rows;
-        radios: root.rc-radios;
-        count <=> root.rc-count;
-        channels <=> root.rc-channels;
-        plan-error: root.rc-plan-error;
-        summary: root.rc-summary;
-        moving: root.rc-moving;
-        running: root.rc-running;
-        status: root.rc-status;
-        count-edited(count) => { root.rc-count-edited(count); }
-        channels-edited(text) => { root.rc-channels-edited(text); }
-        start => { root.rc-start(); }
-        close => { root.rc-dialog-visible = false; }
-    }
+    if RechannelBridge.visible: RechannelDialog {}
 
     // Open swarm dialog
     if os-dialog-visible: OpenSwarmDialog {

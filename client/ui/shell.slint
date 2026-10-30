@@ -1,0 +1,503 @@
+// The frame around every screen: the icon rail on the left and the top bar
+// with the swarm, the connection, the swarm actions and the safety buttons.
+
+import { LineEdit } from "std-widgets.slint";
+import { Theme, Icons, Icon, KButton, ButtonKind, IconButton, Dot, Pill, VSeparator, MenuPanel, MenuRow, MenuSeparator, MenuGroupTitle, Avatar } from "kit.slint";
+
+export struct RailEntry {
+    id: string,
+    label: string,
+    icon: image,
+    shown: bool,
+}
+
+component RailItem inherits Rectangle {
+    in property <RailEntry> entry;
+    in property <bool> on;
+    callback clicked();
+
+    width: 64px;
+    height: 58px;
+    border-radius: 10px;
+    background: root.on ? Theme.accent-tint : touch.has-hover ? Theme.hover : transparent;
+
+    property <color> fg: root.on ? Theme.accent-text : touch.has-hover ? Theme.text : Theme.text3;
+
+    VerticalLayout {
+        alignment: center;
+        spacing: 4px;
+        HorizontalLayout {
+            alignment: center;
+            Icon {
+                source: root.entry.icon;
+                width: 22px;
+                height: 22px;
+                color: root.fg;
+            }
+        }
+        Text {
+            text: root.entry.label;
+            font-size: Theme.font-tiny;
+            font-weight: 500;
+            color: root.fg;
+            horizontal-alignment: center;
+        }
+    }
+
+    touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+}
+
+export component Rail inherits Rectangle {
+    in property <[RailEntry]> entries;
+    in property <RailEntry> settings-entry;
+    in-out property <string> current;
+    callback navigate(string);
+
+    width: 76px;
+    background: Theme.surface;
+
+    Rectangle {
+        x: parent.width - 1px;
+        width: 1px;
+        background: Theme.border;
+    }
+
+    VerticalLayout {
+        padding-top: 12px;
+        padding-bottom: 12px;
+        spacing: 4px;
+        alignment: start;
+
+        HorizontalLayout {
+            alignment: center;
+            padding-bottom: 12px;
+            Rectangle {
+                width: 40px;
+                height: 40px;
+                border-radius: 10px;
+                background: Theme.accent-button;
+                Icon {
+                    source: Icons.logo;
+                    width: 24px;
+                    height: 24px;
+                    color: #ffffff;
+                }
+            }
+        }
+        for entry in root.entries: HorizontalLayout {
+            alignment: center;
+            visible: entry.shown;
+            height: entry.shown ? 58px : 0px;
+            RailItem {
+                entry: entry;
+                on: root.current == entry.id;
+                clicked => {
+                    root.current = entry.id;
+                    root.navigate(entry.id);
+                }
+            }
+        }
+    }
+
+    HorizontalLayout {
+        y: parent.height - 12px - 58px;
+        height: 58px;
+        alignment: center;
+        RailItem {
+            entry: root.settings-entry;
+            on: root.current == root.settings-entry.id;
+            clicked => {
+                root.current = root.settings-entry.id;
+                root.navigate(root.settings-entry.id);
+            }
+        }
+    }
+}
+
+export component TopBar inherits Rectangle {
+    // The swarm
+    in property <string> swarm-name;
+    in property <string> swarm-source;
+    in property <int> unit-count;
+    // A newer revision of a shared swarm, if there is one.
+    in property <string> swarm-update;
+    callback open-swarm();
+    callback reload();
+
+    // Connection state
+    in property <bool> connected;
+    in property <int> connected-count;
+    in property <bool> drives-radios;
+    in property <string> connection-label;
+    in property <string> connection-text;
+    in property <string> connection-mode;
+    // Connection servers used before, the last one first
+    in property <[string]> recent-servers;
+    callback connection-chosen(string);
+    callback connection-opened();
+
+    // Account on arc.bitcraze.io
+    in property <string> account-name;
+    in property <string> account-initials;
+    in property <image> account-picture;
+    in property <bool> signed-in;
+    in property <bool> needs-sign-in;
+    callback sign-in();
+    callback sign-out();
+    callback account-settings();
+
+    callback connect();
+    callback disconnect();
+    callback reconnect();
+    callback land-all();
+    callback emergency-stop();
+
+    property <int> missing: root.unit-count - root.connected-count;
+
+    height: 60px;
+    background: Theme.surface;
+
+    Rectangle {
+        y: parent.height - 1px;
+        height: 1px;
+        background: Theme.border;
+    }
+
+    HorizontalLayout {
+        padding-left: 12px;
+        padding-right: 20px;
+        spacing: 12px;
+        alignment: stretch;
+
+        // The swarm switcher
+        switcher := Rectangle {
+            y: (parent.height - self.height) / 2;
+            height: 48px;
+            min-width: switcher-layout.min-width;
+            border-radius: 10px;
+            background: switcher-touch.has-hover ? Theme.hover : transparent;
+
+            switcher-layout := HorizontalLayout {
+                padding-left: 6px;
+                padding-right: 10px;
+                spacing: 10px;
+                alignment: start;
+
+                Rectangle {
+                    y: (parent.height - self.height) / 2;
+                    width: 36px;
+                    height: 36px;
+                    border-radius: 9px;
+                    background: Theme.surface2;
+                    border-width: 1px;
+                    border-color: Theme.border;
+                    Icon {
+                        source: Icons.swarm;
+                        width: 20px;
+                        height: 20px;
+                        color: Theme.text2;
+                    }
+                }
+                VerticalLayout {
+                    alignment: center;
+                    Text {
+                        text: root.swarm-name == "" ? "No swarm open" : root.swarm-name;
+                        font-size: 14px;
+                        font-weight: 600;
+                        color: Theme.text;
+                    }
+                    Text {
+                        text: root.unit-count + " units" + (root.swarm-source == "" ? "" : " · " + root.swarm-source);
+                        font-size: Theme.font-small;
+                        color: Theme.text3;
+                    }
+                }
+                Icon {
+                    y: (parent.height - self.height) / 2;
+                    source: Icons.chevron-down;
+                    width: 16px;
+                    height: 16px;
+                }
+            }
+
+            switcher-touch := TouchArea {
+                mouse-cursor: pointer;
+                clicked => { root.open-swarm(); }
+            }
+        }
+
+        if root.swarm-update != "": Pill {
+            y: (parent.height - self.height) / 2;
+            text: root.swarm-update + " · Reload";
+            fg: Theme.accent-text;
+            fill: Theme.accent-tint;
+            clicked => { root.reload(); }
+        }
+
+        VSeparator { y: (parent.height - self.height) / 2; }
+
+        // How the Crazyflies are reached
+        HorizontalLayout {
+            spacing: 8px;
+            alignment: start;
+            connection-pill := Pill {
+                y: (parent.height - self.height) / 2;
+                has-dot: true;
+                text: !root.connected ? "Not connected"
+                    : root.missing > 0 ? root.connected-count + " of " + root.unit-count + " connected"
+                    : "All " + root.unit-count + " connected";
+                dot: !root.connected ? Theme.off : root.missing > 0 ? Theme.warn : Theme.good;
+                hollow: !root.connected;
+                clicked => {
+                    root.connection-opened();
+                    connection-popup.show();
+                }
+            }
+            Text {
+                text: root.connection-label;
+                font-size: 12.5px;
+                color: Theme.text3;
+                vertical-alignment: center;
+                overflow: elide;
+                min-width: 0px;
+            }
+        }
+
+        Rectangle { horizontal-stretch: 1; }
+
+        HorizontalLayout {
+            spacing: 8px;
+            alignment: end;
+            if root.connected && root.missing > 0: KButton {
+                y: (parent.height - self.height) / 2;
+                text: "Reconnect " + root.missing;
+                icon: Icons.reconnect;
+                clicked => { root.reconnect(); }
+            }
+            if root.connected: KButton {
+                y: (parent.height - self.height) / 2;
+                text: "Disconnect";
+                clicked => { root.disconnect(); }
+            }
+            if !root.connected: KButton {
+                y: (parent.height - self.height) / 2;
+                text: "Connect swarm";
+                icon: Icons.plug;
+                kind: ButtonKind.primary;
+                enabled: root.unit-count > 0;
+                clicked => { root.connect(); }
+            }
+            // Swarm actions
+            @children
+            VSeparator { y: (parent.height - self.height) / 2; }
+            KButton {
+                y: (parent.height - self.height) / 2;
+                text: "Land all";
+                icon: Icons.land;
+                enabled: root.connected;
+                clicked => { root.land-all(); }
+            }
+            KButton {
+                y: (parent.height - self.height) / 2;
+                text: "Emergency stop";
+                icon: Icons.estop;
+                kind: ButtonKind.estop;
+                clicked => { root.emergency-stop(); }
+            }
+            account := Rectangle {
+                y: (parent.height - self.height) / 2;
+                width: 36px;
+                height: 36px;
+                Avatar {
+                    initials: root.signed-in && !root.needs-sign-in ? root.account-initials : "";
+                    picture: root.account-picture;
+                    opacity: account-touch.has-hover ? 0.85 : 1.0;
+                }
+                if root.signed-in && root.needs-sign-in: Rectangle {
+                    x: parent.width - 9px;
+                    y: 1px;
+                    width: 9px;
+                    height: 9px;
+                    border-radius: 4.5px;
+                    background: Theme.crit;
+                    border-width: 1.5px;
+                    border-color: Theme.surface;
+                }
+                account-touch := TouchArea {
+                    mouse-cursor: pointer;
+                    clicked => { account-popup.show(); }
+                }
+            }
+        }
+    }
+
+    connection-popup := PopupWindow {
+        x: max(0px, connection-pill.absolute-position.x - root.absolute-position.x);
+        y: root.height - 4px;
+        width: 460px;
+        // The server address field takes clicks.
+        close-policy: PopupClosePolicy.close-on-click-outside;
+
+        property <bool> remote: root.connection-mode != "auto" && root.connection-mode != "shared"
+            && root.connection-mode != "direct" && root.connection-mode != "local";
+
+        MenuPanel {
+            width: 460px;
+            height: connection-menu.preferred-height;
+
+            connection-menu := VerticalLayout {
+                padding: 6px;
+                spacing: 0px;
+
+                VerticalLayout {
+                    padding: 8px;
+                    padding-bottom: 10px;
+                    spacing: 4px;
+                    Text {
+                        text: "How Swarmkeeper reaches the Crazyflies";
+                        font-size: 13px;
+                        font-weight: 600;
+                        color: Theme.text;
+                    }
+                    Text {
+                        text: root.connection-text;
+                        font-size: Theme.font-small;
+                        color: Theme.text2;
+                        wrap: word-wrap;
+                    }
+                }
+                MenuSeparator {}
+                MenuRow {
+                    text: "Automatic";
+                    hint: "a server here if one runs, else shared";
+                    checked: root.connection-mode == "auto";
+                    clicked => { root.connection-chosen("auto"); connection-popup.close(); }
+                }
+                MenuRow {
+                    text: "Shared";
+                    hint: "this computer's radios, other programs too";
+                    checked: root.connection-mode == "shared";
+                    clicked => { root.connection-chosen("shared"); connection-popup.close(); }
+                }
+                MenuRow {
+                    text: "Direct";
+                    hint: "this computer's radios, Swarmkeeper only";
+                    checked: root.connection-mode == "direct";
+                    clicked => { root.connection-chosen("direct"); connection-popup.close(); }
+                }
+                MenuRow {
+                    text: "Local server";
+                    hint: "cfcli server run";
+                    checked: root.connection-mode == "local";
+                    clicked => { root.connection-chosen("local"); connection-popup.close(); }
+                }
+                HorizontalLayout {
+                    padding-left: 10px;
+                    padding-right: 4px;
+                    padding-top: 6px;
+                    padding-bottom: 4px;
+                    spacing: 8px;
+                    Rectangle {
+                        width: 16px;
+                        if connection-popup.remote: Icon {
+                            source: Icons.check;
+                            width: 16px;
+                            height: 16px;
+                            color: Theme.accent-text;
+                        }
+                    }
+                    Text {
+                        text: "Server at";
+                        font-size: 13px;
+                        color: Theme.text;
+                        vertical-alignment: center;
+                    }
+                    remote-address := LineEdit {
+                        placeholder-text: "host or host:port";
+                        text: connection-popup.remote ? root.connection-mode : "";
+                        accepted(address) => { root.connection-chosen(address); connection-popup.close(); }
+                    }
+                    KButton {
+                        text: "Use";
+                        small: true;
+                        y: (parent.height - self.height) / 2;
+                        enabled: remote-address.text != "";
+                        clicked => { root.connection-chosen(remote-address.text); connection-popup.close(); }
+                    }
+                }
+                if root.recent-servers.length > 0: MenuGroupTitle { text: "RECENT SERVERS"; }
+                for server in root.recent-servers: MenuRow {
+                    text: server;
+                    icon: Icons.server;
+                    checked: root.connection-mode == server;
+                    clicked => { root.connection-chosen(server); connection-popup.close(); }
+                }
+            }
+        }
+    }
+
+    account-popup := PopupWindow {
+        x: root.width - 280px - 20px;
+        y: root.height - 4px;
+        width: 280px;
+
+        MenuPanel {
+            width: 280px;
+            height: account-menu.preferred-height;
+
+            account-menu := VerticalLayout {
+                padding: 6px;
+
+                HorizontalLayout {
+                    padding: 8px;
+                    padding-bottom: 10px;
+                    spacing: 10px;
+                    Avatar {
+                        y: (parent.height - self.height) / 2;
+                        size: 40px;
+                        initials: root.signed-in && !root.needs-sign-in ? root.account-initials : "";
+                        picture: root.account-picture;
+                    }
+                    VerticalLayout {
+                        alignment: center;
+                        spacing: 2px;
+                        Text {
+                            text: !root.signed-in ? "Not signed in"
+                                : root.needs-sign-in ? "Sign in again" : root.account-name;
+                            font-size: 13px;
+                            font-weight: 600;
+                            color: Theme.text;
+                            overflow: elide;
+                        }
+                        Text {
+                            text: "arc.bitcraze.io";
+                            font-size: Theme.font-small;
+                            color: Theme.text3;
+                            overflow: elide;
+                        }
+                    }
+                }
+                MenuSeparator {}
+                if root.needs-sign-in: MenuRow {
+                    text: root.signed-in ? "Sign in again…" : "Sign in…";
+                    icon: Icons.user;
+                    // Call before closing: closing drops the popup, and with it
+                    // this conditional item's way back to the top bar.
+                    clicked => { root.sign-in(); account-popup.close(); }
+                }
+                MenuRow {
+                    text: "Account settings";
+                    icon: Icons.settings;
+                    clicked => { root.account-settings(); account-popup.close(); }
+                }
+                if root.signed-in: MenuRow {
+                    text: "Sign out";
+                    clicked => { root.sign-out(); account-popup.close(); }
+                }
+            }
+        }
+    }
+}

@@ -1,233 +1,530 @@
-import { Palette, Button, LineEdit, SpinBox, ScrollView } from "std-widgets.slint";
+// Rechannel the swarm: spread it over several radio channels, so that it can
+// use one Crazyradio per channel (rechannel_dialog.rs, rechannel.rs).
+
+import { ScrollView } from "std-widgets.slint";
+import { Theme, Icons, Icon, KButton, ButtonKind, IconButton, TextField, Dialog } from "kit.slint";
 
 export enum RcRowState { idle, busy, done, failed }
 
-export struct RechannelRow {
+// A unit in a channel's lane.
+export struct RcChip {
     name: string,
-    uri: string,
-    from: string,          // channel now, empty when not reached over the radio
-    to: string,            // channel after the move
+    // Comes from another channel
     moves: bool,
+    state: RcRowState,
+    // Wasn't connected when the dialog opened
+    offline: bool,
+}
+
+// A channel and the units that end up on it.
+export struct RcLane {
+    channel: int,
+    radio: string,
+    // More channels than Crazyradios: this one shares one
+    shares-radio: bool,
+    units: [RcChip],
+}
+
+// A unit that changes channel.
+export struct RcMove {
+    name: string,
+    from: string,
+    to: string,
     state: RcRowState,
     status: string,
 }
 
-global RcColors {
-    out property <color> done: #2e7d32;
-    out property <color> failed: #c62828;
-    out property <color> moving: dodgerblue;
+export global RechannelBridge {
+    in-out property <bool> visible;
+    in property <int> radios;
+    in property <[int]> channels;
+    in property <[RcLane]> lanes;
+    // The most units in a lane, and whether a lane shares a Crazyradio
+    in property <int> lane-units;
+    in property <bool> lanes-share;
+    in property <[RcMove]> moves;
+    in property <string> plan-title;
+    in property <string> plan-text;
+    // Why the plan can't be carried out
+    in property <string> plan-error;
+    // Moving units that weren't connected
+    in property <string> offline-text;
+    // A channel that couldn't be added
+    in property <string> channel-error;
+    in property <string> moves-note;
+    in property <string> status;
+    in property <bool> running;
+    in property <bool> finished;
+    in property <int> moving;
+
+    callback opened();
+    callback set-count(int);
+    callback remove-channel(int);
+    callback add-channel(string);
+    callback one-per-radio();
+    callback start();
+    callback connect-swarm();
 }
 
-// Spread the swarm over several radio channels, so that it can use one
-// Crazyradio per channel.
-export component RechannelDialog inherits Rectangle {
-    in property <[RechannelRow]> rows;
-    in property <int> radios;              // Crazyradios attached
-    in-out property <int> count: 1;
-    in-out property <string> channels;
-    in property <string> plan-error;       // why the plan can't be carried out
-    in property <string> summary;
-    in property <int> moving;              // Crazyflies that change channel
-    in property <bool> running;
-    in property <string> status;
+component SectionLabel inherits Text {
+    font-size: Theme.font-tiny;
+    font-weight: 600;
+    color: Theme.text3;
+}
 
-    callback count-edited(/* count */ int);
-    callback channels-edited(/* text */ string);
-    callback start();
-    callback close();
-
-    width: 100%;
-    height: 100%;
-    background: black.transparentize(0.5);
-
-    TouchArea {
-        clicked => { if (!root.running) { root.close(); } }
-    }
-
-    Rectangle {
-        width: min(700px, parent.width - 40px);
-        height: min(680px, parent.height - 40px);
-        x: (parent.width - self.width) / 2;
-        y: (parent.height - self.height) / 2;
-        background: Palette.background;
-        border-radius: 8px;
-        border-width: 1px;
-        border-color: Palette.border;
-
-        TouchArea {}
-
+// A note in a tinted box
+component NoteBox inherits Rectangle {
+    in property <string> title;
+    in property <string> text;
+    in property <image> icon;
+    in property <color> tint: Theme.surface2;
+    in property <color> fg: Theme.text2;
+    in property <color> title-color: Theme.text;
+    border-radius: 10px;
+    background: root.tint;
+    border-width: root.tint == Theme.surface2 ? 1px : 0px;
+    border-color: Theme.border;
+    height: note-layout.preferred-height;
+    note-layout := HorizontalLayout {
+        padding: 10px;
+        padding-left: 12px;
+        spacing: 10px;
         VerticalLayout {
-            padding: 24px;
-            spacing: 12px;
-
-            Text {
-                text: "Rechannel Swarm";
-                font-size: 16px;
-                font-weight: 600;
+            alignment: start;
+            Icon {
+                source: root.icon;
+                width: 18px;
+                height: 18px;
+                color: root.fg;
             }
-
-            Text {
-                text: "Crazyflies on the same channel always share a Crazyradio, so a swarm on one channel can't use more than one. This moves the Crazyflies onto several channels, an equal share on each, keeping as many as possible where they are. Each one that moves is reprogrammed on its old channel, rebooted and looked for on its new one; its URI in the swarm file only changes once it answers there. The swarm is disconnected first.";
-                font-size: 12px;
-                color: Palette.foreground.transparentize(0.3);
+        }
+        VerticalLayout {
+            horizontal-stretch: 1;
+            spacing: 2px;
+            if root.title != "": Text {
+                text: root.title;
+                font-size: 12.5px;
+                font-weight: 600;
+                color: root.title-color;
                 wrap: word-wrap;
             }
+            Text {
+                text: root.text;
+                font-size: 12.5px;
+                color: root.fg;
+                wrap: word-wrap;
+            }
+        }
+    }
+}
 
+// A unit in a lane: where it stays, comes from, and how its move goes
+component Chip inherits Rectangle {
+    in property <RcChip> chip;
+    border-radius: 5px;
+    border-width: 1px;
+    border-color: !root.chip.moves || root.chip.state != RcRowState.idle ? transparent
+        : root.chip.offline ? Theme.border2 : transparent;
+    background: !root.chip.moves ? Theme.surface2
+        : root.chip.state == RcRowState.busy ? Theme.accent-button
+        : root.chip.state == RcRowState.done ? Theme.good.transparentize(0.82)
+        : root.chip.state == RcRowState.failed ? Theme.crit-tint
+        : root.chip.offline ? Theme.surface : Theme.accent-tint;
+    Text {
+        width: parent.width - 8px;
+        horizontal-alignment: center;
+        overflow: elide;
+        text: root.chip.name;
+        font-size: Theme.font-tiny;
+        font-weight: 500;
+        color: !root.chip.moves ? Theme.text2
+            : root.chip.state == RcRowState.busy ? #ffffff
+            : root.chip.state == RcRowState.done ? Theme.good
+            : root.chip.state == RcRowState.failed ? Theme.crit-text
+            : root.chip.offline ? Theme.text3 : Theme.accent-text;
+    }
+}
+
+export component RechannelDialog inherits Dialog {
+    property <bool> locked: RechannelBridge.running || RechannelBridge.finished;
+
+    title: "Rechannel the swarm";
+    note: "Crazyflies on one channel share one Crazyradio. Spread the swarm over more channels to use more radios.";
+    panel-width: 1120px;
+    panel-height: 780px;
+    closable: !RechannelBridge.running;
+    close => { RechannelBridge.visible = false; }
+
+    HorizontalLayout {
+        vertical-stretch: 1;
+        spacing: 20px;
+
+        // The channels and the plan
+        VerticalLayout {
+            width: 320px;
+            spacing: 12px;
+            alignment: start;
+
+            SectionLabel { text: "CHANNELS"; }
             HorizontalLayout {
-                spacing: 8px;
-                Text {
-                    text: "Number of channels";
-                    vertical-alignment: center;
-                    width: 140px;
+                spacing: 10px;
+                Rectangle {
+                    width: 108px;
+                    height: 34px;
+                    border-radius: Theme.radius-control;
+                    border-width: 1px;
+                    border-color: Theme.border2;
+                    clip: true;
+                    HorizontalLayout {
+                        IconButton {
+                            size: 34px;
+                            icon: Icons.minus;
+                            enabled: !root.locked && RechannelBridge.channels.length > 1;
+                            clicked => { RechannelBridge.set-count(RechannelBridge.channels.length - 1); }
+                        }
+                        Rectangle { width: 1px; background: Theme.border; }
+                        Text {
+                            horizontal-stretch: 1;
+                            text: RechannelBridge.channels.length;
+                            font-size: 14px;
+                            font-weight: 600;
+                            color: Theme.text;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                        Rectangle { width: 1px; background: Theme.border; }
+                        IconButton {
+                            size: 34px;
+                            icon: Icons.plus;
+                            enabled: !root.locked && RechannelBridge.channels.length < 41;
+                            clicked => { RechannelBridge.set-count(RechannelBridge.channels.length + 1); }
+                        }
+                    }
                 }
-                SpinBox {
-                    width: 110px;
-                    minimum: 1;
-                    maximum: 41;
-                    value <=> root.count;
-                    enabled: !root.running;
-                    edited(value) => { root.count-edited(value); }
-                }
                 Text {
-                    text: root.radios == 1 ? "1 Crazyradio attached" : "\{root.radios} Crazyradios attached";
-                    font-size: 12px;
-                    color: Palette.foreground.transparentize(0.4);
+                    text: RechannelBridge.radios == 1 ? "1 Crazyradio attached" : RechannelBridge.radios + " Crazyradios attached";
+                    font-size: 12.5px;
+                    color: Theme.text2;
                     vertical-alignment: center;
-                    horizontal-stretch: 1;
                 }
             }
-
-            HorizontalLayout {
-                spacing: 8px;
+            if !root.locked && RechannelBridge.radios > 0 && RechannelBridge.channels.length != RechannelBridge.radios: HorizontalLayout {
+                alignment: start;
                 Text {
-                    text: "Channels";
-                    vertical-alignment: center;
-                    width: 140px;
-                }
-                LineEdit {
-                    text <=> root.channels;
-                    enabled: !root.running;
-                    horizontal-stretch: 1;
-                    edited(text) => { root.channels-edited(text); }
+                    text: "One channel per Crazyradio: " + RechannelBridge.radios;
+                    font-size: 12.5px;
+                    font-weight: 500;
+                    color: Theme.accent-text;
+                    TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { RechannelBridge.one-per-radio(); }
+                    }
                 }
             }
-
-            HorizontalLayout {
-                spacing: 8px;
-                Text {
-                    text: "Crazyflies";
-                    font-size: 12px;
-                    font-weight: 600;
-                    vertical-alignment: center;
-                }
-                Text {
-                    text: root.plan-error != "" ? root.plan-error : root.summary;
-                    font-size: 11px;
-                    color: root.plan-error != "" ? RcColors.failed : Palette.foreground.transparentize(0.4);
-                    vertical-alignment: center;
-                    horizontal-alignment: right;
-                    horizontal-stretch: 1;
-                    overflow: elide;
-                }
-            }
-
+            // The channels as chips, three to a row
             Rectangle {
-                vertical-stretch: 1;
-                border-radius: 4px;
-                border-width: 1px;
-                border-color: Palette.border;
-                background: Palette.alternate-background;
+                height: ceil((RechannelBridge.channels.length + 1) / 3) * 36px;
+                for channel[i] in RechannelBridge.channels: Rectangle {
+                    x: mod(i, 3) * (parent.width / 3);
+                    y: floor(i / 3) * 36px;
+                    width: parent.width / 3 - 6px;
+                    height: 30px;
+                    border-radius: 7px;
+                    background: Theme.surface2;
+                    border-width: 1px;
+                    border-color: Theme.border;
+                    HorizontalLayout {
+                        padding-left: 10px;
+                        padding-right: 2px;
+                        Text {
+                            horizontal-stretch: 1;
+                            text: "ch " + channel;
+                            font-family: Theme.font-mono;
+                            font-size: 12.5px;
+                            font-weight: 500;
+                            color: Theme.text;
+                            vertical-alignment: center;
+                        }
+                        IconButton {
+                            y: (parent.height - self.height) / 2;
+                            size: 24px;
+                            icon-size: 13px;
+                            icon: Icons.close;
+                            enabled: !root.locked && RechannelBridge.channels.length > 1;
+                            clicked => { RechannelBridge.remove-channel(channel); }
+                        }
+                    }
+                }
+                // Add one: 0 to 125
+                if !root.locked: TextField {
+                    x: mod(RechannelBridge.channels.length, 3) * (parent.width / 3);
+                    y: floor(RechannelBridge.channels.length / 3) * 36px;
+                    width: parent.width / 3 - 6px;
+                    height: 30px;
+                    mono: true;
+                    placeholder: "+ ch 0–125";
+                    accepted(text) => {
+                        RechannelBridge.add-channel(text);
+                        self.text = "";
+                    }
+                }
+            }
+            Text {
+                text: RechannelBridge.channel-error != "" ? RechannelBridge.channel-error
+                    : "Keeps as many units as it can where they are, and an equal share on each channel.";
+                font-size: 12.5px;
+                color: RechannelBridge.channel-error != "" ? Theme.crit-text : Theme.text2;
+                wrap: word-wrap;
+            }
+            if RechannelBridge.plan-error == "": NoteBox {
+                icon: Icons.move;
+                title: RechannelBridge.plan-title;
+                text: RechannelBridge.plan-text;
+            }
+            if RechannelBridge.plan-error != "": NoteBox {
+                icon: Icons.warning;
+                tint: Theme.crit-tint;
+                fg: Theme.crit-text;
+                title-color: Theme.crit-text;
+                title: "Can't move the swarm";
+                text: RechannelBridge.plan-error;
+            }
+            if RechannelBridge.offline-text != "" && RechannelBridge.plan-error == "": NoteBox {
+                icon: Icons.warning;
+                tint: Theme.warn-tint;
+                fg: Theme.warn-text;
+                title-color: Theme.warn-text;
+                title: RechannelBridge.offline-text;
+                text: "They are tried on their channel, and stay there if they don't answer.";
+            }
+        }
 
-                if root.rows.length == 0: Text {
-                    text: "No swarm file loaded.";
-                    font-size: 12px;
-                    color: Palette.foreground.transparentize(0.4);
-                    horizontal-alignment: center;
-                    vertical-alignment: center;
+        // Where each unit ends up, and the moves
+        right := Rectangle {
+            horizontal-stretch: 1;
+            border-radius: 10px;
+            border-width: 1px;
+            border-color: Theme.border;
+            clip: true;
+
+            VerticalLayout {
+                // A lane per channel, as many to a row as fit
+                lanes := ScrollView {
+                    property <int> cols: max(1, min(RechannelBridge.lanes.length, floor((right.width - 28px + 12px) / 172px)));
+                    property <length> lane-width: (right.width - 28px - (self.cols - 1) * 12px) / self.cols;
+                    property <int> chip-cols: max(1, floor((self.lane-width - 16px) / 48px));
+                    property <length> chip-pitch: (self.lane-width - 16px) / self.chip-cols;
+                    property <length> lane-height: 39px + (RechannelBridge.lanes-share ? 18px : 0px)
+                        + ceil(RechannelBridge.lane-units / self.chip-cols) * 26px + 14px;
+                    property <length> content-height: ceil(RechannelBridge.lanes.length / self.cols) * (self.lane-height + 12px) + 16px;
+                    height: min(320px, self.content-height);
+                    viewport-height: self.content-height;
+                    for lane[j] in RechannelBridge.lanes: Rectangle {
+                        x: 14px + mod(j, lanes.cols) * (lanes.lane-width + 12px);
+                        y: 14px + floor(j / lanes.cols) * (lanes.lane-height + 12px);
+                        width: lanes.lane-width;
+                        height: lanes.lane-height;
+                        border-radius: 10px;
+                        border-width: 1px;
+                        border-color: Theme.border;
+                        VerticalLayout {
+                            alignment: start;
+                            HorizontalLayout {
+                                padding-left: 12px;
+                                padding-right: 12px;
+                                padding-top: 10px;
+                                padding-bottom: 8px;
+                                spacing: 6px;
+                                Text {
+                                    text: "ch " + lane.channel;
+                                    font-family: Theme.font-mono;
+                                    font-size: 14px;
+                                    font-weight: 600;
+                                    color: Theme.text;
+                                    vertical-alignment: center;
+                                }
+                                Text {
+                                    text: lane.radio;
+                                    font-size: Theme.font-small;
+                                    color: Theme.text3;
+                                    vertical-alignment: center;
+                                }
+                                Rectangle { horizontal-stretch: 1; }
+                                Text {
+                                    text: lane.units.length == 1 ? "1 unit" : lane.units.length + " units";
+                                    font-size: Theme.font-small;
+                                    color: Theme.text2;
+                                    vertical-alignment: center;
+                                }
+                            }
+                            Rectangle {
+                                height: 1px;
+                                background: Theme.border;
+                            }
+                            if lane.shares-radio: Text {
+                                x: 12px;
+                                height: 18px;
+                                text: "No Crazyradio of its own: it shares one";
+                                font-size: Theme.font-tiny;
+                                color: Theme.warn-text;
+                                vertical-alignment: bottom;
+                            }
+                            Rectangle {
+                                height: ceil(lane.units.length / lanes.chip-cols) * 26px + 14px;
+                                for chip[i] in lane.units: Chip {
+                                    x: 8px + mod(i, lanes.chip-cols) * lanes.chip-pitch;
+                                    y: 8px + floor(i / lanes.chip-cols) * 26px;
+                                    width: lanes.chip-pitch - 4px;
+                                    height: 22px;
+                                    chip: chip;
+                                }
+                            }
+                        }
+                    }
+                }
+                Rectangle {
+                    height: 1px;
+                    background: Theme.border;
                 }
 
+                // The units that change channel
+                HorizontalLayout {
+                    padding-left: 16px;
+                    padding-right: 16px;
+                    padding-top: 12px;
+                    padding-bottom: 6px;
+                    SectionLabel {
+                        horizontal-stretch: 1;
+                        text: "THE MOVES";
+                        vertical-alignment: center;
+                    }
+                    Text {
+                        text: RechannelBridge.moves-note;
+                        font-size: 12.5px;
+                        color: Theme.text2;
+                        vertical-alignment: center;
+                    }
+                }
+                HorizontalLayout {
+                    height: 30px;
+                    padding-left: 16px;
+                    padding-right: 16px;
+                    spacing: 12px;
+                    Text { width: 110px; text: "Unit"; font-size: Theme.font-small; color: Theme.text3; vertical-alignment: center; }
+                    Text { width: 150px; text: "Channel"; font-size: Theme.font-small; color: Theme.text3; vertical-alignment: center; }
+                    Text { horizontal-stretch: 1; text: "Status"; font-size: Theme.font-small; color: Theme.text3; vertical-alignment: center; }
+                }
+                Rectangle {
+                    height: 1px;
+                    background: Theme.border;
+                }
                 ScrollView {
+                    vertical-stretch: 1;
                     VerticalLayout {
-                        padding: 4px;
-                        spacing: 3px;
-
-                        for row in root.rows: Rectangle {
-                            height: 30px;
-                            border-radius: 3px;
-                            background: Palette.background;
-
+                        alignment: start;
+                        if RechannelBridge.moves.length == 0: Text {
+                            height: 60px;
+                            text: RechannelBridge.plan-error != "" ? "" : "Every unit is on its channel already.";
+                            font-size: 13px;
+                            color: Theme.text3;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                        for move in RechannelBridge.moves: Rectangle {
+                            height: 38px;
+                            Rectangle {
+                                y: parent.height - 1px;
+                                height: 1px;
+                                background: Theme.border;
+                            }
                             HorizontalLayout {
-                                padding-left: 8px;
-                                padding-right: 8px;
-                                spacing: 8px;
-
+                                padding-left: 16px;
+                                padding-right: 16px;
+                                spacing: 12px;
                                 Text {
-                                    text: row.name;
-                                    font-size: 12px;
+                                    width: 110px;
+                                    text: move.name;
+                                    font-size: 13px;
                                     font-weight: 600;
+                                    color: Theme.text;
                                     vertical-alignment: center;
-                                    width: 110px;
-                                    overflow: elide;
                                 }
-                                Text {
-                                    text: row.uri;
-                                    font-size: 11px;
-                                    color: Palette.foreground.transparentize(0.4);
-                                    vertical-alignment: center;
-                                    width: 200px;
-                                    overflow: elide;
+                                HorizontalLayout {
+                                    width: 150px;
+                                    spacing: 6px;
+                                    alignment: start;
+                                    Text { text: move.from; font-family: Theme.font-mono; font-size: 12.5px; color: Theme.text2; vertical-alignment: center; }
+                                    Icon {
+                                        y: (parent.height - self.height) / 2;
+                                        source: Icons.chevron-right;
+                                        width: 14px;
+                                        height: 14px;
+                                    }
+                                    Text { text: move.to; font-family: Theme.font-mono; font-size: 12.5px; font-weight: 600; color: Theme.text; vertical-alignment: center; }
                                 }
-                                Text {
-                                    text: row.from == "" ? "not on the radio"
-                                        : row.moves ? "\{row.from} → \{row.to}"
-                                        : "\{row.from} (stays)";
-                                    font-size: 12px;
-                                    font-weight: row.moves ? 600 : 400;
-                                    color: row.moves ? RcColors.moving : Palette.foreground.transparentize(0.4);
-                                    vertical-alignment: center;
-                                    width: 110px;
-                                }
-                                Text {
-                                    text: row.status;
-                                    font-size: 11px;
-                                    color: row.state == RcRowState.failed ? RcColors.failed
-                                         : row.state == RcRowState.done ? RcColors.done
-                                         : Palette.foreground.transparentize(0.3);
-                                    vertical-alignment: center;
-                                    horizontal-alignment: right;
+                                HorizontalLayout {
                                     horizontal-stretch: 1;
-                                    overflow: elide;
+                                    spacing: 8px;
+                                    Rectangle {
+                                        y: (parent.height - self.height) / 2;
+                                        width: 8px;
+                                        height: 8px;
+                                        border-radius: 4px;
+                                        background: move.state == RcRowState.busy ? Theme.accent
+                                            : move.state == RcRowState.done ? Theme.good
+                                            : move.state == RcRowState.failed ? Theme.crit : Theme.border2;
+                                    }
+                                    Text {
+                                        horizontal-stretch: 1;
+                                        text: move.status;
+                                        font-size: 12.5px;
+                                        color: move.state == RcRowState.done ? Theme.good
+                                            : move.state == RcRowState.failed ? Theme.crit-text
+                                            : move.state == RcRowState.busy ? Theme.text : Theme.text3;
+                                        vertical-alignment: center;
+                                        overflow: elide;
+                                    }
                                 }
                             }
                         }
                     }
                 }
             }
+        }
+    }
 
-            Text {
-                text: root.status;
-                font-size: 12px;
-                color: Palette.foreground.transparentize(0.3);
-                wrap: word-wrap;
-                vertical-stretch: 0;
-            }
-
-            HorizontalLayout {
-                spacing: 8px;
-                alignment: end;
-
-                Button {
-                    text: "Close";
-                    enabled: !root.running;
-                    clicked => { root.close(); }
-                }
-                Button {
-                    text: root.moving == 0 ? "Nothing to move"
-                        : root.moving == 1 ? "Move 1 Crazyflie" : "Move \{root.moving} Crazyflies";
-                    primary: true;
-                    enabled: !root.running && root.plan-error == "" && root.moving > 0;
-                    clicked => { root.start(); }
-                }
+    HorizontalLayout {
+        spacing: 10px;
+        Text {
+            horizontal-stretch: 1;
+            text: RechannelBridge.finished ? RechannelBridge.status
+                : RechannelBridge.running ? "Keep the units powered until they answer on their new channel."
+                : "The swarm disconnects first. Each unit is reprogrammed on its channel, rebooted and found on the new one; the swarm file changes once it answers there.";
+            font-size: 12.5px;
+            color: Theme.text2;
+            vertical-alignment: center;
+            wrap: word-wrap;
+        }
+        KButton {
+            text: RechannelBridge.finished ? "Close" : "Cancel";
+            enabled: !RechannelBridge.running;
+            clicked => { RechannelBridge.visible = false; }
+        }
+        if !RechannelBridge.finished: KButton {
+            text: RechannelBridge.running ? "Moving…"
+                : RechannelBridge.moving == 1 ? "Move 1 unit" : "Move " + RechannelBridge.moving + " units";
+            icon: Icons.radio;
+            kind: ButtonKind.primary;
+            enabled: !RechannelBridge.running && RechannelBridge.plan-error == "" && RechannelBridge.moving > 0;
+            clicked => { RechannelBridge.start(); }
+        }
+        if RechannelBridge.finished: KButton {
+            text: "Connect the swarm";
+            icon: Icons.plug;
+            kind: ButtonKind.primary;
+            clicked => {
+                RechannelBridge.visible = false;
+                RechannelBridge.connect-swarm();
             }
         }
     }

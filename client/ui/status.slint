@@ -1,0 +1,707 @@
+// The Status screen, shown at start: how the swarm, the radios and the
+// servers are doing. Everything here is worked out in status.rs.
+
+import { ScrollView } from "std-widgets.slint";
+import { Theme, Icons, Icon, Card, KButton, ButtonKind, StackBar, Dot, ScreenTitle } from "kit.slint";
+import { Health, HealthColors } from "units-table.slint";
+
+export struct HealthTile {
+    title: string,
+    state: string,       // Healthy, Degraded, Idle, …
+    tone: Health,
+    detail: string,
+    target: string,      // the screen it opens
+}
+
+export struct GridCell {
+    name: string,
+    group: int,          // as the state bar: ready, on a charger, warning, fault, not responding
+    status: string,
+    detail: string,
+    row: int,            // index in the sorted units
+}
+
+export struct HistBar {
+    label: string,
+    count: int,
+    fraction: float,
+    low: bool,
+}
+
+export struct Fact {
+    label: string,
+    value: string,
+    tone: Health,
+}
+
+export struct AttentionRow {
+    name: string,
+    status: string,
+    detail: string,
+    health: Health,
+    row: int,
+    action: string,      // Connect, Recover, Flash or Open
+}
+
+export struct RadioRow {
+    name: string,
+    units: string,
+    link: string,
+    rate: string,
+    retries: string,
+    tone: Health,
+    index: int,
+}
+
+export struct TrafficSeries {
+    index: int,
+    commands: string,    // path in a 600 × 100 box
+    label: string,
+    label-y: float,      // 0..100, where the label sits
+    value: string,
+}
+
+export struct ServerRow {
+    name: string,
+    kind: string,
+    state: string,
+    detail: string,
+    tone: Health,
+}
+
+export struct ActivityRow {
+    time: string,
+    text: string,
+    tone: Health,
+}
+
+export struct StatusData {
+    tone: Health,
+    headline: string,
+    subline: string,
+    issues: int,
+    tiles: [HealthTile],
+    state-counts: [int],  // ready, charger, warning, fault, not responding
+    grid: [GridCell],
+    histogram: [HistBar],
+    facts: [Fact],
+    attention: [AttentionRow],
+    radios: [RadioRow],
+    traffic: [TrafficSeries],
+    servers: [ServerRow],
+    activity: [ActivityRow],
+}
+
+// Fixed colours for the radios: a categorical palette checked for colour
+// vision deficiencies. Labels and the table carry the identity too.
+export global RadioColors {
+    public pure function of(index: int) -> color {
+        return Theme.dark
+            ? [#3987e5, #d95926, #199e70, #c98500][mod(index, 4)]
+            : [#2a78d6, #eb6834, #1baf7a, #eda100][mod(index, 4)];
+    }
+}
+
+component CardTitle inherits HorizontalLayout {
+    in property <string> text;
+    in property <string> note;
+    spacing: 8px;
+    padding-bottom: 4px;
+    Text {
+        text: root.text;
+        font-size: 14px;
+        font-weight: 600;
+        color: Theme.text;
+    }
+    Text {
+        horizontal-stretch: 1;
+        text: root.note;
+        font-size: Theme.font-small;
+        color: Theme.text3;
+        horizontal-alignment: right;
+        vertical-alignment: center;
+    }
+}
+
+component LegendItem inherits HorizontalLayout {
+    in property <string> label;
+    in property <int> count;
+    in property <color> tint;
+    spacing: 5px;
+    Rectangle {
+        y: (parent.height - self.height) / 2;
+        width: 8px;
+        height: 8px;
+        border-radius: 2px;
+        background: root.tint;
+    }
+    Text {
+        text: root.label + " " + root.count;
+        font-size: Theme.font-small;
+        color: Theme.text2;
+    }
+}
+
+export component StatusScreen inherits Rectangle {
+    in property <StatusData> data;
+    in property <bool> connected;
+    callback navigate(string);
+    callback show-issues();
+    callback open-unit(int);
+    callback connect-unit(int);
+    callback recover-unit(int);
+    callback flash();
+
+    property <[int]> sc: root.data.state-counts;
+
+    ScrollView {
+        VerticalLayout {
+            padding-left: 24px;
+            padding-right: 24px;
+            padding-top: 20px;
+            padding-bottom: 24px;
+            spacing: 16px;
+
+            HorizontalLayout {
+                ScreenTitle {
+                    text: "Status";
+                    note: root.connected ? "Live" : "";
+                }
+            }
+
+            // The overall band
+            Card {
+                height: 88px;
+                background: root.data.tone == Health.warn ? Theme.warn-tint
+                    : root.data.tone == Health.fault ? Theme.crit-tint
+                    : root.data.tone == Health.off ? Theme.surface
+                    : Theme.surface;
+                HorizontalLayout {
+                    padding-left: 20px;
+                    padding-right: 20px;
+                    spacing: 16px;
+                    Rectangle {
+                        y: (parent.height - self.height) / 2;
+                        width: 44px;
+                        height: 44px;
+                        border-radius: 22px;
+                        background: HealthColors.dot(root.data.tone).with-alpha(0.15);
+                        Icon {
+                            source: root.data.tone == Health.ready || root.data.tone == Health.flying ? Icons.check-circle
+                                : root.data.tone == Health.off ? Icons.plug : Icons.warning;
+                            width: 24px;
+                            height: 24px;
+                            color: HealthColors.dot(root.data.tone);
+                        }
+                    }
+                    VerticalLayout {
+                        horizontal-stretch: 1;
+                        alignment: center;
+                        spacing: 2px;
+                        Text {
+                            text: root.data.headline;
+                            font-size: 18px;
+                            font-weight: 600;
+                            color: Theme.text;
+                        }
+                        Text {
+                            text: root.data.subline;
+                            font-size: 13px;
+                            color: Theme.text2;
+                            overflow: elide;
+                        }
+                    }
+                    if root.data.issues > 0: KButton {
+                        y: (parent.height - self.height) / 2;
+                        text: "See " + root.data.issues + (root.data.issues == 1 ? " issue" : " issues");
+                        icon: Icons.chevron-right;
+                        clicked => { root.show-issues(); }
+                    }
+                }
+            }
+
+            // Health tiles
+            HorizontalLayout {
+                spacing: 12px;
+                for tile in root.data.tiles: Rectangle {
+                    min-width: 0px;
+                    preferred-width: 100px;
+                    horizontal-stretch: 1;
+                    height: 96px;
+                    background: tile-touch.has-hover ? Theme.surface2 : Theme.surface;
+                    border-width: 1px;
+                    border-color: tile-touch.has-hover ? Theme.border2 : Theme.border;
+                    border-radius: Theme.radius-card;
+                    tile-touch := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { root.navigate(tile.target); }
+                    }
+                    VerticalLayout {
+                        padding: 16px;
+                        padding-top: 14px;
+                        spacing: 6px;
+                        Text {
+                            text: tile.title;
+                            font-size: Theme.font-small;
+                            font-weight: 500;
+                            color: Theme.text3;
+                        }
+                        HorizontalLayout {
+                            spacing: 8px;
+                            alignment: start;
+                            Dot {
+                                y: (parent.height - self.height) / 2;
+                                tint: HealthColors.dot(tile.tone);
+                                hollow: tile.tone == Health.off;
+                            }
+                            Text {
+                                text: tile.state;
+                                font-size: 16px;
+                                font-weight: 600;
+                                color: tile.tone == Health.warn ? Theme.warn-text : tile.tone == Health.fault ? Theme.crit-text : Theme.text;
+                            }
+                        }
+                        Text {
+                            text: tile.detail;
+                            font-size: Theme.font-small;
+                            color: Theme.text2;
+                            overflow: elide;
+                        }
+                    }
+                }
+            }
+
+            HorizontalLayout {
+                spacing: 16px;
+                alignment: stretch;
+
+                // Swarm and radios
+                VerticalLayout {
+                    min-width: 0px;
+                    preferred-width: 200px;
+                    horizontal-stretch: 3;
+                    spacing: 16px;
+
+                    swarm-card := Card {
+                        height: swarm-layout.preferred-height;
+                        swarm-layout := VerticalLayout {
+                            padding: 16px;
+                            spacing: 12px;
+                            CardTitle {
+                                text: "Swarm";
+                                note: root.data.grid.length + " units";
+                            }
+                            StackBar {
+                                height: 10px;
+                                parts: [
+                                    { value: root.sc[0], color: Theme.good },
+                                    { value: root.sc[1], color: Theme.accent },
+                                    { value: root.sc[2], color: Theme.warn },
+                                    { value: root.sc[3], color: Theme.crit },
+                                    { value: root.sc[4], color: Theme.off },
+                                ];
+                            }
+                            HorizontalLayout {
+                                spacing: 14px;
+                                alignment: start;
+                                LegendItem { label: "Ready"; count: root.sc[0]; tint: Theme.good; }
+                                LegendItem { label: "On a charger"; count: root.sc[1]; tint: Theme.accent; }
+                                LegendItem { label: "Warning"; count: root.sc[2]; tint: Theme.warn; }
+                                LegendItem { label: "Fault"; count: root.sc[3]; tint: Theme.crit; }
+                                LegendItem { label: "Not responding"; count: root.sc[4]; tint: Theme.off; }
+                            }
+                            HorizontalLayout {
+                                spacing: 24px;
+                                // The units, in table order
+                                VerticalLayout {
+                                    spacing: 6px;
+                                    alignment: start;
+                                    Text {
+                                        text: "Units";
+                                        font-size: Theme.font-small;
+                                        color: Theme.text3;
+                                    }
+                                    grid := Rectangle {
+                                        property <int> columns: 10;
+                                        // The cell under the pointer, for its status
+                                        property <int> hovered: -1;
+                                        width: self.columns * 30px;
+                                        height: ceil(root.data.grid.length / self.columns) * 30px;
+                                        for cell[i] in root.data.grid: Rectangle {
+                                            x: mod(i, grid.columns) * 30px;
+                                            y: floor(i / grid.columns) * 30px;
+                                            width: 26px;
+                                            height: 26px;
+                                            border-radius: 6px;
+                                            background: cell-touch.has-hover ? Theme.hover : Theme.surface2;
+                                            border-width: 1px;
+                                            border-color: cell.group == 3 ? Theme.crit
+                                                : cell.group == 2 ? Theme.warn : Theme.border;
+                                            // The colours of the state bar
+                                            Dot {
+                                                tint: [Theme.good, Theme.accent, Theme.warn, Theme.crit, Theme.off][cell.group];
+                                                hollow: cell.group == 4;
+                                            }
+                                            cell-touch := TouchArea {
+                                                mouse-cursor: pointer;
+                                                clicked => { root.open-unit(cell.row); }
+                                                changed has-hover => {
+                                                    if (self.has-hover) {
+                                                        grid.hovered = i;
+                                                    } else if (grid.hovered == i) {
+                                                        grid.hovered = -1;
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                // Battery histogram
+                                VerticalLayout {
+                                    horizontal-stretch: 1;
+                                    spacing: 6px;
+                                    alignment: start;
+                                    Text {
+                                        text: "Battery (V)";
+                                        font-size: Theme.font-small;
+                                        color: Theme.text3;
+                                    }
+                                    HorizontalLayout {
+                                        height: 96px;
+                                        spacing: 6px;
+                                        for bar in root.data.histogram: VerticalLayout {
+                                            horizontal-stretch: 1;
+                                            alignment: end;
+                                            spacing: 4px;
+                                            Text {
+                                                text: bar.count > 0 ? bar.count : "";
+                                                font-size: Theme.font-tiny;
+                                                color: Theme.text2;
+                                                horizontal-alignment: center;
+                                            }
+                                            Rectangle {
+                                                height: max(2px, 60px * bar.fraction);
+                                                border-radius: 3px;
+                                                background: bar.count == 0 ? Theme.border : bar.low ? Theme.warn : Theme.accent;
+                                            }
+                                            Text {
+                                                text: bar.label;
+                                                font-family: Theme.font-mono;
+                                                font-size: Theme.font-tiny;
+                                                color: Theme.text3;
+                                                horizontal-alignment: center;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            Rectangle {
+                                height: 1px;
+                                background: Theme.border;
+                            }
+                            HorizontalLayout {
+                                spacing: 16px;
+                                for fact in root.data.facts: VerticalLayout {
+                                    horizontal-stretch: 1;
+                                    min-width: 0px;
+                                    preferred-width: 50px;
+                                    spacing: 2px;
+                                    Text {
+                                        text: fact.label;
+                                        font-size: Theme.font-small;
+                                        color: Theme.text3;
+                                    }
+                                    Text {
+                                        text: fact.value;
+                                        font-size: 13px;
+                                        font-weight: 500;
+                                        color: fact.tone == Health.warn ? Theme.warn-text : fact.tone == Health.fault ? Theme.crit-text : Theme.text;
+                                        overflow: elide;
+                                    }
+                                }
+                            }
+                        }
+                        // The status of the unit under the pointer, above it
+                        if grid.hovered >= 0 && grid.hovered < root.data.grid.length: Rectangle {
+                            property <GridCell> cell: root.data.grid[grid.hovered];
+                            property <length> cell-x: grid.absolute-position.x - swarm-card.absolute-position.x + mod(grid.hovered, grid.columns) * 30px;
+                            property <length> cell-y: grid.absolute-position.y - swarm-card.absolute-position.y + floor(grid.hovered / grid.columns) * 30px;
+                            x: max(8px, min(self.cell-x, swarm-card.width - self.width - 8px));
+                            y: self.cell-y - self.height - 6px;
+                            width: min(320px, tip.preferred-width);
+                            height: tip.preferred-height;
+                            border-radius: 8px;
+                            background: Theme.surface;
+                            border-width: 1px;
+                            border-color: Theme.border2;
+                            drop-shadow-blur: 12px;
+                            drop-shadow-color: Theme.shadow;
+                            drop-shadow-offset-y: 4px;
+                            tip := VerticalLayout {
+                                padding: 8px;
+                                padding-left: 10px;
+                                padding-right: 10px;
+                                spacing: 2px;
+                                Text {
+                                    text: cell.name;
+                                    font-size: 12.5px;
+                                    font-weight: 600;
+                                    color: Theme.text;
+                                    overflow: elide;
+                                }
+                                Text {
+                                    text: cell.status;
+                                    font-size: 12.5px;
+                                    color: cell.group == 3 ? Theme.crit-text : cell.group == 2 ? Theme.warn-text : Theme.text2;
+                                    overflow: elide;
+                                }
+                                if cell.detail != "": Text {
+                                    text: cell.detail;
+                                    font-size: Theme.font-small;
+                                    color: Theme.text3;
+                                    overflow: elide;
+                                }
+                            }
+                        }
+                    }
+
+                    Card {
+                        height: radios-layout.preferred-height;
+                        radios-layout := VerticalLayout {
+                            padding: 16px;
+                            spacing: 10px;
+                            CardTitle {
+                                text: "Radios";
+                                note: "packets per second, last 10 minutes";
+                            }
+                            HorizontalLayout {
+                                spacing: 20px;
+                                // Per radio
+                                VerticalLayout {
+                                    min-width: 300px;
+                                    spacing: 0px;
+                                    alignment: start;
+                                    HorizontalLayout {
+                                        height: 26px;
+                                        Text { width: 96px; text: "Radio"; font-size: Theme.font-small; color: Theme.text3; vertical-alignment: center; }
+                                        Text { width: 64px; text: "Units"; font-size: Theme.font-small; color: Theme.text3; vertical-alignment: center; }
+                                        Text { width: 56px; text: "Link"; font-size: Theme.font-small; color: Theme.text3; vertical-alignment: center; }
+                                        Text { width: 56px; text: "Pkt/s"; font-size: Theme.font-small; color: Theme.text3; vertical-alignment: center; }
+                                        Text { width: 56px; text: "Retries"; font-size: Theme.font-small; color: Theme.text3; vertical-alignment: center; }
+                                    }
+                                    for radio in root.data.radios: HorizontalLayout {
+                                        height: 30px;
+                                        HorizontalLayout {
+                                            width: 96px;
+                                            spacing: 8px;
+                                            alignment: start;
+                                            Rectangle {
+                                                y: (parent.height - self.height) / 2;
+                                                width: 10px;
+                                                height: 10px;
+                                                border-radius: 2px;
+                                                background: RadioColors.of(radio.index);
+                                            }
+                                            Text { text: radio.name; font-size: 13px; color: Theme.text; vertical-alignment: center; }
+                                        }
+                                        Text { width: 64px; text: radio.units; font-family: Theme.font-mono; font-size: Theme.font-small; color: Theme.text2; vertical-alignment: center; }
+                                        Text {
+                                            width: 56px;
+                                            text: radio.link;
+                                            font-family: Theme.font-mono;
+                                            font-size: Theme.font-small;
+                                            color: radio.tone == Health.warn ? Theme.warn-text : Theme.text2;
+                                            vertical-alignment: center;
+                                        }
+                                        Text { width: 56px; text: radio.rate; font-family: Theme.font-mono; font-size: Theme.font-small; color: Theme.text2; vertical-alignment: center; }
+                                        Text { width: 56px; text: radio.retries; font-family: Theme.font-mono; font-size: Theme.font-small; color: Theme.text2; vertical-alignment: center; }
+                                    }
+                                    if root.data.radios.length == 0: Text {
+                                        text: "No Crazyradio in use";
+                                        font-size: 13px;
+                                        color: Theme.text3;
+                                    }
+                                }
+                                // Traffic over time
+                                chart := Rectangle {
+                                    horizontal-stretch: 1;
+                                    height: 150px;
+                                    property <length> plot-width: self.width - 64px;
+                                    Rectangle {
+                                        y: chart.height - 20px;
+                                        width: chart.plot-width;
+                                        x: 0;
+                                        height: 1px;
+                                        background: Theme.border;
+                                    }
+                                    for series in root.data.traffic: Path {
+                                        x: 0;
+                                        y: 0;
+                                        width: chart.plot-width;
+                                        height: chart.height - 20px;
+                                        viewbox-width: 600;
+                                        viewbox-height: 100;
+                                        commands: series.commands;
+                                        fill: RadioColors.of(series.index).with-alpha(0.85);
+                                        stroke: Theme.surface;
+                                        stroke-width: 1px;
+                                    }
+                                    for series in root.data.traffic: Text {
+                                        x: chart.plot-width + 8px;
+                                        y: (chart.height - 20px) * series.label-y / 100 - self.height / 2;
+                                        text: series.label + " " + series.value;
+                                        font-size: Theme.font-tiny;
+                                        color: Theme.text2;
+                                    }
+                                    Text { x: 0; y: chart.height - 16px; text: "10 min ago"; font-size: Theme.font-tiny; color: Theme.text3; }
+                                    Text { x: chart.plot-width - self.width; y: chart.height - 16px; text: "now"; font-size: Theme.font-tiny; color: Theme.text3; }
+                                    if root.data.traffic.length == 0: Text {
+                                        y: (chart.height - 20px - self.height) / 2;
+                                        width: chart.plot-width;
+                                        horizontal-alignment: center;
+                                        text: "Traffic shows once the swarm is connected";
+                                        font-size: Theme.font-small;
+                                        color: Theme.text3;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Attention, servers and activity
+                VerticalLayout {
+                    min-width: 0px;
+                    preferred-width: 100px;
+                    horizontal-stretch: 2;
+                    spacing: 16px;
+
+                    Card {
+                        height: attention-layout.preferred-height;
+                        attention-layout := VerticalLayout {
+                            padding: 16px;
+                            spacing: 4px;
+                            CardTitle {
+                                text: "Needs attention";
+                                note: root.data.attention.length == 0 ? "" : root.data.attention.length + " units";
+                            }
+                            for item in root.data.attention: HorizontalLayout {
+                                height: 48px;
+                                spacing: 10px;
+                                Dot {
+                                    y: (parent.height - self.height) / 2;
+                                    tint: HealthColors.dot(item.health);
+                                }
+                                VerticalLayout {
+                                    horizontal-stretch: 1;
+                                    alignment: center;
+                                    HorizontalLayout {
+                                        spacing: 8px;
+                                        alignment: start;
+                                        Text { text: item.name; font-size: 13px; font-weight: 600; color: Theme.text; }
+                                        Text { text: item.status; font-size: 13px; color: HealthColors.label(item.health); }
+                                    }
+                                    Text { text: item.detail; font-size: Theme.font-small; color: Theme.text3; overflow: elide; }
+                                }
+                                KButton {
+                                    y: (parent.height - self.height) / 2;
+                                    small: true;
+                                    text: item.action;
+                                    clicked => {
+                                        if (item.action == "Connect") {
+                                            root.connect-unit(item.row);
+                                        } else if (item.action == "Recover") {
+                                            root.recover-unit(item.row);
+                                        } else if (item.action == "Flash") {
+                                            root.flash();
+                                        } else {
+                                            root.open-unit(item.row);
+                                        }
+                                    }
+                                }
+                            }
+                            if root.data.attention.length == 0: Text {
+                                text: root.connected ? "Nothing needs attention." : "Connect the swarm to check the units.";
+                                font-size: 13px;
+                                color: Theme.text3;
+                            }
+                        }
+                    }
+
+                    Card {
+                        height: servers-layout.preferred-height;
+                        servers-layout := VerticalLayout {
+                            padding: 16px;
+                            spacing: 10px;
+                            CardTitle { text: "Servers"; }
+                            for server in root.data.servers: HorizontalLayout {
+                                spacing: 12px;
+                                Rectangle {
+                                    y: (parent.height - self.height) / 2;
+                                    width: 36px;
+                                    height: 36px;
+                                    border-radius: 9px;
+                                    background: Theme.surface2;
+                                    border-width: 1px;
+                                    border-color: Theme.border;
+                                    Icon {
+                                        source: server.name == "arc.bitcraze.io" ? Icons.cloud : Icons.server;
+                                        color: Theme.text2;
+                                    }
+                                }
+                                VerticalLayout {
+                                    horizontal-stretch: 1;
+                                    alignment: center;
+                                    spacing: 1px;
+                                    HorizontalLayout {
+                                        spacing: 8px;
+                                        alignment: start;
+                                        Text { text: server.name; font-size: 13px; font-weight: 600; color: Theme.text; }
+                                        Text { text: server.kind; font-size: Theme.font-small; color: Theme.text3; vertical-alignment: center; }
+                                    }
+                                    Text { text: server.detail; font-size: Theme.font-small; color: Theme.text2; wrap: word-wrap; }
+                                }
+                                HorizontalLayout {
+                                    spacing: 6px;
+                                    alignment: end;
+                                    Dot {
+                                        y: (parent.height - self.height) / 2;
+                                        tint: HealthColors.dot(server.tone);
+                                        hollow: server.tone == Health.off;
+                                    }
+                                    Text { text: server.state; font-size: Theme.font-small; color: Theme.text2; vertical-alignment: center; }
+                                }
+                            }
+                        }
+                    }
+
+                    Card {
+                        height: activity-layout.preferred-height;
+                        activity-layout := VerticalLayout {
+                            padding: 16px;
+                            spacing: 6px;
+                            CardTitle { text: "Activity"; note: "this session"; }
+                            for event[i] in root.data.activity: HorizontalLayout {
+                                visible: i < 12;
+                                height: i < 12 ? 22px : 0px;
+                                spacing: 10px;
+                                Text { width: 64px; text: event.time; font-family: Theme.font-mono; font-size: Theme.font-small; color: Theme.text3; vertical-alignment: center; }
+                                Dot {
+                                    y: (parent.height - self.height) / 2;
+                                    tint: HealthColors.dot(event.tone);
+                                    hollow: event.tone == Health.off;
+                                }
+                                Text { horizontal-stretch: 1; text: event.text; font-size: Theme.font-small; color: Theme.text; vertical-alignment: center; overflow: elide; }
+                            }
+                            if root.data.activity.length == 0: Text {
+                                text: "Nothing yet";
+                                font-size: 13px;
+                                color: Theme.text3;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

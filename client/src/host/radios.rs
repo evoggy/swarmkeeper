@@ -23,7 +23,7 @@
 use std::collections::BTreeMap;
 
 use anyhow::{bail, Result};
-use crazyflie_link::LinkContext;
+pub use crazyflie_link::LinkContext;
 
 const CRAZYRADIO_VID: u16 = 0x1915;
 const CRAZYRADIO_PID: u16 = 0x7777;
@@ -474,4 +474,28 @@ mod tests {
         let links = [any(80), any(76)];
         assert_eq!(assign(&links, &[1, 2]).radios, vec![1, 2]);
     }
+}
+
+/// The URI to open a link to a unit with: a `radio:///` URI gets the
+/// Crazyradio the radio plan gives it, and the link timeout is added.
+pub async fn link_uri(link_context: &LinkContext, radio_plan: &SharedRadioPlan, uri: &str) -> String {
+    let uri = radio_plan.lock().await.link_uri(link_context, uri).await;
+    crate::swarm_file::uri_with_link_timeout(&uri)
+}
+
+/// Send a packet on a channel without waiting for an acknowledgement, to
+/// every Crazyflie listening on `address` (a broadcast).
+pub async fn broadcast(
+    link_context: &LinkContext,
+    radio_nth: usize,
+    channel: u8,
+    address: [u8; 5],
+    packet: Vec<u8>,
+) -> std::result::Result<(), String> {
+    let channel = crazyradio::Channel::from_number(channel).map_err(|e| format!("{:?}", e))?;
+    let mut radio = link_context
+        .get_radio(radio_nth)
+        .await
+        .map_err(|e| format!("Failed to get radio {}: {:?}", radio_nth, e))?;
+    radio.send_packet_no_ack_async(channel, address, packet).await.map_err(|e| format!("{:?}", e))
 }

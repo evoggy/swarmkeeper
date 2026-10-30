@@ -21,6 +21,11 @@ use tokio::time::{sleep, Duration};
 
 const TARGET_NRF51: u8 = 0xFE;
 
+/// How long connecting to a Crazyflie for its decks may take. A connect that
+/// reads a stale answer left by an earlier link (a version answer to a
+/// connection server's probe) can otherwise wait forever.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
+
 // DeckCtrl DFU memory layout (matches cfcli)
 const DECK_CTRL_DFU_FLASH_OFFSET: usize = 0x10000;
 const DECK_CTRL_DFU_CFG_DEFAULT_OFFSET: usize = 0x17800;
@@ -56,8 +61,21 @@ pub fn bootloader_target(target: &str) -> Option<&'static str> {
     }
 }
 
+/// The Crazyflie doesn't have the deck a target is for: nothing to flash.
+#[derive(Debug)]
+pub struct NoDeck(pub String);
+
+impl std::fmt::Display for NoDeck {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl std::error::Error for NoDeck {}
+
 /// Flash `data` to the deck target `target` on the Crazyflie at `uri`, over
-/// a connection of its own: the unit must not be connected.
+/// a connection of its own: the unit must not be connected. Fails with
+/// [`NoDeck`] when it doesn't have the deck.
 ///
 /// `progress` is called with `(bytes_written, total_bytes)` as flashing
 /// proceeds; `total_bytes` equals `data.len()`.
@@ -91,6 +109,28 @@ fn deck_section(target: &str) -> &str {
     target.split('-').next().unwrap_or(target)
 }
 
+/// Connect for flashing a deck, trying once more when the first connect
+/// fails or doesn't finish: the second starts on a link with nothing left
+/// over from before.
+async fn connect<T>(link_context: &LinkContext, uri: &str, toc_cache: T) -> Result<Crazyflie>
+where
+    T: crazyflie_lib::TocCache + Clone,
+{
+    let mut last = anyhow!("not tried");
+    for attempt in 1..=2 {
+        match tokio::time::timeout(CONNECT_TIMEOUT, Crazyflie::connect_from_uri(link_context, uri, toc_cache.clone())).await {
+            Ok(Ok(cf)) => return Ok(cf),
+            Ok(Err(e)) => last = anyhow!("connecting: {}", e),
+            Err(_) => last = anyhow!("connecting: no answer within {} s", CONNECT_TIMEOUT.as_secs()),
+        }
+        if attempt == 1 {
+            eprintln!("{}: {:#}; trying again", uri, last);
+            sleep(Duration::from_secs(1)).await;
+        }
+    }
+    Err(last)
+}
+
 /// Reboot the Crazyflie from bootloader/deck-bootloader back into firmware.
 async fn reboot(link_context: &LinkContext, uri: &str) -> Result<()> {
     let link = link_context.open_link(uri).await?;
@@ -118,12 +158,12 @@ where
     T: crazyflie_lib::TocCache + Clone,
     F: FnMut(usize, usize) + Send,
 {
-    let cf = Crazyflie::connect_from_uri(link_context, uri, toc_cache).await?;
+    let cf = connect(link_context, uri, toc_cache).await?;
 
     let memories = cf.memory.get_memories(Some(MemoryType::DeckMemory));
     if memories.is_empty() {
         cf.disconnect().await;
-        bail!("No deck memory found (is a deck attached?)");
+        bail!(NoDeck("No deck memory found (is a deck attached?)".into()));
     }
 
     let deck_memory = match cf.memory.open_memory::<DeckMemory>(memories[0].clone()).await {
@@ -163,12 +203,7 @@ where
         .sections()
         .iter()
         .find(|s| s.name() == section_name)
-        .ok_or_else(|| {
-            anyhow!(
-                "Deck section '{}' not found (deck not attached?)",
-                section_name
-            )
-        })?;
+        .ok_or_else(|| anyhow!(NoDeck(format!("Deck section '{}' not found (deck not attached?)", section_name))))?;
 
     if !section.bootloader_active().await? {
         section.reset_to_bootloader().await?;
@@ -204,7 +239,7 @@ where
     T: crazyflie_lib::TocCache + Clone,
     F: FnMut(usize, usize) + Send,
 {
-    let cf = Crazyflie::connect_from_uri(link_context, uri, toc_cache.clone()).await?;
+    let cf = connect(link_context, uri, toc_cache.clone()).await?;
     let raw = open_deck_ctrl_dfu_raw(&cf).await?;
     let header = read_deck_ctrl_dfu_header(&raw).await?;
 
@@ -236,7 +271,7 @@ where
 
     // Reconnect — DFU entry power-cycles the Crazyflie and memory IDs may be
     // re-enumerated, so re-look up the memory after reconnecting.
-    let cf = Crazyflie::connect_from_uri(link_context, uri, toc_cache).await?;
+    let cf = connect(link_context, uri, toc_cache).await?;
     let raw = open_deck_ctrl_dfu_raw(&cf).await?;
     let header = read_deck_ctrl_dfu_header(&raw).await?;
     if (header.status & DECK_CTRL_DFU_STATUS_IN_DFU_MODE) == 0 {
@@ -266,7 +301,7 @@ where
 async fn open_deck_ctrl_dfu_raw(cf: &Crazyflie) -> Result<RawMemory> {
     let memories = cf.memory.get_memories(Some(MemoryType::DeckCtrlDFU));
     if memories.is_empty() {
-        bail!("DeckCtrlDFU memory not present, cannot flash DeckCtrl");
+        bail!(NoDeck("DeckCtrlDFU memory not present, cannot flash DeckCtrl".into()));
     }
     if memories.len() > 1 {
         bail!(

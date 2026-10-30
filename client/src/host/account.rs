@@ -24,6 +24,7 @@ use serde_json::json;
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
+use crate::host;
 
 /// The server signed in to unless the user picks another.
 pub const DEFAULT_SERVER: &str = "https://arc.bitcraze.io";
@@ -61,15 +62,13 @@ impl std::error::Error for KeyRejected {}
 // ---- Stored credentials ----
 
 fn credentials_path() -> Result<PathBuf> {
-    let config = confy::get_configuration_file_path("swarmkeeper", None)
-        .context("could not find the Swarmkeeper settings folder")?;
-    Ok(config.with_file_name("credentials.json"))
+    host::store::file_beside("credentials.json").context("could not find the Swarmkeeper settings folder")
 }
 
 /// The stored credentials, if Swarmkeeper is signed in.
 pub fn load() -> Result<Option<Credentials>> {
     let path = credentials_path()?;
-    let text = match std::fs::read_to_string(&path) {
+    let text = match host::fs::read_to_string(&path) {
         Ok(text) => text,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
@@ -82,37 +81,17 @@ pub fn load() -> Result<Option<Credentials>> {
 fn save(credentials: &Credentials) -> Result<()> {
     let path = credentials_path()?;
     if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+        host::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
     }
     let json = serde_json::to_string_pretty(credentials)?;
-    write_private(&path, json.as_bytes()).with_context(|| format!("writing {}", path.display()))
+    host::fs::write_private(&path, json.as_bytes()).with_context(|| format!("writing {}", path.display()))
 }
 
-#[cfg(unix)]
-fn write_private(path: &std::path::Path, contents: &[u8]) -> std::io::Result<()> {
-    use std::io::Write;
-    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o600)
-        .open(path)?;
-    // The mode only applies to a new file.
-    file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
-    file.write_all(contents)
-}
 
-/// On Windows the settings folder is in the user's profile, which only they
-/// can read.
-#[cfg(not(unix))]
-fn write_private(path: &std::path::Path, contents: &[u8]) -> std::io::Result<()> {
-    std::fs::write(path, contents)
-}
 
 fn forget() -> Result<()> {
     let path = credentials_path()?;
-    match std::fs::remove_file(&path) {
+    match host::fs::remove_file(&path) {
         Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
             Err(e).with_context(|| format!("removing {}", path.display()))
         }
@@ -160,6 +139,9 @@ pub fn host(server: &str) -> &str {
 #[derive(Debug, Clone, Deserialize)]
 pub struct UserInfo {
     pub name: String,
+    /// The picture from GitHub or Google. Servers before it was added don't send it.
+    #[serde(default)]
+    pub avatar_url: Option<String>,
     pub orgs: Vec<OrgInfo>,
 }
 
@@ -185,6 +167,27 @@ pub async fn whoami(credentials: &Credentials) -> Result<UserInfo> {
         bail!(KeyRejected { host: host(server).to_string(), key_name: credentials.key_name.clone() });
     }
     answer(server, response).await
+}
+
+/// The side of the avatar picture, in pixels: twice the largest avatar
+/// shown, for screens that scale by two.
+const AVATAR_SIZE: u32 = 96;
+
+/// The user's picture, scaled down for the avatar.
+pub async fn avatar(url: &str) -> Result<slint::SharedPixelBuffer<slint::Rgba8Pixel>> {
+    let bytes = http(Duration::from_secs(15))?
+        .get(url)
+        .send()
+        .await
+        .and_then(|response| response.error_for_status())
+        .with_context(|| format!("can't fetch {}", url))?
+        .bytes()
+        .await?;
+    let picture = image::load_from_memory(&bytes)
+        .with_context(|| format!("{} is not a picture", url))?
+        .resize_to_fill(AVATAR_SIZE, AVATAR_SIZE, image::imageops::FilterType::Triangle)
+        .to_rgba8();
+    Ok(slint::SharedPixelBuffer::clone_from_slice(picture.as_raw(), picture.width(), picture.height()))
 }
 
 /// Revoke the key on the server. A key that is already revoked is fine.
@@ -219,7 +222,7 @@ fn pkce_challenge(verifier: &str) -> String {
 
 /// This computer's name, for the key's name on the server.
 fn device_name() -> String {
-    let name = gethostname::gethostname().to_string_lossy().trim().to_string();
+    let name = host::env::hostname().trim().to_string();
     if name.is_empty() {
         "this computer".to_string()
     } else {
@@ -280,7 +283,7 @@ impl SignIn {
     /// sign-in replaces the old one, whose key is revoked.
     pub async fn finish(self) -> Result<SignedIn> {
         let server = self.server;
-        let (mut browser, callback) = tokio::time::timeout(SIGN_IN_TIMEOUT, wait_for_browser(&self.listener, &self.state))
+        let (mut browser, callback) = host::timeout(SIGN_IN_TIMEOUT, wait_for_browser(&self.listener, &self.state))
             .await
             .map_err(|_| anyhow::anyhow!("nobody allowed Swarmkeeper in the browser within 5 minutes"))??;
         let done = format!("{}/cli/done?client={}", server, CLIENT);
@@ -346,7 +349,7 @@ async fn wait_for_browser(listener: &TcpListener, state: &str) -> Result<(TcpStr
         let (mut stream, _) = listener.accept().await?;
         // Browsers sometimes open a connection and send nothing (preconnect),
         // which mustn't hold up the real request.
-        let Ok(Some(target)) = tokio::time::timeout(Duration::from_secs(5), read_request_target(&mut stream)).await
+        let Ok(Some(target)) = host::timeout(Duration::from_secs(5), read_request_target(&mut stream)).await
         else {
             continue;
         };

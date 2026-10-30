@@ -1,0 +1,764 @@
+// Flash firmware: a release from GitHub, a release .zip or a binary, into
+// the ticked units, with the progress of every step (flashing.rs).
+
+import { ScrollView } from "std-widgets.slint";
+import { Theme, Icons, Icon, KButton, ButtonKind, Segmented, Dialog, MenuPanel, MenuRow } from "kit.slint";
+
+export enum FlashState { none, wait, busy, done, fail, warn }
+
+// A part of a release, or the target of a binary.
+export struct FlashPart {
+    key: string,
+    name: string,
+    file: string,
+    size: string,
+    checked: bool,
+    // A heading over the deck targets of a binary
+    group: bool,
+}
+
+// A unit's progress for one part.
+export struct FlashCell {
+    state: FlashState,
+    text: string,
+    progress: float,
+    bar: bool,
+}
+
+export struct FlashUnit {
+    name: string,
+    channel: string,
+    firmware: string,
+    // Another firmware than most of the swarm
+    other: bool,
+    ticked: bool,
+    // Can't be ticked: outside the quick pick, or while flashing
+    locked: bool,
+    dim: bool,
+    cells: [FlashCell],
+}
+
+// A part in the strip over the progress.
+export struct FlashStep {
+    name: string,
+    state: FlashState,
+}
+
+// One phase of a part: into the bootloader, the broadcast, the checking,
+// one at a time, a deck.
+export struct FlashPhase {
+    name: string,
+    text: string,
+    done: float,
+    busy: float,
+    fail: float,
+}
+
+// A unit being flashed on its own: one at a time, or a deck on a Crazyradio.
+export struct FlashCard {
+    name: string,
+    sub: string,
+    text: string,
+    progress: float,
+    waiting: bool,
+}
+
+export global FlashBridge {
+    in-out property <bool> visible;
+    // Release, Zip, Binary
+    in-out property <int> source: 0;
+
+    // A release from GitHub, for the platform of the units
+    in property <[string]> releases;
+    in property <[string]> release-dates;
+    in-out property <int> release-index: -1;
+    in property <string> releases-status;
+    in property <string> asset;
+    in property <bool> downloading;
+    in property <float> download-progress;
+    in property <string> download-text;
+    // A release .zip and a binary from this computer
+    in property <string> zip-name;
+    in property <string> zip-sub;
+    in property <string> bin-name;
+    in property <string> bin-sub;
+    // The parts of the release or zip; the targets of a binary
+    in property <[FlashPart]> parts;
+    in property <[FlashPart]> bin-targets;
+    in property <string> parts-status;
+
+    // The units: connected, all or on other firmware, each can be unticked
+    in-out property <int> pick: 0;
+    in property <[int]> pick-counts: [0, 0, 0];
+    in property <int> ticked-count;
+    in property <[string]> columns;
+    in property <[FlashUnit]> units;
+
+    // Flashing
+    in property <bool> running;
+    in property <bool> finished;
+    in property <[FlashStep]> steps;
+    in property <[FlashPhase]> phases;
+    in property <[FlashCard]> cards;
+    in property <string> status;
+    in property <bool> can-start;
+    in property <string> start-label: "Flash";
+
+    callback opened();
+    callback source-changed(int);
+    callback release-picked(int);
+    callback choose-zip();
+    callback choose-binary();
+    callback toggle-part(string);
+    callback bin-target-picked(string);
+    callback pick-changed(int);
+    callback toggle-unit(string);
+    callback start();
+}
+
+component SectionLabel inherits Text {
+    font-size: Theme.font-tiny;
+    font-weight: 600;
+    color: Theme.text3;
+}
+
+// A tick box or a radio, as drawn in the parts list
+component Mark inherits Rectangle {
+    in property <bool> on;
+    in property <bool> round;
+    width: 16px;
+    height: 16px;
+    border-radius: root.round ? 8px : 4px;
+    border-width: root.on && !root.round ? 0px : 1.5px;
+    border-color: root.on ? Theme.accent : Theme.border2;
+    background: root.on && !root.round ? Theme.accent-button : Theme.surface;
+    if root.on && !root.round: Icon {
+        source: Icons.check;
+        width: 12px;
+        height: 12px;
+        color: #ffffff;
+    }
+    if root.on && root.round: Rectangle {
+        width: 8px;
+        height: 8px;
+        border-radius: 4px;
+        background: Theme.accent;
+    }
+}
+
+// The file of a zip or a binary, and Choose…
+component FileBox inherits Rectangle {
+    in property <string> name;
+    in property <string> sub;
+    in property <bool> enabled;
+    callback choose();
+    height: 56px;
+    border-radius: 10px;
+    background: Theme.surface2;
+    border-width: 1px;
+    border-color: Theme.border;
+    HorizontalLayout {
+        padding-left: 12px;
+        padding-right: 10px;
+        spacing: 10px;
+        Icon {
+            y: (parent.height - self.height) / 2;
+            source: Icons.folder;
+            width: 20px;
+            height: 20px;
+        }
+        VerticalLayout {
+            horizontal-stretch: 1;
+            alignment: center;
+            spacing: 2px;
+            Text {
+                text: root.name == "" ? "No file chosen" : root.name;
+                font-family: Theme.font-mono;
+                font-size: 12.5px;
+                font-weight: 600;
+                color: root.name == "" ? Theme.text3 : Theme.text;
+                overflow: elide;
+            }
+            if root.sub != "": Text {
+                text: root.sub;
+                font-size: Theme.font-small;
+                color: Theme.text3;
+                overflow: elide;
+            }
+        }
+        KButton {
+            y: (parent.height - self.height) / 2;
+            small: true;
+            text: "Choose…";
+            enabled: root.enabled;
+            clicked => { root.choose(); }
+        }
+    }
+}
+
+component Bar inherits Rectangle {
+    in property <float> done;
+    in property <float> busy;
+    in property <float> fail;
+    property <float> d: clamp(root.done, 0, 1);
+    property <float> b: clamp(root.busy, 0, 1 - self.d);
+    property <float> f: clamp(root.fail, 0, 1 - self.d - self.b);
+    height: 6px;
+    border-radius: 3px;
+    background: Theme.border;
+    clip: true;
+    Rectangle {
+        x: 0;
+        width: root.width * root.d;
+        background: Theme.good;
+    }
+    Rectangle {
+        x: root.width * root.d;
+        width: root.width * root.b;
+        background: Theme.accent;
+    }
+    Rectangle {
+        x: root.width * (root.d + root.b);
+        width: root.width * root.f;
+        background: Theme.warn;
+    }
+}
+
+export component FlashDialog inherits Dialog {
+    property <bool> parts-mode: FlashBridge.source != 2;
+
+    title: "Flash firmware";
+    note: "Into the ticked units, through their bootloaders. Each connects again when it is done.";
+    panel-width: 1180px;
+    panel-height: 820px;
+    closable: !FlashBridge.running;
+    close => { FlashBridge.visible = false; }
+
+    HorizontalLayout {
+        vertical-stretch: 1;
+        spacing: 20px;
+
+        // What to flash
+        ScrollView {
+            width: 340px;
+            VerticalLayout {
+                spacing: 12px;
+                alignment: start;
+                padding-right: 6px;
+
+                Segmented {
+                    fill: true;
+                    items: [{ label: "Release" }, { label: "Zip" }, { label: "Binary" }];
+                    current <=> FlashBridge.source;
+                    selected(i) => { FlashBridge.source-changed(i); }
+                }
+
+                // A release from GitHub
+                if FlashBridge.source == 0: SectionLabel { text: "RELEASE"; }
+                if FlashBridge.source == 0: release-pick := Rectangle {
+                    property <bool> can-pick: !FlashBridge.running && FlashBridge.releases.length > 0;
+                    height: 38px;
+                    border-radius: Theme.radius-control;
+                    border-width: 1px;
+                    border-color: Theme.border2;
+                    background: release-touch.has-hover && self.can-pick ? Theme.hover : Theme.surface;
+                    opacity: self.can-pick ? 1.0 : 0.7;
+                    HorizontalLayout {
+                        padding-left: 10px;
+                        padding-right: 10px;
+                        spacing: 8px;
+                        Text {
+                            text: FlashBridge.release-index >= 0 && FlashBridge.release-index < FlashBridge.releases.length
+                                ? FlashBridge.releases[FlashBridge.release-index] : FlashBridge.releases-status;
+                            font-family: FlashBridge.release-index >= 0 ? Theme.font-mono : "";
+                            font-size: 13px;
+                            font-weight: FlashBridge.release-index >= 0 ? 600 : 400;
+                            color: FlashBridge.release-index >= 0 ? Theme.text : Theme.text3;
+                            vertical-alignment: center;
+                            overflow: elide;
+                        }
+                        if FlashBridge.release-index >= 0 && FlashBridge.release-index < FlashBridge.release-dates.length: Text {
+                            text: FlashBridge.release-dates[FlashBridge.release-index];
+                            font-size: Theme.font-small;
+                            color: Theme.text3;
+                            vertical-alignment: center;
+                        }
+                        if FlashBridge.release-index == 0: Rectangle {
+                            y: (parent.height - self.height) / 2;
+                            height: 20px;
+                            width: latest-text.preferred-width + 12px;
+                            border-radius: 5px;
+                            background: Theme.accent-tint;
+                            latest-text := Text {
+                                text: "Latest";
+                                font-size: Theme.font-tiny;
+                                font-weight: 600;
+                                color: Theme.accent-text;
+                            }
+                        }
+                        Rectangle { horizontal-stretch: 1; }
+                        Icon {
+                            y: (parent.height - self.height) / 2;
+                            source: Icons.chevron-down;
+                            width: 16px;
+                            height: 16px;
+                        }
+                    }
+                    release-touch := TouchArea {
+                        enabled: parent.can-pick;
+                        mouse-cursor: pointer;
+                        clicked => { release-menu.show(); }
+                    }
+                    release-menu := PopupWindow {
+                        y: parent.height + 4px;
+                        width: parent.width;
+                        MenuPanel {
+                            width: parent.width;
+                            height: release-list.preferred-height;
+                            release-list := VerticalLayout {
+                                padding: 6px;
+                                for label[i] in FlashBridge.releases: MenuRow {
+                                    text: label;
+                                    hint: i == 0 ? "Latest · " + FlashBridge.release-dates[i] : FlashBridge.release-dates[i];
+                                    checked: i == FlashBridge.release-index;
+                                    clicked => { FlashBridge.release-picked(i); }
+                                }
+                            }
+                        }
+                    }
+                }
+                if FlashBridge.source == 0 && !FlashBridge.downloading && FlashBridge.asset != "": HorizontalLayout {
+                    spacing: 6px;
+                    Text {
+                        text: FlashBridge.asset;
+                        font-family: Theme.font-mono;
+                        font-size: Theme.font-small;
+                        color: Theme.text2;
+                        overflow: elide;
+                    }
+                    Text {
+                        horizontal-stretch: 1;
+                        text: FlashBridge.download-text;
+                        font-size: Theme.font-small;
+                        color: Theme.text3;
+                        overflow: elide;
+                    }
+                }
+                if FlashBridge.source == 0 && FlashBridge.downloading: VerticalLayout {
+                    spacing: 5px;
+                    HorizontalLayout {
+                        spacing: 6px;
+                        Text {
+                            text: "Downloading";
+                            font-size: Theme.font-small;
+                            color: Theme.text2;
+                        }
+                        Text {
+                            horizontal-stretch: 1;
+                            text: FlashBridge.asset;
+                            font-family: Theme.font-mono;
+                            font-size: Theme.font-small;
+                            color: Theme.text2;
+                            overflow: elide;
+                        }
+                        Text {
+                            text: FlashBridge.download-text;
+                            font-family: Theme.font-mono;
+                            font-size: Theme.font-small;
+                            color: Theme.text3;
+                        }
+                    }
+                    Bar { busy: FlashBridge.download-progress; }
+                }
+
+                // A release .zip, or a binary
+                if FlashBridge.source == 1: FileBox {
+                    name: FlashBridge.zip-name;
+                    sub: FlashBridge.zip-sub;
+                    enabled: !FlashBridge.running;
+                    choose => { FlashBridge.choose-zip(); }
+                }
+                if FlashBridge.source == 2: FileBox {
+                    name: FlashBridge.bin-name;
+                    sub: FlashBridge.bin-sub;
+                    enabled: !FlashBridge.running;
+                    choose => { FlashBridge.choose-binary(); }
+                }
+
+                // The parts, or the target
+                SectionLabel { text: root.parts-mode ? "PARTS TO FLASH" : "TARGET"; }
+                if root.parts-mode && FlashBridge.parts-status != "": Text {
+                    text: FlashBridge.parts-status;
+                    font-size: 12.5px;
+                    color: Theme.text3;
+                    wrap: word-wrap;
+                }
+                for part in (root.parts-mode ? FlashBridge.parts : FlashBridge.bin-targets): Rectangle {
+                    height: part.group ? 28px : 42px;
+                    border-radius: 8px;
+                    border-width: part.checked && !root.parts-mode ? 1px : 0px;
+                    border-color: Theme.accent;
+                    background: part.group ? transparent
+                        : part.checked && !root.parts-mode ? Theme.accent-tint
+                        : part-touch.has-hover && !FlashBridge.running ? Theme.hover : transparent;
+                    part-touch := TouchArea {
+                        enabled: !part.group && !FlashBridge.running;
+                        mouse-cursor: pointer;
+                        clicked => {
+                            if (root.parts-mode) {
+                                FlashBridge.toggle-part(part.key);
+                            } else {
+                                FlashBridge.bin-target-picked(part.key);
+                            }
+                        }
+                    }
+                    if part.group: SectionLabel {
+                        x: 2px;
+                        text: part.name;
+                        vertical-alignment: bottom;
+                    }
+                    if !part.group: HorizontalLayout {
+                        padding-left: 10px;
+                        padding-right: 10px;
+                        spacing: 10px;
+                        Mark {
+                            y: (parent.height - self.height) / 2;
+                            on: part.checked;
+                            round: !root.parts-mode;
+                        }
+                        VerticalLayout {
+                            horizontal-stretch: 1;
+                            alignment: center;
+                            spacing: 1px;
+                            Text {
+                                text: part.name;
+                                font-size: 13px;
+                                font-weight: 600;
+                                color: Theme.text;
+                                overflow: elide;
+                            }
+                            Text {
+                                text: part.file;
+                                font-family: Theme.font-mono;
+                                font-size: Theme.font-tiny;
+                                color: Theme.text3;
+                                overflow: elide;
+                            }
+                        }
+                        Text {
+                            text: part.size;
+                            font-size: Theme.font-tiny;
+                            color: Theme.text3;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Which units, and how far each is
+        Rectangle {
+            horizontal-stretch: 1;
+            border-radius: 10px;
+            border-width: 1px;
+            border-color: Theme.border;
+            clip: true;
+
+            VerticalLayout {
+                HorizontalLayout {
+                    padding: 12px;
+                    spacing: 10px;
+                    Segmented {
+                        items: [
+                            { label: "Connected", count: FlashBridge.pick-counts[0] },
+                            { label: "All", count: FlashBridge.pick-counts[1] },
+                            { label: "Other firmware", count: FlashBridge.pick-counts[2] },
+                        ];
+                        current <=> FlashBridge.pick;
+                        selected(i) => { FlashBridge.pick-changed(i); }
+                    }
+                    Rectangle { horizontal-stretch: 1; }
+                    Text {
+                        text: FlashBridge.ticked-count == 1 ? "1 unit ticked" : FlashBridge.ticked-count + " units ticked";
+                        font-size: 12.5px;
+                        color: Theme.text2;
+                        vertical-alignment: center;
+                    }
+                }
+                Rectangle {
+                    height: 1px;
+                    background: Theme.border;
+                }
+
+                // What happens now
+                if FlashBridge.running || FlashBridge.finished: Rectangle {
+                    background: Theme.surface2;
+                    height: progress-layout.preferred-height;
+                    progress-layout := VerticalLayout {
+                        padding: 12px;
+                        padding-left: 16px;
+                        padding-right: 16px;
+                        spacing: 9px;
+                        HorizontalLayout {
+                            spacing: 6px;
+                            alignment: start;
+                            for step[i] in FlashBridge.steps: Rectangle {
+                                height: 26px;
+                                width: step-layout.preferred-width;
+                                border-radius: 13px;
+                                border-width: step.state == FlashState.busy ? 1px : 1px;
+                                border-color: step.state == FlashState.busy ? Theme.accent : step.state == FlashState.done ? transparent : Theme.border;
+                                background: step.state == FlashState.busy ? Theme.accent-tint
+                                    : step.state == FlashState.done ? Theme.surface : step.state == FlashState.fail ? Theme.crit-tint : Theme.surface;
+                                step-layout := HorizontalLayout {
+                                    padding-left: 10px;
+                                    padding-right: 10px;
+                                    spacing: 6px;
+                                    if step.state == FlashState.done: Icon {
+                                        y: (parent.height - self.height) / 2;
+                                        source: Icons.check;
+                                        width: 14px;
+                                        height: 14px;
+                                        color: Theme.good;
+                                    }
+                                    if step.state != FlashState.done: Text {
+                                        text: i + 1;
+                                        font-size: Theme.font-tiny;
+                                        font-weight: 600;
+                                        color: Theme.text3;
+                                        vertical-alignment: center;
+                                    }
+                                    Text {
+                                        text: step.name;
+                                        font-size: 12.5px;
+                                        font-weight: 500;
+                                        color: step.state == FlashState.busy ? Theme.accent-text
+                                            : step.state == FlashState.fail ? Theme.crit-text
+                                            : step.state == FlashState.done ? Theme.text2 : Theme.text3;
+                                        vertical-alignment: center;
+                                    }
+                                }
+                            }
+                        }
+                        for phase in FlashBridge.phases: HorizontalLayout {
+                            spacing: 10px;
+                            height: 20px;
+                            Text {
+                                width: 130px;
+                                text: phase.name;
+                                font-size: 12.5px;
+                                font-weight: 600;
+                                color: Theme.text;
+                                vertical-alignment: center;
+                            }
+                            Bar {
+                                y: (parent.height - self.height) / 2;
+                                horizontal-stretch: 1;
+                                done: phase.done;
+                                busy: phase.busy;
+                                fail: phase.fail;
+                            }
+                            Text {
+                                width: 250px;
+                                text: phase.text;
+                                font-size: 12.5px;
+                                color: Theme.text2;
+                                vertical-alignment: center;
+                                overflow: elide;
+                            }
+                        }
+                        if FlashBridge.cards.length > 0: HorizontalLayout {
+                            spacing: 8px;
+                            alignment: start;
+                            for card in FlashBridge.cards: Rectangle {
+                                min-width: 120px;
+                                preferred-width: 220px;
+                                height: 46px;
+                                border-radius: 8px;
+                                border-width: 1px;
+                                border-color: Theme.border;
+                                background: Theme.surface;
+                                VerticalLayout {
+                                    padding-left: 10px;
+                                    padding-right: 10px;
+                                    padding-top: 7px;
+                                    padding-bottom: 8px;
+                                    spacing: 5px;
+                                    HorizontalLayout {
+                                        spacing: 6px;
+                                        Text {
+                                            text: card.name;
+                                            font-size: 12.5px;
+                                            font-weight: 600;
+                                            color: card.waiting ? Theme.text3 : Theme.text;
+                                        }
+                                        Text {
+                                            horizontal-stretch: 1;
+                                            text: card.sub;
+                                            font-size: Theme.font-tiny;
+                                            color: Theme.text3;
+                                            vertical-alignment: center;
+                                            overflow: elide;
+                                        }
+                                        Text {
+                                            text: card.text;
+                                            font-family: Theme.font-mono;
+                                            font-size: Theme.font-tiny;
+                                            color: card.waiting ? Theme.text3 : Theme.text2;
+                                            vertical-alignment: center;
+                                        }
+                                    }
+                                    Bar {
+                                        height: 4px;
+                                        busy: card.progress;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                if FlashBridge.running || FlashBridge.finished: Rectangle {
+                    height: 1px;
+                    background: Theme.border;
+                }
+
+                // The units, a column per part
+                HorizontalLayout {
+                    height: 34px;
+                    padding-left: 12px;
+                    padding-right: 12px;
+                    spacing: 10px;
+                    // As wide as the tick box in the rows
+                    Rectangle { width: 16px; }
+                    Text { width: 110px; text: "Unit"; font-size: Theme.font-small; color: Theme.text3; vertical-alignment: center; }
+                    Text { width: 100px; text: "Firmware now"; font-size: Theme.font-small; color: Theme.text3; vertical-alignment: center; }
+                    for column in FlashBridge.columns: Text {
+                        horizontal-stretch: 1;
+                        min-width: 0px;
+                        preferred-width: 120px;
+                        text: column;
+                        font-size: Theme.font-small;
+                        color: Theme.text3;
+                        vertical-alignment: center;
+                        overflow: elide;
+                    }
+                }
+                Rectangle {
+                    height: 1px;
+                    background: Theme.border;
+                }
+                ScrollView {
+                    vertical-stretch: 1;
+                    VerticalLayout {
+                        alignment: start;
+                        for unit in FlashBridge.units: Rectangle {
+                            height: 40px;
+                            background: unit-touch.has-hover && !unit.locked ? Theme.hover : transparent;
+                            unit-touch := TouchArea {
+                                enabled: !unit.locked;
+                                mouse-cursor: pointer;
+                                clicked => { FlashBridge.toggle-unit(unit.name); }
+                            }
+                            Rectangle {
+                                y: parent.height - 1px;
+                                height: 1px;
+                                background: Theme.border;
+                            }
+                            HorizontalLayout {
+                                padding-left: 12px;
+                                padding-right: 12px;
+                                spacing: 10px;
+                                Mark {
+                                    y: (parent.height - self.height) / 2;
+                                    on: unit.ticked;
+                                    opacity: unit.locked ? 0.45 : 1.0;
+                                }
+                                HorizontalLayout {
+                                    width: 110px;
+                                    spacing: 6px;
+                                    Text {
+                                        text: unit.name;
+                                        font-size: 13px;
+                                        font-weight: 600;
+                                        color: unit.dim ? Theme.text3 : Theme.text;
+                                        vertical-alignment: center;
+                                    }
+                                    Text {
+                                        text: unit.channel;
+                                        font-family: Theme.font-mono;
+                                        font-size: Theme.font-tiny;
+                                        color: Theme.text3;
+                                        vertical-alignment: center;
+                                    }
+                                }
+                                Text {
+                                    width: 100px;
+                                    text: unit.firmware;
+                                    font-family: Theme.font-mono;
+                                    font-size: 12.5px;
+                                    font-weight: unit.other ? 600 : 400;
+                                    color: unit.other ? Theme.warn-text : unit.dim ? Theme.text3 : Theme.text2;
+                                    vertical-alignment: center;
+                                    overflow: elide;
+                                }
+                                for cell in unit.cells: VerticalLayout {
+                                    horizontal-stretch: 1;
+                                    min-width: 0px;
+                                    preferred-width: 120px;
+                                    alignment: center;
+                                    spacing: 3px;
+                                    Text {
+                                        text: cell.text;
+                                        font-size: Theme.font-small;
+                                        color: cell.state == FlashState.done ? Theme.good
+                                            : cell.state == FlashState.fail ? Theme.crit-text
+                                            : cell.state == FlashState.warn ? Theme.warn-text
+                                            : cell.state == FlashState.busy ? Theme.text
+                                            : Theme.text3;
+                                        overflow: elide;
+                                    }
+                                    // A bar of its own width: a maximum would keep the
+                                    // column from stretching like the others
+                                    if cell.bar: HorizontalLayout {
+                                        alignment: start;
+                                        Bar {
+                                            height: 4px;
+                                            min-width: 0px;
+                                            preferred-width: 160px;
+                                            busy: cell.state == FlashState.busy ? cell.progress : 0;
+                                            done: cell.state == FlashState.done ? 1 : 0;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    HorizontalLayout {
+        spacing: 10px;
+        Text {
+            horizontal-stretch: 1;
+            text: FlashBridge.status;
+            font-size: 12.5px;
+            color: Theme.text2;
+            vertical-alignment: center;
+            wrap: word-wrap;
+        }
+        KButton {
+            text: FlashBridge.finished ? "Close" : "Cancel";
+            enabled: !FlashBridge.running;
+            clicked => { FlashBridge.visible = false; }
+        }
+        KButton {
+            text: FlashBridge.start-label;
+            icon: Icons.chip;
+            kind: ButtonKind.primary;
+            enabled: FlashBridge.can-start;
+            clicked => { FlashBridge.start(); }
+        }
+    }
+}

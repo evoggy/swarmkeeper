@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::coverage;
 use crate::tdoa3;
+use crate::host;
 
 // --- Obstacle types ---
 
@@ -613,22 +614,19 @@ pub fn sample_waypoint(
 
 /// Seed value for `rng_*` helpers, derived from the system clock.
 pub fn rng_seed() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos() as u64)
-        .unwrap_or(0x9E3779B97F4A7C15)
+    chrono::Utc::now().timestamp_nanos_opt().map(|n| n as u64).unwrap_or(0x9E3779B97F4A7C15)
         .max(1)
 }
 
 pub fn save_scene(path: &std::path::Path, scene: &PlanningScene) -> Result<(), String> {
     let content =
         serde_yaml::to_string(scene).map_err(|e| format!("Failed to serialize: {}", e))?;
-    std::fs::write(path, content).map_err(|e| format!("Failed to write file: {}", e))
+    host::fs::write(path, content).map_err(|e| format!("Failed to write file: {}", e))
 }
 
 pub fn load_scene(path: &std::path::Path) -> Result<PlanningScene, String> {
     let content =
-        std::fs::read_to_string(path).map_err(|e| format!("Failed to read file: {}", e))?;
+        host::fs::read_to_string(path).map_err(|e| format!("Failed to read file: {}", e))?;
     serde_yaml::from_str(&content).map_err(|e| format!("Failed to parse scene: {}", e))
 }
 
@@ -640,7 +638,7 @@ pub fn save_pads_to_scene(
 ) -> Result<(), String> {
     // Round-trip via Value so we preserve unknown/unstable fields and only
     // overwrite takeoff_pads.
-    let mut value: serde_yaml::Value = match std::fs::read_to_string(path) {
+    let mut value: serde_yaml::Value = match host::fs::read_to_string(path) {
         Ok(content) => serde_yaml::from_str(&content)
             .map_err(|e| format!("Failed to parse existing scene: {}", e))?,
         Err(_) => serde_yaml::Value::Mapping(serde_yaml::Mapping::new()),
@@ -656,7 +654,7 @@ pub fn save_pads_to_scene(
     );
     let content =
         serde_yaml::to_string(&value).map_err(|e| format!("Failed to serialize: {}", e))?;
-    std::fs::write(path, content).map_err(|e| format!("Failed to write file: {}", e))
+    host::fs::write(path, content).map_err(|e| format!("Failed to write file: {}", e))
 }
 
 /// Test if any obstacle blocks the ray from `origin` to `target`.

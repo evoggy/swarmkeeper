@@ -5,6 +5,7 @@
 /// for accurate positioning.
 
 use serde::{Deserialize, Serialize};
+use crate::host;
 
 /// A single TDoA3 anchor at a known position.
 #[derive(Clone, Debug)]
@@ -700,11 +701,11 @@ impl Tdoa3Scene {
 pub fn save_scene(path: &std::path::Path, scene: &Tdoa3Scene) -> Result<(), String> {
     let content =
         serde_yaml::to_string(scene).map_err(|e| format!("Failed to serialize: {}", e))?;
-    std::fs::write(path, content).map_err(|e| format!("Failed to write file: {}", e))
+    host::fs::write(path, content).map_err(|e| format!("Failed to write file: {}", e))
 }
 
 pub fn load_scene(path: &std::path::Path) -> Result<Tdoa3Scene, String> {
     let content =
-        std::fs::read_to_string(path).map_err(|e| format!("Failed to read file: {}", e))?;
+        host::fs::read_to_string(path).map_err(|e| format!("Failed to read file: {}", e))?;
     serde_yaml::from_str(&content).map_err(|e| format!("Failed to parse scene: {}", e))
 }

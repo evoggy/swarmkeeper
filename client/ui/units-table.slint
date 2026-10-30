@@ -1,0 +1,492 @@
+// The Units screen: summary tiles, the filter bar and the unit table.
+
+import { UnitData, UnitState } from "unit-card.slint";
+import { Theme, Icons, Icon, Card, Tile, Meter, StackBar, StackPart, Segmented, SegmentItem, SearchField, Dot, Battery, LinkBars, IconButton } from "kit.slint";
+
+// How a unit is doing, which decides its colour everywhere.
+export enum Health { ready, flying, charging, charged, warn, fault, off }
+
+// What the table shows for one unit, worked out in Rust (units.rs).
+export struct UnitRow {
+    slot: int,             // row in the filtered table, -1 when filtered out
+    health: Health,
+    status: string,        // "Ready", "Low battery", "Selftest failed", …
+    detail: string,        // the reason, when there is one
+    address: string,       // "D91F700117 · ch 84"
+    battery: string,       // "3.91 V", empty when not connected
+    battery-level: float,  // 0..1
+    link: string,          // "91 %"
+    position: string,      // "-1.50  -1.50  0.00"
+    radio: string,         // "Radio 0"
+    firmware-differs: bool,
+}
+
+// Numbers about the whole swarm, for the tiles here and on Status.
+export struct SwarmSummary {
+    total: int,
+    connected: int,
+    ready: int,
+    flying: int,
+    on-battery: int,
+    charging: int,
+    charged: int,
+    attention: int,
+    disconnected: int,
+    attention-text: string,        // "low battery, timeout, selftest, …"
+    lowest-battery: string,        // "3.52"
+    lowest-battery-unit: string,   // "CF-12"
+    lowest-battery-level: float,
+    firmware: string,              // the version most units run
+    firmware-differs: int,
+}
+
+export global HealthColors {
+    public pure function dot(health: Health) -> color {
+        return health == Health.ready ? Theme.good
+            : health == Health.flying ? Theme.flying
+            : health == Health.charging ? Theme.warn
+            : health == Health.charged ? Theme.good
+            : health == Health.warn ? Theme.warn
+            : health == Health.fault ? Theme.crit
+            : Theme.off;
+    }
+    public pure function label(health: Health) -> color {
+        return health == Health.fault ? Theme.crit-text
+            : health == Health.warn ? Theme.warn-text
+            : health == Health.off ? Theme.text3
+            : Theme.text;
+    }
+    public pure function battery(level: float) -> color {
+        return level < 0.25 ? Theme.crit : level < 0.4 ? Theme.warn : Theme.good;
+    }
+}
+
+export component UnitsTiles inherits HorizontalLayout {
+    in property <SwarmSummary> summary;
+    callback show-attention();
+
+    spacing: 12px;
+
+    Tile {
+        // Same preferred width and stretch: five equal tiles.
+        min-width: 0px;
+        preferred-width: 100px;
+        horizontal-stretch: 1;
+        label: "Connected";
+        value: root.summary.connected;
+        unit: "of " + root.summary.total;
+        sub: root.summary.disconnected > 0 ? root.summary.disconnected + " not responding" : "All units answer";
+        Meter {
+            value: root.summary.total > 0 ? root.summary.connected / root.summary.total : 0;
+            tint: root.summary.disconnected > 0 ? Theme.warn : Theme.good;
+        }
+    }
+    Tile {
+        // Same preferred width and stretch: five equal tiles.
+        min-width: 0px;
+        preferred-width: 100px;
+        horizontal-stretch: 1;
+        label: "Ready to fly";
+        value: root.summary.ready;
+        unit: "units";
+        sub: root.summary.flying > 0 ? root.summary.flying + " flying" : "Connected, on battery, nothing to fix";
+    }
+    Tile {
+        // Same preferred width and stretch: five equal tiles.
+        min-width: 0px;
+        preferred-width: 100px;
+        horizontal-stretch: 1;
+        label: "Lowest battery";
+        value: root.summary.lowest-battery == "" ? "–" : root.summary.lowest-battery;
+        unit: root.summary.lowest-battery == "" ? "" : "V";
+        sub: root.summary.lowest-battery-unit;
+        Meter {
+            value: root.summary.lowest-battery-level;
+            tint: HealthColors.battery(root.summary.lowest-battery-level);
+        }
+    }
+    Tile {
+        // Same preferred width and stretch: five equal tiles.
+        min-width: 0px;
+        preferred-width: 100px;
+        horizontal-stretch: 1;
+        label: "Power";
+        value: root.summary.on-battery;
+        unit: "on battery";
+        sub: root.summary.charging + " charging, " + root.summary.charged + " charged";
+        StackBar {
+            parts: [
+                { value: root.summary.on-battery, color: Theme.accent },
+                { value: root.summary.charging, color: Theme.warn },
+                { value: root.summary.charged, color: Theme.good },
+            ];
+        }
+    }
+    Tile {
+        // Same preferred width and stretch: five equal tiles.
+        min-width: 0px;
+        preferred-width: 100px;
+        horizontal-stretch: 1;
+        label: "Needs attention";
+        value: root.summary.attention;
+        unit: "units";
+        attention: root.summary.attention > 0;
+        sub: root.summary.attention > 0 ? root.summary.attention-text : "Nothing to fix";
+        clickable: root.summary.attention > 0;
+        clicked => { root.show-attention(); }
+    }
+}
+
+component HeaderLabel inherits Rectangle {
+    in property <string> text;
+    in property <int> key: -1;          // sort key, -1 when not sortable
+    in property <int> sort-column;
+    in property <bool> sort-ascending;
+    callback sort(int);
+
+    property <bool> on: root.key >= 0 && root.key == root.sort-column;
+
+    HorizontalLayout {
+        padding-left: 12px;
+        padding-right: 12px;
+        spacing: 4px;
+        alignment: start;
+        Text {
+            text: root.text;
+            font-size: Theme.font-small;
+            font-weight: 500;
+            color: root.on || touch.has-hover ? Theme.text : Theme.text3;
+            vertical-alignment: center;
+        }
+        if root.on: Icon {
+            y: (parent.height - self.height) / 2;
+            source: root.sort-ascending ? Icons.sort-up : Icons.sort-down;
+            width: 12px;
+            height: 12px;
+            color: Theme.text;
+        }
+    }
+
+    touch := TouchArea {
+        enabled: root.key >= 0;
+        mouse-cursor: root.key >= 0 ? pointer : default;
+        clicked => { root.sort(root.key); }
+    }
+}
+
+component DeckChip inherits Rectangle {
+    in property <string> text;
+    height: 20px;
+    width: chip-text.preferred-width + 12px;
+    border-radius: 5px;
+    background: Theme.surface2;
+    border-width: 1px;
+    border-color: Theme.border;
+    chip-text := Text {
+        text: root.text;
+        font-size: Theme.font-tiny;
+        font-weight: 500;
+        color: Theme.text2;
+    }
+}
+
+// The unit table. Rows keep their index in `units` (the sorted list), so
+// the row callbacks work as before; filtering only hides rows.
+export component UnitsTable inherits Rectangle {
+    in property <[UnitData]> units;
+    in property <[UnitRow]> rows;
+    in property <int> visible-count;
+    in-out property <int> selected-row;
+    in property <bool> narrow;          // fewer columns while the unit panel is open
+    in property <bool> compact;
+    in property <int> sort-column;
+    in property <bool> sort-ascending;
+    callback sort(int);
+    callback row-selected(int);
+
+    property <length> row-height: root.compact ? 38px : 52px;
+    // Column widths
+    property <length> w-status: 190px;
+    property <length> w-battery: root.narrow ? 120px : 136px;
+    property <length> w-link: root.narrow ? 92px : 104px;
+    property <length> w-position: root.narrow ? 150px : 168px;
+    property <length> w-decks: 132px;
+    property <length> w-radio: 88px;
+    property <length> w-firmware: 96px;
+    property <length> w-more: 48px;
+
+    // Bring a row selected elsewhere (the 3D view) into view.
+    changed selected-row => {
+        if (root.selected-row >= 0 && root.selected-row < root.rows.length && flick.height >= root.row-height) {
+            flick.viewport-y = clamp(
+                flick.viewport-y,
+                -root.rows[root.selected-row].slot * root.row-height,
+                flick.height - (root.rows[root.selected-row].slot + 1) * root.row-height);
+        }
+    }
+
+    VerticalLayout {
+        // Header
+        Rectangle {
+            height: 36px;
+            background: Theme.surface2;
+            Rectangle {
+                y: parent.height - 1px;
+                height: 1px;
+                background: Theme.border;
+            }
+            HorizontalLayout {
+                HeaderLabel { horizontal-stretch: 1; min-width: 150px; text: "Name"; key: 2; sort-column: root.sort-column; sort-ascending: root.sort-ascending; sort(k) => { root.sort(k); } }
+                HeaderLabel { width: root.w-status; text: "Status"; key: 1; sort-column: root.sort-column; sort-ascending: root.sort-ascending; sort(k) => { root.sort(k); } }
+                HeaderLabel { width: root.w-battery; text: "Battery"; key: 7; sort-column: root.sort-column; sort-ascending: root.sort-ascending; sort(k) => { root.sort(k); } }
+                HeaderLabel { width: root.w-link; text: "Link"; key: 8; sort-column: root.sort-column; sort-ascending: root.sort-ascending; sort(k) => { root.sort(k); } }
+                HeaderLabel { width: root.w-position; text: "Position (m)"; key: 4; sort-column: root.sort-column; sort-ascending: root.sort-ascending; sort(k) => { root.sort(k); } }
+                if !root.narrow: HeaderLabel { width: root.w-decks; text: "Decks"; key: 11; sort-column: root.sort-column; sort-ascending: root.sort-ascending; sort(k) => { root.sort(k); } }
+                if !root.narrow: HeaderLabel { width: root.w-radio; text: "Radio"; key: 15; sort-column: root.sort-column; sort-ascending: root.sort-ascending; sort(k) => { root.sort(k); } }
+                if !root.narrow: HeaderLabel { width: root.w-firmware; text: "Firmware"; key: 16; sort-column: root.sort-column; sort-ascending: root.sort-ascending; sort(k) => { root.sort(k); } }
+                Rectangle { width: root.w-more; }
+            }
+        }
+
+        flick := Flickable {
+            vertical-stretch: 1;
+            viewport-height: root.visible-count * root.row-height;
+
+            for unit[i] in root.units: rb := Rectangle {
+                property <UnitRow> info: i < root.rows.length ? root.rows[i] : { slot: -1 };
+                property <bool> selected: root.selected-row == i;
+                visible: self.info.slot >= 0;
+                y: max(0, self.info.slot) * root.row-height;
+                width: parent.width;
+                height: root.row-height;
+                background: self.selected ? Theme.accent-tint : row-touch.has-hover ? Theme.hover : transparent;
+
+                Rectangle {
+                    y: parent.height - 1px;
+                    height: 1px;
+                    background: Theme.border;
+                }
+
+                row-touch := TouchArea {
+                    mouse-cursor: pointer;
+                    clicked => {
+                        if (root.selected-row == i) {
+                            root.selected-row = -1;
+                        } else {
+                            root.selected-row = i;
+                            root.row-selected(i);
+                        }
+                    }
+                }
+
+                HorizontalLayout {
+                    // Name and address
+                    VerticalLayout {
+                        horizontal-stretch: 1;
+                        min-width: 150px;
+                        padding-left: 12px;
+                        padding-right: 12px;
+                        alignment: center;
+                        Text {
+                            text: unit.name;
+                            font-size: 13px;
+                            font-weight: 600;
+                            color: Theme.text;
+                            overflow: elide;
+                        }
+                        if !root.compact: Text {
+                            text: rb.info.address;
+                            font-family: Theme.font-mono;
+                            font-size: Theme.font-tiny;
+                            color: Theme.text3;
+                            overflow: elide;
+                        }
+                    }
+                    // Status
+                    HorizontalLayout {
+                        width: root.w-status;
+                        padding-left: 12px;
+                        padding-right: 12px;
+                        spacing: 8px;
+                        alignment: start;
+                        if rb.info.health == Health.charging || rb.info.health == Health.charged: Icon {
+                            y: (parent.height - self.height) / 2;
+                            source: rb.info.health == Health.charging ? Icons.bolt : Icons.check-circle;
+                            width: 14px;
+                            height: 14px;
+                            color: HealthColors.dot(rb.info.health);
+                        }
+                        if rb.info.health != Health.charging && rb.info.health != Health.charged: Dot {
+                            y: (parent.height - self.height) / 2;
+                            tint: HealthColors.dot(rb.info.health);
+                            hollow: rb.info.health == Health.off;
+                        }
+                        VerticalLayout {
+                            alignment: center;
+                            Text {
+                                text: rb.info.status;
+                                font-size: 13px;
+                                font-weight: rb.info.health == Health.fault || rb.info.health == Health.warn ? 500 : 400;
+                                color: HealthColors.label(rb.info.health);
+                                overflow: elide;
+                            }
+                            if !root.compact && rb.info.detail != "": Text {
+                                text: rb.info.detail;
+                                font-size: Theme.font-small;
+                                color: Theme.text3;
+                                overflow: elide;
+                            }
+                        }
+                    }
+                    // Battery
+                    HorizontalLayout {
+                        width: root.w-battery;
+                        padding-left: 12px;
+                        padding-right: 12px;
+                        spacing: 8px;
+                        alignment: start;
+                        if rb.info.battery != "": Battery {
+                            y: (parent.height - self.height) / 2;
+                            level: rb.info.battery-level;
+                            tint: HealthColors.battery(rb.info.battery-level);
+                        }
+                        Text {
+                            text: rb.info.battery == "" ? "–" : rb.info.battery;
+                            font-family: Theme.font-mono;
+                            font-size: Theme.font-small;
+                            color: rb.info.battery == "" ? Theme.text3 : Theme.text2;
+                            vertical-alignment: center;
+                        }
+                    }
+                    // Link
+                    HorizontalLayout {
+                        width: root.w-link;
+                        padding-left: 12px;
+                        padding-right: 12px;
+                        spacing: 8px;
+                        alignment: start;
+                        LinkBars {
+                            y: (parent.height - self.height) / 2;
+                            quality: unit.link-quality;
+                            connected: rb.info.link != "";
+                        }
+                        Text {
+                            text: rb.info.link == "" ? "–" : rb.info.link;
+                            font-family: Theme.font-mono;
+                            font-size: Theme.font-small;
+                            color: rb.info.link == "" ? Theme.text3 : Theme.text2;
+                            vertical-alignment: center;
+                        }
+                    }
+                    // Position
+                    Text {
+                        width: root.w-position;
+                        text: rb.info.position;
+                        font-family: Theme.font-mono;
+                        font-size: Theme.font-small;
+                        color: Theme.text2;
+                        vertical-alignment: center;
+                        overflow: elide;
+                    }
+                    // Decks
+                    if !root.narrow: HorizontalLayout {
+                        width: root.w-decks;
+                        padding-left: 12px;
+                        spacing: 4px;
+                        alignment: start;
+                        if unit.deck-lighthouse: DeckChip { y: (parent.height - self.height) / 2; text: "LH"; }
+                        if unit.deck-loco: DeckChip { y: (parent.height - self.height) / 2; text: "Loco"; }
+                        if unit.deck-led-top || unit.deck-led-bottom: DeckChip { y: (parent.height - self.height) / 2; text: "LED"; }
+                    }
+                    // Radio
+                    if !root.narrow: Text {
+                        width: root.w-radio;
+                        text: rb.info.radio;
+                        font-size: Theme.font-small;
+                        color: Theme.text2;
+                        vertical-alignment: center;
+                    }
+                    // Firmware
+                    if !root.narrow: Text {
+                        width: root.w-firmware;
+                        text: unit.firmware-version == "" ? "–" : unit.firmware-version;
+                        font-family: Theme.font-mono;
+                        font-size: Theme.font-small;
+                        font-weight: rb.info.firmware-differs ? 600 : 400;
+                        color: rb.info.firmware-differs ? Theme.warn-text : Theme.text2;
+                        vertical-alignment: center;
+                    }
+                    Rectangle {
+                        width: root.w-more;
+                        IconButton {
+                            icon: Icons.chevron-right;
+                            size: 28px;
+                            icon-size: 16px;
+                            clicked => {
+                                root.selected-row = i;
+                                root.row-selected(i);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if root.visible-count == 0: Rectangle {
+            height: 120px;
+            Text {
+                text: root.units.length == 0 ? "No swarm open" : "No units match";
+                font-size: 13px;
+                color: Theme.text3;
+            }
+        }
+    }
+}
+
+export struct FilterCounts {
+    all: int,
+    ready: int,
+    chargers: int,
+    attention: int,
+    disconnected: int,
+}
+
+// Filter chips and the search field above the table.
+export component UnitsToolbar inherits Rectangle {
+    in property <FilterCounts> counts;
+    in-out property <int> filter;
+    in-out property <string> search;
+    callback changed-filter();
+
+    height: 56px;
+    Rectangle {
+        y: parent.height - 1px;
+        height: 1px;
+        background: Theme.border;
+    }
+    HorizontalLayout {
+        padding-left: 12px;
+        padding-right: 12px;
+        spacing: 8px;
+        Segmented {
+            y: (parent.height - self.height) / 2;
+            current <=> root.filter;
+            items: [
+                { label: "All", count: root.counts.all, attention: false },
+                { label: "Ready", count: root.counts.ready, attention: false },
+                { label: "On chargers", count: root.counts.chargers, attention: false },
+                { label: "Needs attention", count: root.counts.attention, attention: root.counts.attention > 0 },
+                { label: "Not connected", count: root.counts.disconnected, attention: false },
+            ];
+            selected => { root.changed-filter(); }
+        }
+        Rectangle { horizontal-stretch: 1; }
+        SearchField {
+            y: (parent.height - self.height) / 2;
+            width: 240px;
+            placeholder: "Search name or address";
+            text <=> root.search;
+            edited => { root.changed-filter(); }
+        }
+    }
+}
