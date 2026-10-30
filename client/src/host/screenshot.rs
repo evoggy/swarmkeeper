@@ -8,6 +8,7 @@
 //! # SWARMKEEPER_PLAN=<scene.yaml> (Planning; default the arena scene in plans/),
 //! # SWARMKEEPER_PLOT=1 (the plot dock with a made-up log),
 //! # SWARMKEEPER_FLASH=setup|running|decks (Flash firmware with a made-up release)
+//! # SWARMKEEPER_RECHANNEL=plan|running|done (Rechannel the demo swarm)
 //! ```
 //!
 //! Shows the demo swarm (`crate::demo`) and draws one frame with Slint's
@@ -96,6 +97,9 @@ pub fn take(path: &Path) {
     });
     if let Ok(phase) = std::env::var("SWARMKEEPER_FLASH") {
         crate::flashing::seed_screenshot(&ui, &phase);
+    }
+    if let Ok(phase) = std::env::var("SWARMKEEPER_RECHANNEL") {
+        crate::rechannel_dialog::seed_screenshot(&ui, &phase);
     }
     ui.show().expect("show");
 

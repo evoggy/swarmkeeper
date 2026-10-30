@@ -101,7 +101,7 @@ export component SwarmActionsButton inherits KButton {
                     if Features.developer: MenuRow { text: "Clear TLV storage…"; icon: Icons.trash; danger: true; clicked => { root.clear-tlv(); menu.close(); } }
                     MenuSeparator {}
                     MenuGroupTitle { text: "SETUP"; }
-                    if Features.radio: MenuRow { text: "Rechannel swarm…"; icon: Icons.radio; clicked => { root.rechannel(); menu.close(); } }
+                    MenuRow { text: "Rechannel swarm…"; icon: Icons.radio; clicked => { root.rechannel(); menu.close(); } }
                     if Features.lighthouse: MenuRow { text: "Upload Lighthouse geometry"; icon: Icons.lighthouse; enabled: root.connected; clicked => { root.upload-geometry(); menu.close(); } }
                     if Features.developer: MenuRow { text: "Upload parameters"; icon: Icons.upload; clicked => { root.upload-params(); menu.close(); } }
                     if Features.developer: MenuRow { text: "Set parameter…"; icon: Icons.settings; enabled: root.connected; clicked => { root.set-parameter(); menu.close(); } }

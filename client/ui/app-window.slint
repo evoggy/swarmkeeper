@@ -13,7 +13,7 @@ import { PlotBridge, PlotLine, AxisTick, LegendEntry, ChartData, PlotUnit, LogVa
 import { PlotScreen } from "plot-screen.slint";
 import { FlashBridge, FlashDialog, FlashPart, FlashUnit, FlashCell, FlashStep, FlashPhase, FlashCard, FlashState } from "flash.slint";
 import { ViewSettings } from "view-settings.slint";
-import { RechannelDialog, RechannelRow, RcRowState } from "rechannel.slint";
+import { RechannelBridge, RechannelDialog, RcLane, RcChip, RcMove, RcRowState } from "rechannel.slint";
 import { OpenSwarmDialog, SignInDialog, SwarmChoice } from "open-swarm.slint";
 import { Theme, Icons, Card, Segmented, ScreenTitle } from "kit.slint";
 import { Rail, RailEntry, TopBar } from "shell.slint";
@@ -26,7 +26,7 @@ import { StatusScreen, StatusData, HealthTile, GridCell, HistBar, Fact, Attentio
 // Re-export the plot globals/structs from the root so the Rust side can reach
 // PlotBridge via `ui.global::<PlotBridge>()` and the generated data structs.
 export { PlotBridge, PlotLine, AxisTick, LegendEntry, ChartData, PlotUnit, LogVarRow, FlashBridge, FlashPart, FlashUnit, FlashCell, FlashStep, FlashPhase, FlashCard, FlashState, ViewSettings, Theme, Features, SettingsBridge, UnitRow, SwarmSummary, FilterCounts, Health, StatusData, HealthTile, GridCell, HistBar, Fact, AttentionRow, RadioRow, TrafficSeries, ServerRow, ActivityRow }
-export { RechannelRow, RcRowState }
+export { RechannelBridge, RcLane, RcChip, RcMove, RcRowState }
 export { SwarmChoice }
 
 export struct HealthTestResult {
@@ -244,24 +244,6 @@ export component AppWindow inherits Window {
     callback filter-swarm-params(/* search */ string);
     pure callback validate-param-value(/* type */ string, /* value */ string) -> string;
     callback set-swarm-param(/* name */ string, /* value */ string, /* persist */ bool);
-
-    // Flash firmware (bootloader)
-
-    // Rechannel swarm: spread the swarm over several radio channels
-    in-out property <bool> rc-dialog-visible: false;
-    in-out property <[RechannelRow]> rc-rows;
-    in-out property <int> rc-radios;                   // Crazyradios attached
-    in-out property <int> rc-count: 1;
-    in-out property <string> rc-channels;
-    in-out property <string> rc-plan-error;
-    in-out property <string> rc-summary;
-    in-out property <int> rc-moving;
-    in-out property <bool> rc-running: false;
-    in-out property <string> rc-status;
-    callback rc-open();                                // read the swarm file and plan
-    callback rc-count-edited(int);
-    callback rc-channels-edited(string);
-    callback rc-start();
 
     // File > Open swarm: the swarm files on this computer and the shared swarms
     in-out property <bool> os-dialog-visible: false;
@@ -725,8 +707,8 @@ export component AppWindow inherits Window {
                     }
                     clear-tlv => { confirm-clear-tlv-visible = true; }
                     rechannel => {
-                        rc-dialog-visible = true;
-                        rc-open();
+                        RechannelBridge.visible = true;
+                        RechannelBridge.opened();
                     }
                     upload-geometry => { upload-geometry(); }
                     upload-params => { upload-params(); }
@@ -1569,21 +1551,7 @@ export component AppWindow inherits Window {
     if FlashBridge.visible: FlashDialog {}
 
     // Rechannel swarm dialog
-    if rc-dialog-visible: RechannelDialog {
-        rows: root.rc-rows;
-        radios: root.rc-radios;
-        count <=> root.rc-count;
-        channels <=> root.rc-channels;
-        plan-error: root.rc-plan-error;
-        summary: root.rc-summary;
-        moving: root.rc-moving;
-        running: root.rc-running;
-        status: root.rc-status;
-        count-edited(count) => { root.rc-count-edited(count); }
-        channels-edited(text) => { root.rc-channels-edited(text); }
-        start => { root.rc-start(); }
-        close => { root.rc-dialog-visible = false; }
-    }
+    if RechannelBridge.visible: RechannelDialog {}
 
     // Open swarm dialog
     if os-dialog-visible: OpenSwarmDialog {

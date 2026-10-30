@@ -37,6 +37,39 @@ pub fn channels_for_count(count: u8) -> Vec<u8> {
     (0..count.min(41)).map(|i| FIRST_CHANNEL - CHANNEL_SPACING * i).collect()
 }
 
+/// `count` channels that keep the swarm where it is as much as they can: the
+/// channels the Crazyflies are on, the busiest first, then 80, 78, ... that
+/// are far enough from those.
+pub fn channels_keeping(current: &[u8], count: usize) -> Vec<u8> {
+    let mut busiest: Vec<(usize, u8)> = Vec::new();
+    for channel in current {
+        match busiest.iter_mut().find(|(_, c)| c == channel) {
+            Some((n, _)) => *n += 1,
+            None => busiest.push((1, *channel)),
+        }
+    }
+    busiest.sort_by(|a, b| b.0.cmp(&a.0));
+    let mut channels = Vec::new();
+    for channel in busiest.into_iter().map(|(_, c)| c) {
+        if channels.len() < count && channels.iter().all(|c: &u8| c.abs_diff(channel) >= CHANNEL_SPACING) {
+            channels.push(channel);
+        }
+    }
+    while channels.len() < count {
+        let Some(channel) = next_channel(&channels) else { break };
+        channels.push(channel);
+    }
+    channels
+}
+
+/// One more channel: the first of 80, 78, ... that is far enough from the
+/// others.
+pub fn next_channel(channels: &[u8]) -> Option<u8> {
+    channels_for_count(41)
+        .into_iter()
+        .find(|channel| channels.iter().all(|c| c.abs_diff(*channel) >= CHANNEL_SPACING))
+}
+
 /// Read a channel list such as `80, 78 76`. Rejects empty lists and channels
 /// given twice; returns warnings about channels that interfere.
 pub fn parse_channels(text: &str) -> Result<(Vec<u8>, Vec<String>)> {
@@ -107,7 +140,7 @@ pub struct Unit {
 }
 
 /// Where one Crazyflie ends up.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct Placement {
     /// Its index in the swarm.
     pub unit: usize,
@@ -442,6 +475,17 @@ mod tests {
         assert_eq!(channels_for_count(1), vec![80]);
         assert_eq!(channels_for_count(3), vec![80, 78, 76]);
         assert_eq!(*channels_for_count(41).last().unwrap(), 0);
+    }
+
+    #[test]
+    fn keeps_the_channels_the_swarm_is_on() {
+        assert_eq!(channels_keeping(&[90, 90, 90], 1), vec![90]);
+        assert_eq!(channels_keeping(&[90, 90, 90], 3), vec![90, 80, 78]);
+        // The busiest first, and 79 is too close to 80
+        assert_eq!(channels_keeping(&[79, 80, 80, 60], 3), vec![80, 60, 78]);
+        assert_eq!(channels_keeping(&[], 2), vec![80, 78]);
+        assert_eq!(next_channel(&[80, 76]), Some(78));
+        assert_eq!(next_channel(&channels_for_count(41)), None);
     }
 
     #[test]

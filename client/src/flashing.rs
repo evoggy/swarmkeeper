@@ -27,8 +27,8 @@ use crate::{AppWindow, FlashBridge, FlashCard, FlashCell, FlashPart, FlashPhase,
 /// attached (cfcli's `RESTART_DELAY`).
 const RESTART_DELAY: Duration = Duration::from_secs(7);
 
-/// A unit, connected or not, by name.
-fn connected(u: &UnitData) -> bool {
+/// Whether the unit is connected.
+pub(crate) fn connected(u: &UnitData) -> bool {
     !matches!(u.state, UnitState::Disconnected | UnitState::Error)
 }
 

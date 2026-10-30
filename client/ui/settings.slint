@@ -289,7 +289,7 @@ export component SettingsScreen inherits Rectangle {
                 if root.section == 0: SectionCard {
                     title: "Tools";
                     note: "Screens and panel tabs for work beyond flying the swarm.";
-                    FeatureSwitch { title: "Radio"; note: "The radio channel test, and rechanneling the swarm"; checked <=> SettingsBridge.radio; }
+                    FeatureSwitch { title: "Radio"; note: "The radio channel test"; checked <=> SettingsBridge.radio; }
                     FeatureSwitch { title: "Planning"; note: "Rooms, base stations, anchors and coverage"; checked <=> SettingsBridge.planning; }
                     FeatureSwitch { title: "Trajectories"; note: "Upload, generate and fly trajectories"; checked <=> SettingsBridge.trajectories; }
                     FeatureSwitch { title: "Manual control"; note: "Fly one unit with a gamepad"; checked <=> SettingsBridge.manual-control; }
