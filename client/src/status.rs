@@ -108,24 +108,24 @@ pub(crate) fn rebuild(ui: &AppWindow, units: &[UnitData], rows: &[UnitRow], summ
         data.subline = attention_line(summary).into();
     }
 
-    // The state bar: ready, on a charger, warning, fault (connected) and not responding
-    let warn = rows.iter().filter(|r| r.health == Health::Warn).count() as i32;
-    let fault = rows.iter().filter(|r| r.health == Health::Fault && !r.link.is_empty()).count() as i32;
-    data.state_counts = ModelRc::new(VecModel::from(vec![
-        summary.ready + summary.flying,
-        summary.charging + summary.charged,
-        warn,
-        fault,
-        summary.disconnected,
-    ]));
-
-    // The unit grid
+    // The state bar and the unit grid, by the same groups so that they agree
+    let groups: Vec<usize> = rows.iter().map(swarm_group).collect();
+    data.state_counts = ModelRc::new(VecModel::from(
+        (0..5).map(|g| groups.iter().filter(|group| **group == g).count() as i32).collect::<Vec<_>>(),
+    ));
     data.grid = ModelRc::new(VecModel::from(
         units
             .iter()
             .zip(rows)
+            .zip(&groups)
             .enumerate()
-            .map(|(i, (u, r))| GridCell { name: u.name.clone(), health: r.health, row: i as i32 })
+            .map(|(i, ((u, r), group))| GridCell {
+                name: u.name.clone(),
+                group: *group as i32,
+                status: r.status.clone(),
+                detail: r.detail.clone(),
+                row: i as i32,
+            })
             .collect::<Vec<_>>(),
     ));
 
@@ -333,6 +333,20 @@ pub(crate) fn seed_demo_traffic(radios: usize) {
         h.taken = TRAFFIC_SAMPLES as u64;
         h.chart = draw_traffic(&h.traffic, h.taken);
     });
+}
+
+/// The Swarm card's group of a unit, in the order of its bar: ready (or
+/// flying), on a charger, warning, fault, not responding.
+fn swarm_group(row: &UnitRow) -> usize {
+    match row.health {
+        // Not connected, whatever went wrong
+        _ if row.link.is_empty() => 4,
+        Health::Ready | Health::Flying => 0,
+        Health::Charging | Health::Charged => 1,
+        Health::Warn => 2,
+        Health::Fault => 3,
+        Health::Off => 4,
+    }
 }
 
 fn attention_line(summary: &SwarmSummary) -> String {

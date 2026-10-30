@@ -5,6 +5,7 @@
 //! # also SWARMKEEPER_SIZE=1280x800, SWARMKEEPER_SELECT=<row>, SWARMKEEPER_FILTER=<chip>,
 //! # SWARMKEEPER_HOVER=<row> (3D view), SWARMKEEPER_SCENE=flying,
 //! # SWARMKEEPER_CLICK="x,y;x,y" (clicks first, to open a menu),
+//! # SWARMKEEPER_POINTER="x,y" (then the pointer there, for a hover),
 //! # SWARMKEEPER_PLAN=<scene.yaml> (Planning; default the arena scene in plans/),
 //! # SWARMKEEPER_PLOT=1 (the plot dock with a made-up log),
 //! # SWARMKEEPER_FLASH=setup|running|decks (Flash firmware with a made-up release)
@@ -112,6 +113,15 @@ pub fn take(path: &Path) {
         window.dispatch_event(WindowEvent::PointerMoved { position });
         window.dispatch_event(WindowEvent::PointerPressed { position, button: PointerEventButton::Left });
         window.dispatch_event(WindowEvent::PointerReleased { position, button: PointerEventButton::Left });
+        slint::platform::update_timers_and_animations();
+    }
+    // Then the pointer, to show a hover: "x,y"
+    if let Some((x, y)) = std::env::var("SWARMKEEPER_POINTER")
+        .ok()
+        .and_then(|p| p.split_once(',').and_then(|(x, y)| Some((x.parse().ok()?, y.parse().ok()?))))
+    {
+        let position = slint::LogicalPosition::new(x, y);
+        window.dispatch_event(slint::platform::WindowEvent::PointerMoved { position });
         slint::platform::update_timers_and_animations();
     }
     // A click may have changed Settings › Features

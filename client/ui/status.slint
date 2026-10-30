@@ -15,7 +15,9 @@ export struct HealthTile {
 
 export struct GridCell {
     name: string,
-    health: Health,
+    group: int,          // as the state bar: ready, on a charger, warning, fault, not responding
+    status: string,
+    detail: string,
     row: int,            // index in the sorted units
 }
 
@@ -280,7 +282,7 @@ export component StatusScreen inherits Rectangle {
                     horizontal-stretch: 3;
                     spacing: 16px;
 
-                    Card {
+                    swarm-card := Card {
                         height: swarm-layout.preferred-height;
                         swarm-layout := VerticalLayout {
                             padding: 16px;
@@ -321,6 +323,8 @@ export component StatusScreen inherits Rectangle {
                                     }
                                     grid := Rectangle {
                                         property <int> columns: 10;
+                                        // The cell under the pointer, for its status
+                                        property <int> hovered: -1;
                                         width: self.columns * 30px;
                                         height: ceil(root.data.grid.length / self.columns) * 30px;
                                         for cell[i] in root.data.grid: Rectangle {
@@ -331,15 +335,23 @@ export component StatusScreen inherits Rectangle {
                                             border-radius: 6px;
                                             background: cell-touch.has-hover ? Theme.hover : Theme.surface2;
                                             border-width: 1px;
-                                            border-color: cell.health == Health.fault ? Theme.crit
-                                                : cell.health == Health.warn ? Theme.warn : Theme.border;
+                                            border-color: cell.group == 3 ? Theme.crit
+                                                : cell.group == 2 ? Theme.warn : Theme.border;
+                                            // The colours of the state bar
                                             Dot {
-                                                tint: HealthColors.dot(cell.health);
-                                                hollow: cell.health == Health.off;
+                                                tint: [Theme.good, Theme.accent, Theme.warn, Theme.crit, Theme.off][cell.group];
+                                                hollow: cell.group == 4;
                                             }
                                             cell-touch := TouchArea {
                                                 mouse-cursor: pointer;
                                                 clicked => { root.open-unit(cell.row); }
+                                                changed has-hover => {
+                                                    if (self.has-hover) {
+                                                        grid.hovered = i;
+                                                    } else if (grid.hovered == i) {
+                                                        grid.hovered = -1;
+                                                    }
+                                                }
                                             }
                                         }
                                     }
@@ -406,6 +418,48 @@ export component StatusScreen inherits Rectangle {
                                         color: fact.tone == Health.warn ? Theme.warn-text : fact.tone == Health.fault ? Theme.crit-text : Theme.text;
                                         overflow: elide;
                                     }
+                                }
+                            }
+                        }
+                        // The status of the unit under the pointer, above it
+                        if grid.hovered >= 0 && grid.hovered < root.data.grid.length: Rectangle {
+                            property <GridCell> cell: root.data.grid[grid.hovered];
+                            property <length> cell-x: grid.absolute-position.x - swarm-card.absolute-position.x + mod(grid.hovered, grid.columns) * 30px;
+                            property <length> cell-y: grid.absolute-position.y - swarm-card.absolute-position.y + floor(grid.hovered / grid.columns) * 30px;
+                            x: max(8px, min(self.cell-x, swarm-card.width - self.width - 8px));
+                            y: self.cell-y - self.height - 6px;
+                            width: min(320px, tip.preferred-width);
+                            height: tip.preferred-height;
+                            border-radius: 8px;
+                            background: Theme.surface;
+                            border-width: 1px;
+                            border-color: Theme.border2;
+                            drop-shadow-blur: 12px;
+                            drop-shadow-color: Theme.shadow;
+                            drop-shadow-offset-y: 4px;
+                            tip := VerticalLayout {
+                                padding: 8px;
+                                padding-left: 10px;
+                                padding-right: 10px;
+                                spacing: 2px;
+                                Text {
+                                    text: cell.name;
+                                    font-size: 12.5px;
+                                    font-weight: 600;
+                                    color: Theme.text;
+                                    overflow: elide;
+                                }
+                                Text {
+                                    text: cell.status;
+                                    font-size: 12.5px;
+                                    color: cell.group == 3 ? Theme.crit-text : cell.group == 2 ? Theme.warn-text : Theme.text2;
+                                    overflow: elide;
+                                }
+                                if cell.detail != "": Text {
+                                    text: cell.detail;
+                                    font-size: Theme.font-small;
+                                    color: Theme.text3;
+                                    overflow: elide;
                                 }
                             }
                         }
