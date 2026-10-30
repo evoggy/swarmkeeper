@@ -1,70 +1,93 @@
 # Swarmkeeper
 
-A tool for creating, configuring, and maintaining Crazyflie swarms. For some specific functionality
-there's also an accompanying application.
+A desktop application for setting up, running and maintaining Crazyflie swarms. It runs on
+Linux (x86_64 and arm64).
 
 Still very much work in progress...
 
-## Components
+## Install
 
-### Firmware
-
-Out-of-tree Crazyflie firmware application providing swarm-specific functionality.
-
-**Building:**
-
-```bash
-cd firmware/swarmkeeper-app
-CRAZYFLIE_BASE=<path-to-crazyflie-firmare> make
-```
-
-### Client
-
-Rust desktop application for managing and operating Crazyflie swarms. Built with Slint for the UI and OpenGL for 3D visualization.
-
-**Features:**
-
-- **Unit management** -- connect to a swarm of Crazyflies, monitor status (battery, position, state), upload trajectories, and control flight (takeoff, goto, land, emergency stop)
-- **Several Crazyradios** -- a URI with the radio left empty (`radio:///80/2M/E7E7E7E701`) means any Crazyradio. Connecting the swarm spreads those Crazyflies over all Crazyradios that can be opened, keeping Crazyflies on the same (or a neighbouring) channel on one radio; a number in the URI still pins that radio. The same rules as `cfcli`. The unit list shows the radio each one got
-- **Rechannel** -- spread the swarm over several channels (Setup > Rechannel Swarm...) so that it can use one Crazyradio per channel. Each Crazyflie that moves is reprogrammed, rebooted and found on its new channel before its URI in the swarm file changes
-- **Shared TOC download** -- connecting the swarm downloads each parameter/log TOC that isn't cached yet from one Crazyflie only; the others with the same firmware wait and then connect from the cache. Each Crazyradio connects 8 Crazyflies at a time
-- **Shared swarms** -- sign in to a server that shares swarms (the account menu at the right of the menu bar), and File > Open swarm lists the swarms shared in your organizations next to the swarm files, with the same `<org>/<swarm>` IDs as `cfcli`. A shared swarm opens at its latest revision, or from this computer's copy when the server can't be reached, and a newer revision is offered for reloading
-- **Radio test** -- measure link quality per channel for each Crazyflie in the swarm
-- **3D visualization** -- real-time view of Crazyflie positions, Lighthouse base stations, and Loco anchors with labels
-- **Lighthouse coverage** -- place base stations, configure room dimensions and offsets, and compute/visualize which areas have coverage from 0--4+ base stations. Includes receiver FOV and tilt compensation settings. Load base station geometry from Crazyflie config files
-- **Lighthouse wizard** -- guided step-by-step calibration of Lighthouse base station geometry from measurement samples, with a built-in solver (WIP)
-- **TDoA3 coverage** -- place Loco anchors and compute GDOP / positioning error metrics (GDOP, HDOP, VDOP, per-axis error, sensitivity) with color-mapped voxel visualization
-- **Planning** -- combined scene editor for designing a positioning system. Place Lighthouse base stations, TDoA3 anchors, and opaque geometric obstacles (boxes, cylinders with per-object color). Computes combined LH + TDoA3 coverage with obstacle occlusion. Import scenes from the individual LH/TDoA3 tabs. Save/load planning scenes as YAML
-
-**Install (Linux, x86_64 and arm64):**
+Swarmkeeper is installed from the evoggy APT repository, for Debian and Ubuntu on amd64 and arm64.
+Add the repository's signing key and the repository once:
 
 ```bash
 curl -fsSL https://evoggy.github.io/packages/apt/evoggy.gpg.key \
   | sudo gpg --dearmor -o /usr/share/keyrings/evoggy-archive-keyring.gpg
 echo "deb [arch=amd64,arm64 signed-by=/usr/share/keyrings/evoggy-archive-keyring.gpg] https://evoggy.github.io/packages/apt stable main" \
   | sudo tee /etc/apt/sources.list.d/evoggy.list
-sudo apt update && sudo apt install swarmkeeper
 ```
 
-The package adds Swarmkeeper to the application menu and installs the udev
-rules for the Crazyradio. Started that way, swarms, scenes, plans, log configs,
-journals and recordings are kept in `~/Documents/Swarmkeeper`; run from
-`client/` in a checkout, they stay in the checkout as before.
+Then install it:
 
-**System Dependencies (Linux):**
+```bash
+sudo apt update
+sudo apt install swarmkeeper
+```
+
+New releases come with the rest of the system's updates (`sudo apt update && sudo apt upgrade`).
+
+The `.deb` attached to each [GitHub release](https://github.com/evoggy/swarmkeeper/releases) can
+also be installed directly (`sudo apt install ./swarmkeeper_<version>_amd64.deb`). It adds the
+repository above itself, so later releases arrive the same way.
+
+The package adds Swarmkeeper to the application menu and installs udev rules that give the
+logged-in user access to the Crazyradio and to a Crazyflie over USB; a Crazyradio already plugged
+in picks them up at once. Swarm files and the rest of Swarmkeeper's data are kept in
+`~/Documents/Swarmkeeper`.
+
+## What it does
+
+- **Status** -- the swarm's state at a glance: how many units are ready, on a charger, need
+  attention or don't respond (hover a unit for why), a battery histogram, what needs attention
+  with how to fix it, each Crazyradio's units, link quality and traffic, and the session's events
+- **Units** -- every unit with its status, battery, link, position, decks, radio and firmware,
+  with filters and search. A unit's panel has its details, take off, go to, go home and land,
+  the console, and reboot, sleep, wake up and power off
+- **Swarm actions** -- arm all, land all, a health test, and reboot, sleep, wake up or power off
+  the whole swarm. Land all and Emergency stop are always in the top bar
+- **3D view** -- the units' positions in their status colours, with the base stations and anchors
+- **Plot** -- log the same variables from one or more units onto one time axis, as a chart per
+  variable or one chart for all, and save it as CSV
+- **Several Crazyradios** -- a URI with the radio left empty (`radio:///80/2M/E7E7E7E701`) means
+  any Crazyradio. Connecting the swarm spreads those Crazyflies over all Crazyradios that can be
+  opened, keeping Crazyflies on the same (or a neighbouring) channel on one radio; a number in
+  the URI still pins that radio. The same rules as `cfcli`
+- **Rechannel** -- spread the swarm over several channels, one per Crazyradio by default
+  (Swarm actions > Rechannel swarm...). The dialog shows which units go to which channel, and
+  each move as it happens. Works on a swarm file on this computer, which is updated with the new
+  URIs
+- **Shared TOC download** -- connecting the swarm downloads each parameter/log TOC that isn't
+  cached yet from one Crazyflie only; the others with the same firmware connect from the cache
+- **Connection server** -- other programs (for example `cfcli` or a script) can use the
+  Crazyflies Swarmkeeper is connected to, through
+  [crazyflie-connection-server](https://github.com/evoggy/crazyflie-connection-server), and
+  Swarmkeeper can use a server on another computer. The connection menu in the top bar picks
+  the mode; `CRAZYFLIE_CONNECTION` overrides it. Experimental
+- **Shared swarms** -- sign in to a server that shares swarms (the account menu at the right of
+  the top bar), and Open swarm lists the swarms shared in your organizations next to the swarm
+  files, with the same `<org>/<swarm>` IDs as `cfcli`. A shared swarm opens at its latest
+  revision, or from this computer's copy when the server can't be reached
+- **Settings** -- a light or dark theme, the connection, the account and flight defaults
+
+## Building from source
+
+System dependencies:
 
 ```bash
 # Ubuntu/Debian
-sudo apt install libfontconfig1-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev
+sudo apt install pkg-config libudev-dev libfontconfig1-dev libxkbcommon-dev
 
 # Fedora
-sudo dnf install fontconfig-devel libxcb-devel libxkbcommon-devel
+sudo dnf install pkgconf systemd-devel fontconfig-devel libxcb-devel libxkbcommon-devel
 ```
 
-**Building:**
+Build and run:
 
 ```bash
 cd client
 cargo build
 cargo run
 ```
+
+Run from `client/` in a checkout, the swarms and the other data stay in the checkout instead of
+`~/Documents/Swarmkeeper`.
