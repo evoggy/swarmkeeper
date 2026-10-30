@@ -27,3 +27,6 @@ client/synced/
 
 # Written by the app at run time
 client/journals/
+
+# Firmware releases downloaded by Flash firmware, run from a checkout
+client/firmware/

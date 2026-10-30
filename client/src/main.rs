@@ -23,6 +23,7 @@ mod connection;
 mod console;
 mod coverage;
 mod demo;
+mod firmware;
 mod flashing;
 mod flight;
 mod health;
@@ -138,8 +139,6 @@ async fn main() {
     // original index) is the one the dock's Start logs.
     let plot_selected_index: plot::SelectedIndex = Arc::new(std::sync::Mutex::new(None));
     plot::wire_logging(&ui, &plot_state, swarm_state.clone(), plot_selected_index.clone());
-    // Firmware binary selected in the Flash Firmware dialog (path on disk).
-    let flash_binary: Arc<Mutex<Option<std::path::PathBuf>>> = Arc::new(Mutex::new(None));
     let positioning_source: Arc<Mutex<Option<usize>>> = Arc::new(Mutex::new(None));
     let positioning_data: SharedPositioningData = Arc::new(Mutex::new(PositioningData::default()));
     let goto_targets: SharedGotoTargets = Arc::new(Mutex::new(HashMap::new()));
@@ -243,7 +242,6 @@ async fn main() {
         swarm_state,
         radio_plan,
         plot_selected_index,
-        flash_binary,
         positioning_source,
         positioning_data,
         goto_targets,

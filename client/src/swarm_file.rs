@@ -138,8 +138,6 @@ pub(crate) fn apply_swarm_config(ui: &AppWindow, config: &SwarmConfig) {
             error_message: "".into(),
             identifying: false,
             selftest_passed: false,
-            flash_progress: 0.0,
-            flash_status: "".into(),
             radio: -1,
         })
         .collect();

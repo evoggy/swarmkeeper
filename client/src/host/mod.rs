@@ -15,6 +15,7 @@
 //!   driving this computer's Crazyradios in `shared` and `direct` mode
 //! - [`account`]: signing in to arc.bitcraze.io through a browser on this
 //!   computer, and the credentials kept on disk
+//! - [`releases`]: the Crazyflie firmware releases on GitHub, downloaded
 //!
 //! The rest of the app uses the Crazyflies only through the connection
 //! server's client API (`crazyflie_connection_server::{Client, Crazyflie}`),
@@ -33,6 +34,7 @@ pub mod fs;
 pub mod gamepad;
 pub mod radio_test;
 pub mod radios;
+pub mod releases;
 pub mod server;
 pub mod renderer;
 pub mod rendering;

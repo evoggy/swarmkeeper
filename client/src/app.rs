@@ -28,7 +28,6 @@ pub(crate) struct AppContext {
     pub(crate) swarm_state: SwarmState,
     pub(crate) radio_plan: radios::SharedRadioPlan,
     pub(crate) plot_selected_index: plot::SelectedIndex,
-    pub(crate) flash_binary: Arc<Mutex<Option<std::path::PathBuf>>>,
     pub(crate) positioning_source: Arc<Mutex<Option<usize>>>,
     pub(crate) positioning_data: SharedPositioningData,
     pub(crate) goto_targets: SharedGotoTargets,

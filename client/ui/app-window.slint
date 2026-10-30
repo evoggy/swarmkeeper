@@ -11,6 +11,7 @@ import { PlanningContent, PlanObstacleData, PlanPadData, PlanBoxVolumeData, Plan
 import { SnifferContent, SnifferAnchorRow, SnifferFeedRow, SnifferMatrixRow, SnifferSurveyRow } from "sniffer.slint";
 import { PlotBridge, PlotLine, AxisTick, LegendEntry, ChartData, PlotUnit, LogVarRow, PlotNewConfigDialog } from "plot.slint";
 import { PlotScreen } from "plot-screen.slint";
+import { FlashBridge, FlashDialog, FlashPart, FlashUnit, FlashCell, FlashStep, FlashPhase, FlashCard, FlashState } from "flash.slint";
 import { ViewSettings } from "view-settings.slint";
 import { RechannelDialog, RechannelRow, RcRowState } from "rechannel.slint";
 import { OpenSwarmDialog, SignInDialog, SwarmChoice } from "open-swarm.slint";
@@ -24,7 +25,7 @@ import { StatusScreen, StatusData, HealthTile, GridCell, HistBar, Fact, Attentio
 
 // Re-export the plot globals/structs from the root so the Rust side can reach
 // PlotBridge via `ui.global::<PlotBridge>()` and the generated data structs.
-export { PlotBridge, PlotLine, AxisTick, LegendEntry, ChartData, PlotUnit, LogVarRow, ViewSettings, Theme, Features, SettingsBridge, UnitRow, SwarmSummary, FilterCounts, Health, StatusData, HealthTile, GridCell, HistBar, Fact, AttentionRow, RadioRow, TrafficSeries, ServerRow, ActivityRow }
+export { PlotBridge, PlotLine, AxisTick, LegendEntry, ChartData, PlotUnit, LogVarRow, FlashBridge, FlashPart, FlashUnit, FlashCell, FlashStep, FlashPhase, FlashCard, FlashState, ViewSettings, Theme, Features, SettingsBridge, UnitRow, SwarmSummary, FilterCounts, Health, StatusData, HealthTile, GridCell, HistBar, Fact, AttentionRow, RadioRow, TrafficSeries, ServerRow, ActivityRow }
 export { RechannelRow, RcRowState }
 export { SwarmChoice }
 
@@ -245,15 +246,6 @@ export component AppWindow inherits Window {
     callback set-swarm-param(/* name */ string, /* value */ string, /* persist */ bool);
 
     // Flash firmware (bootloader)
-    in-out property <bool> flash-dialog-visible: false;
-    in-out property <[string]> flash-target-names;
-    in-out property <int> flash-selected-target: 0;
-    in-out property <string> flash-binary-name;       // basename shown to the user
-    in-out property <bool> flash-binary-selected: false;
-    in-out property <bool> flashing: false;            // a flash run is in progress
-    in-out property <string> flash-overall-status;
-    callback flash-select-binary();
-    callback flash-start();
 
     // Rechannel swarm: spread the swarm over several radio channels
     in-out property <bool> rc-dialog-visible: false;
@@ -727,7 +719,10 @@ export component AppWindow inherits Window {
                     sleep => { sysoff-swarm(); }
                     wake-up => { syson-swarm(); }
                     power-off => { confirm-power-off-visible = true; }
-                    flash-firmware => { flash-dialog-visible = true; }
+                    flash-firmware => {
+                        FlashBridge.visible = true;
+                        FlashBridge.opened();
+                    }
                     clear-tlv => { confirm-clear-tlv-visible = true; }
                     rechannel => {
                         rc-dialog-visible = true;
@@ -777,7 +772,10 @@ export component AppWindow inherits Window {
                     }
                     connect-unit(row) => { root.connect-unit(row); }
                     recover-unit(row) => { root.recover-unit(row); }
-                    flash => { root.flash-dialog-visible = true; }
+                    flash => {
+                        FlashBridge.visible = true;
+                        FlashBridge.opened();
+                    }
                 }
 
                 PlotScreen {
@@ -1568,160 +1566,7 @@ export component AppWindow inherits Window {
     }
 
     // Flash firmware dialog
-    if flash-dialog-visible: Rectangle {
-        width: 100%;
-        height: 100%;
-        background: black.transparentize(0.5);
-
-        TouchArea {
-            clicked => { if (!root.flashing) { flash-dialog-visible = false; } }
-        }
-
-        Rectangle {
-            width: 520px;
-            height: 600px;
-            x: (parent.width - self.width) / 2;
-            y: (parent.height - self.height) / 2;
-            background: Palette.background;
-            border-radius: 8px;
-            border-width: 1px;
-            border-color: Palette.border;
-
-            TouchArea {}
-
-            VerticalLayout {
-                padding: 24px;
-                spacing: 12px;
-
-                Text {
-                    text: "Flash Firmware";
-                    font-size: 16px;
-                    font-weight: 600;
-                }
-
-                Text {
-                    text: "Select a target and a binary, then flash every unit in the swarm. stm32-fw / nrf51-fw go to all units at once where their bootloaders take broadcast, else one at a time, and each unit is connected again after. Deck targets are flashed one unit at a time, disconnect the swarm, and only work when Swarmkeeper drives the Crazyradios.";
-                    font-size: 12px;
-                    color: Palette.foreground.transparentize(0.3);
-                    wrap: word-wrap;
-                }
-
-                HorizontalLayout {
-                    spacing: 8px;
-                    Text { text: "Target"; vertical-alignment: center; width: 70px; }
-                    ComboBox {
-                        model: root.flash-target-names;
-                        current-index <=> root.flash-selected-target;
-                        enabled: !root.flashing;
-                        horizontal-stretch: 1;
-                    }
-                }
-
-                HorizontalLayout {
-                    spacing: 8px;
-                    Text { text: "Binary"; vertical-alignment: center; width: 70px; }
-                    Text {
-                        text: root.flash-binary-selected ? root.flash-binary-name : "No file selected";
-                        font-size: 12px;
-                        vertical-alignment: center;
-                        horizontal-stretch: 1;
-                        overflow: elide;
-                        color: root.flash-binary-selected ? Palette.foreground : Palette.foreground.transparentize(0.4);
-                    }
-                    Button {
-                        text: "Select Binary...";
-                        enabled: !root.flashing;
-                        clicked => { flash-select-binary(); }
-                    }
-                }
-
-                // Per-Crazyflie progress list
-                Rectangle {
-                    vertical-stretch: 1;
-                    border-radius: 4px;
-                    border-width: 1px;
-                    border-color: Palette.border;
-                    background: Palette.alternate-background;
-
-                    ScrollView {
-                        VerticalLayout {
-                            padding: 4px;
-                            spacing: 3px;
-
-                            for unit in root.units: Rectangle {
-                                height: 46px;
-                                border-radius: 3px;
-                                background: Palette.background;
-
-                                VerticalLayout {
-                                    padding-left: 8px;
-                                    padding-right: 8px;
-                                    padding-top: 5px;
-                                    padding-bottom: 5px;
-                                    spacing: 4px;
-
-                                    HorizontalLayout {
-                                        spacing: 8px;
-                                        Text {
-                                            text: unit.name;
-                                            font-size: 12px;
-                                            font-weight: 600;
-                                            vertical-alignment: center;
-                                            horizontal-stretch: 1;
-                                            overflow: elide;
-                                        }
-                                        Text {
-                                            text: unit.flash-status == "" ? "Idle" : unit.flash-status;
-                                            font-size: 11px;
-                                            color: Palette.foreground.transparentize(0.3);
-                                            vertical-alignment: center;
-                                        }
-                                    }
-
-                                    Rectangle {
-                                        height: 6px;
-                                        border-radius: 3px;
-                                        background: Palette.border;
-
-                                        Rectangle {
-                                            x: 0px;
-                                            width: parent.width * unit.flash-progress;
-                                            height: parent.height;
-                                            border-radius: 3px;
-                                            background: dodgerblue;
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-
-                Text {
-                    text: root.flash-overall-status;
-                    font-size: 12px;
-                    color: Palette.foreground.transparentize(0.3);
-                    wrap: word-wrap;
-                }
-
-                HorizontalLayout {
-                    alignment: end;
-                    spacing: 8px;
-
-                    Button {
-                        text: "Close";
-                        enabled: !root.flashing;
-                        clicked => { flash-dialog-visible = false; }
-                    }
-                    Button {
-                        text: "Flash Swarm";
-                        enabled: root.flash-binary-selected && !root.flashing;
-                        clicked => { flash-start(); }
-                    }
-                }
-            }
-        }
-    }
+    if FlashBridge.visible: FlashDialog {}
 
     // Rechannel swarm dialog
     if rc-dialog-visible: RechannelDialog {

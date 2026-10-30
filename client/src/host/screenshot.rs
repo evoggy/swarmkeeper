@@ -6,7 +6,8 @@
 //! # SWARMKEEPER_HOVER=<row> (3D view), SWARMKEEPER_SCENE=flying,
 //! # SWARMKEEPER_CLICK="x,y;x,y" (clicks first, to open a menu),
 //! # SWARMKEEPER_PLAN=<scene.yaml> (Planning; default the arena scene in plans/),
-//! # SWARMKEEPER_PLOT=1 (the plot dock with a made-up log)
+//! # SWARMKEEPER_PLOT=1 (the plot dock with a made-up log),
+//! # SWARMKEEPER_FLASH=setup|running|decks (Flash firmware with a made-up release)
 //! ```
 //!
 //! Shows the demo swarm (`crate::demo`) and draws one frame with Slint's
@@ -93,6 +94,9 @@ pub fn take(path: &Path) {
         crate::plot::seed_screenshot(&ui, &plot);
         plot
     });
+    if let Ok(phase) = std::env::var("SWARMKEEPER_FLASH") {
+        crate::flashing::seed_screenshot(&ui, &phase);
+    }
     ui.show().expect("show");
 
     slint::platform::update_timers_and_animations();
